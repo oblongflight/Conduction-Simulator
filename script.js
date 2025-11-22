@@ -107,7 +107,7 @@ function createConductionItem(type = 'path') {
   const name = type === 'path' ? 'Path ' + (conductionItems.length + 1) : 'Shape ' + (conductionItems.length + 1);
   // mode: 'sequential' => animate a traveling dot along the path over durationMs
   // mode: 'concurrent' => show pulses at all points simultaneously
-  const item = { id, name, type, points: [], color: '#ff0000', fill: (type === 'shape'), closed: (type === 'shape'), mode: 'sequential', durationMs: 1200, step: conductionItems.length };
+  const item = { id, name, type, points: [], color: '#ff0000', fill: (type === 'shape'), closed: (type === 'shape'), mode: 'sequential', durationMs: 1200, step: conductionItems.length, rampUpMs: 200, sustainMs: 800, rampDownMs: 200 };
   conductionItems.push(item);
   selectedConductionIndex = conductionItems.length - 1;
   refreshConductionPanel();
@@ -176,9 +176,27 @@ function refreshConductionPanel() {
     const delBtn = document.createElement('button'); delBtn.textContent = '✕'; delBtn.title = 'Delete'; delBtn.onclick = () => { conductionItems.splice(idx,1); if (selectedConductionIndex >= conductionItems.length) selectedConductionIndex = conductionItems.length - 1; refreshConductionPanel(); };
     const selBtn = document.createElement('button'); selBtn.textContent = 'Edit'; selBtn.title = 'Select/Edit'; selBtn.onclick = () => { selectedConductionIndex = idx; conductionEditMode = true; refreshConductionPanel(); };
     const typeSel = document.createElement('select'); const opt1 = document.createElement('option'); opt1.value='path'; opt1.text='Path'; const opt2 = document.createElement('option'); opt2.value='shape'; opt2.text='Shape'; typeSel.appendChild(opt1); typeSel.appendChild(opt2); typeSel.value = it.type; typeSel.onchange = (e) => { it.type = e.target.value; it.fill = it.type === 'shape'; it.closed = it.type === 'shape'; refreshConductionPanel(); };
+
     const colorIn = document.createElement('input'); colorIn.type = 'color'; colorIn.value = it.color; colorIn.oninput = (e) => { it.color = e.target.value; };
 
-    row.appendChild(nameInput); row.appendChild(typeSel); row.appendChild(colorIn); row.appendChild(modeSel); row.appendChild(durInput); row.appendChild(stepInput); row.appendChild(selBtn); row.appendChild(upBtn); row.appendChild(downBtn); row.appendChild(delBtn);
+    // If this is a shape, provide envelope controls: ramp up, sustain, ramp down (ms)
+    let rampUpInput = null, sustainInput = null, rampDownInput = null;
+    if (it.type === 'shape') {
+      rampUpInput = document.createElement('input'); rampUpInput.type = 'number'; rampUpInput.min = '0'; rampUpInput.step = '50'; rampUpInput.value = String(Number(it.rampUpMs) || 200); rampUpInput.title = 'Ramp up time (ms) to full opacity'; rampUpInput.style.width = '84px'; rampUpInput.oninput = (e) => { it.rampUpMs = Math.max(0, Number(e.target.value) || 0); };
+      sustainInput = document.createElement('input'); sustainInput.type = 'number'; sustainInput.min = '0'; sustainInput.step = '50'; sustainInput.value = String(Number(it.sustainMs) || 800); sustainInput.title = 'Sustain time (ms) at full opacity'; sustainInput.style.width = '84px'; sustainInput.oninput = (e) => { it.sustainMs = Math.max(0, Number(e.target.value) || 0); };
+      rampDownInput = document.createElement('input'); rampDownInput.type = 'number'; rampDownInput.min = '0'; rampDownInput.step = '50'; rampDownInput.value = String(Number(it.rampDownMs) || 200); rampDownInput.title = 'Ramp down time (ms) to minimum opacity'; rampDownInput.style.width = '84px'; rampDownInput.oninput = (e) => { it.rampDownMs = Math.max(0, Number(e.target.value) || 0); };
+    }
+
+    row.appendChild(nameInput); row.appendChild(typeSel); row.appendChild(colorIn); row.appendChild(modeSel); row.appendChild(durInput); 
+    if (rampUpInput && sustainInput && rampDownInput) {
+      // labelled wrapper for envelope controls
+      const envWrap = document.createElement('div'); envWrap.style.display = 'flex'; envWrap.style.alignItems = 'center'; envWrap.style.gap = '4px';
+      const rlab = document.createElement('div'); rlab.textContent = '↑/█/↓ (ms)'; rlab.style.fontSize = '11px'; rlab.style.opacity = '0.9'; envWrap.appendChild(rlab);
+      envWrap.appendChild(rampUpInput); envWrap.appendChild(sustainInput); envWrap.appendChild(rampDownInput);
+      row.appendChild(envWrap);
+    }
+
+    row.appendChild(stepInput); row.appendChild(selBtn); row.appendChild(upBtn); row.appendChild(downBtn); row.appendChild(delBtn);
     row.onclick = (e) => { selectedConductionIndex = idx; refreshConductionPanel(); };
     list.appendChild(row);
   });
@@ -195,7 +213,7 @@ function refreshConductionPanel() {
 const CONDUCTION_STORAGE_KEY = 'ecg.conductionItems.v1';
 function saveConductionItems() {
   try {
-    const toSave = conductionItems.map(it => ({ id: it.id, name: it.name, type: it.type, points: it.points.map(p => ({ x: Number(p.x), y: Number(p.y) })), color: it.color, fill: !!it.fill, closed: !!it.closed, mode: it.mode || 'sequential', durationMs: Number(it.durationMs) || 1200, step: Number(it.step) || 0 }));
+    const toSave = conductionItems.map(it => ({ id: it.id, name: it.name, type: it.type, points: it.points.map(p => ({ x: Number(p.x), y: Number(p.y) })), color: it.color, fill: !!it.fill, closed: !!it.closed, mode: it.mode || 'sequential', durationMs: Number(it.durationMs) || 1200, step: Number(it.step) || 0, rampUpMs: Number(it.rampUpMs) || 200, sustainMs: Number(it.sustainMs) || 800, rampDownMs: Number(it.rampDownMs) || 200 }));
     localStorage.setItem(CONDUCTION_STORAGE_KEY, JSON.stringify(toSave));
     // also persist per-step durations
     try { saveConductionStepDurations(); } catch (e) { console.warn('Failed to save step durations', e); }
@@ -210,18 +228,21 @@ function loadConductionItems() {
     if (!Array.isArray(parsed)) return;
     conductionItems = parsed.map((it, idx) => {
       const safePoints = Array.isArray(it.points) ? it.points.map(p => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 })) : [];
-      return {
-        id: it.id || Date.now(),
-        name: it.name || ('Item ' + (idx + 1)),
-        type: it.type === 'shape' ? 'shape' : 'path',
-        points: safePoints,
-        color: it.color || '#ff0000',
-        fill: !!it.fill,
-        closed: !!it.closed,
-        mode: (it.mode === 'concurrent' ? 'concurrent' : 'sequential'),
-        durationMs: Number(it.durationMs) || 1200,
-        step: (typeof it.step === 'number') ? it.step : (typeof it.step === 'string' ? Number(it.step) || 0 : idx)
-      };
+        return {
+          id: it.id || Date.now(),
+          name: it.name || ('Item ' + (idx + 1)),
+          type: it.type === 'shape' ? 'shape' : 'path',
+          points: safePoints,
+          color: it.color || '#ff0000',
+          fill: !!it.fill,
+          closed: !!it.closed,
+          mode: (it.mode === 'concurrent' ? 'concurrent' : 'sequential'),
+          durationMs: Number(it.durationMs) || 1200,
+          step: (typeof it.step === 'number') ? it.step : (typeof it.step === 'string' ? Number(it.step) || 0 : idx),
+          rampUpMs: Number(it.rampUpMs) || 200,
+          sustainMs: Number(it.sustainMs) || 800,
+          rampDownMs: Number(it.rampDownMs) || 200
+        };
     });
     // load per-step durations as well
     try { loadConductionStepDurations(); } catch (e) { /* ignore */ }
@@ -1022,7 +1043,32 @@ function drawConductionOverlay(ix, iy, iw, ih) {
         const it = conductionItems[ix]; if (!it) continue;
         // If this item is a closed shape, show depolarization by fading its fill
         if (it.type === 'shape') {
-          const alpha = Math.max(0, Math.sin(progress * Math.PI)); // 0 -> 1 -> 0 over the step
+          // use per-item envelope timings (ms) to compute alpha within the step
+          const rampUp = Math.max(0, Number(it.rampUpMs) || 0);
+          const sustain = Math.max(0, Number(it.sustainMs) || 0);
+          const rampDown = Math.max(0, Number(it.rampDownMs) || 0);
+          const totalEnvelope = rampUp + sustain + rampDown;
+          let alpha = 0;
+          if (totalEnvelope <= 0) {
+            alpha = Math.max(0, Math.sin(progress * Math.PI));
+          } else {
+            // fit envelope into the available step duration; if envelope is longer than step, scale it down
+            const scale = totalEnvelope > stepDur ? (stepDur / totalEnvelope) : 1.0;
+            const up = rampUp * scale;
+            const sus = sustain * scale;
+            const down = rampDown * scale;
+            const t = Math.max(0, Math.min(stepDur, elapsed)); // elapsed is ms since step start
+            if (t < up) {
+              alpha = t / Math.max(1, up);
+            } else if (t < up + sus) {
+              alpha = 1.0;
+            } else if (t < up + sus + down) {
+              alpha = 1.0 - ((t - up - sus) / Math.max(1, down));
+            } else {
+              alpha = 0.0;
+            }
+            alpha = Math.max(0, Math.min(1, alpha));
+          }
           const rgb = hexToRgb(it.color || '#ff0000');
           push();
           noStroke();
