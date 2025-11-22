@@ -1,0 +1,12 @@
+# Node
+node_modules/
+
+# Snapshots and editor artifacts
+snapshots/
+*.log
+
+# OS
+.DS_Store
+
+# Editor
+*.swp
