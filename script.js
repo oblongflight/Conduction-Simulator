@@ -51,6 +51,9 @@ let selectedConductionIndex = -1;
 let conductionEditMode = false; // when true, clicks edit/add points
 let conductionDragging = { idx: -1, pt: -1 };
 let conductionPanelDiv = null;
+// Pop-out window state for the conduction panel
+let conductionWindow = null;
+let conductionPanelOriginalStyles = null;
 
 // Playback/scheduler state for conduction steps
 let conductionPlayback = {
@@ -295,6 +298,108 @@ function createConductionPanel() {
   refreshConductionPanel();
 }
 
+// Open the conduction panel in a separate window (pop-out)
+function openConductionWindow() {
+  try {
+    if (conductionWindow && !conductionWindow.closed) {
+      conductionWindow.focus();
+      return;
+    }
+    // remember current inline styles so we can restore when docking
+    if (conductionPanelDiv) {
+      conductionPanelOriginalStyles = {
+        position: conductionPanelDiv.style.position || '',
+        right: conductionPanelDiv.style.right || '',
+        top: conductionPanelDiv.style.top || '',
+        width: conductionPanelDiv.style.width || '',
+        maxWidth: conductionPanelDiv.style.maxWidth || '',
+        zIndex: conductionPanelDiv.style.zIndex || '',
+        padding: conductionPanelDiv.style.padding || ''
+      };
+    }
+
+    const w = window.open('', 'ConductionPanel', 'width=520,height=760,left=80,top=80');
+    if (!w) { alert('Popup blocked: please allow popups for this site to open the Conduction panel.'); return; }
+    conductionWindow = w;
+    // write a minimal document shell so appearance is decent
+    try {
+      w.document.title = 'Conduction Paths/Shapes';
+      // inject basic styles to make the panel readable
+      const style = w.document.createElement('style');
+      style.textContent = `body{font-family:Helvetica,Arial,sans-serif;margin:8px;background:#fff;color:#111} .cond-list{max-height:70vh;overflow:auto}`;
+      w.document.head.appendChild(style);
+      // move the existing panel into the new window
+      w.document.body.appendChild(conductionPanelDiv);
+      // adjust positioning to flow in the new document
+      conductionPanelDiv.style.position = '';
+      conductionPanelDiv.style.right = '';
+      conductionPanelDiv.style.top = '';
+      conductionPanelDiv.style.zIndex = '';
+      conductionPanelDiv.style.width = '100%';
+      conductionPanelDiv.style.maxWidth = '100%';
+      conductionPanelDiv.style.padding = '8px';
+      // expose a dock function in the opened window so user can dock back manually
+      const dockBtn = w.document.createElement('button');
+      dockBtn.textContent = 'Dock';
+      dockBtn.style.position = 'fixed'; dockBtn.style.right = '8px'; dockBtn.style.top = '8px'; dockBtn.style.zIndex = 9999;
+      dockBtn.onclick = () => { try { window.dockConductionPanel(); } catch (e) { /* ignore */ } };
+      w.document.body.appendChild(dockBtn);
+    } catch (e) {
+      console.warn('Failed to populate conduction popout window', e);
+      // fallback: if moving fails, close the window reference
+      try { if (conductionWindow && !conductionWindow.closed) conductionWindow.close(); } catch (e) {}
+      conductionWindow = null;
+    }
+    // when the popout is closed by the user, dock the panel back
+    const hookDock = () => { try { dockConductionPanel(); } catch (e) {} };
+    try { w.addEventListener('beforeunload', hookDock); } catch (e) { /* ignore */ }
+  } catch (e) { console.warn('openConductionWindow error', e); }
+}
+
+// Dock the conduction panel back into the main window
+function dockConductionPanel() {
+  try {
+    if (!conductionPanelDiv) return;
+    // if panel already belongs to main document, ensure styles restored
+    if (conductionPanelDiv.ownerDocument === document) {
+      // restore original styles
+      if (conductionPanelOriginalStyles) {
+        conductionPanelDiv.style.position = conductionPanelOriginalStyles.position;
+        conductionPanelDiv.style.right = conductionPanelOriginalStyles.right;
+        conductionPanelDiv.style.top = conductionPanelOriginalStyles.top;
+        conductionPanelDiv.style.width = conductionPanelOriginalStyles.width;
+        conductionPanelDiv.style.maxWidth = conductionPanelOriginalStyles.maxWidth;
+        conductionPanelDiv.style.zIndex = conductionPanelOriginalStyles.zIndex;
+        conductionPanelDiv.style.padding = conductionPanelOriginalStyles.padding;
+      }
+      refreshConductionPanel();
+      if (conductionWindow && !conductionWindow.closed) { try { conductionWindow.close(); } catch (e) {} }
+      conductionWindow = null;
+      return;
+    }
+    // move panel back to main document body
+    document.body.appendChild(conductionPanelDiv);
+    // restore original styles
+    if (conductionPanelOriginalStyles) {
+      conductionPanelDiv.style.position = conductionPanelOriginalStyles.position || 'fixed';
+      conductionPanelDiv.style.right = conductionPanelOriginalStyles.right || '10px';
+      conductionPanelDiv.style.top = conductionPanelOriginalStyles.top || '120px';
+      conductionPanelDiv.style.width = conductionPanelOriginalStyles.width || '900px';
+      conductionPanelDiv.style.maxWidth = conductionPanelOriginalStyles.maxWidth || '80%';
+      conductionPanelDiv.style.zIndex = conductionPanelOriginalStyles.zIndex || 10003;
+      conductionPanelDiv.style.padding = conductionPanelOriginalStyles.padding || '10px';
+    }
+    refreshConductionPanel();
+    if (conductionWindow && !conductionWindow.closed) {
+      try { conductionWindow.close(); } catch (e) { /* ignore */ }
+    }
+    conductionWindow = null;
+  } catch (e) { console.warn('dockConductionPanel error', e); }
+}
+
+// expose docking function to other windows
+window.dockConductionPanel = dockConductionPanel;
+
 function preload() {
   // attempt to load CCS.png if it exists next to the sketch
   try { ccsImg = loadImage('CCS.png'); } catch (e) { ccsImg = null; }
@@ -462,6 +567,21 @@ function setup() {
     constructorToggleBtn.textContent = window.conductionPanelVisible ? 'Hide Constructor' : 'Show Constructor';
   };
   document.body.appendChild(constructorToggleBtn);
+
+  // Pop-out button to open the Conduction panel in its own window
+  const popoutBtn = document.createElement('button');
+  popoutBtn.textContent = 'Pop Out Constructor';
+  popoutBtn.style.position = 'fixed';
+  popoutBtn.style.top = '118px';
+  popoutBtn.style.right = '10px';
+  popoutBtn.style.zIndex = 10002;
+  popoutBtn.style.padding = '8px 10px';
+  popoutBtn.style.fontSize = '13px';
+  popoutBtn.style.borderRadius = '6px';
+  popoutBtn.style.border = '1px solid rgba(0,0,0,0.12)';
+  popoutBtn.style.background = 'white';
+  popoutBtn.onclick = () => { openConductionWindow(); };
+  document.body.appendChild(popoutBtn);
 
   // Global small control panel for QRS width (top-left)
   const globalPanel = document.createElement('div');
