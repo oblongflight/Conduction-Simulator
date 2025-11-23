@@ -54,6 +54,10 @@ let conductionPanelDiv = null;
 // Pop-out window state for the conduction panel
 let conductionWindow = null;
 let conductionPanelOriginalStyles = null;
+// DOM debug container for conduction step/item durations
+let conductionDebugDiv = null;
+let conductionDebugWindow = null;
+let conductionDebugWinDiv = null;
 
 // Playback/scheduler state for conduction steps
 let conductionPlayback = {
@@ -82,9 +86,18 @@ function loadConductionStepDurations() {
     conductionStepDurations = {};
     for (const k of Object.keys(parsed)) {
       const n = Number(k);
-      if (Number.isFinite(n)) conductionStepDurations[n] = Math.max(50, Number(parsed[k]) || 50);
+      if (Number.isFinite(n)) conductionStepDurations[n] = Math.max(10, Number(parsed[k]) || 10);
     }
   } catch (e) { console.warn('Failed to load conduction step durations', e); }
+}
+
+// Clear a per-step override (callable from popup via window.opener)
+function clearConductionStepOverride(step) {
+  try {
+    if (conductionStepDurations && (step in conductionStepDurations)) delete conductionStepDurations[step];
+    try { saveConductionStepDurations(); } catch (e) {}
+    try { refreshConductionPanel(); } catch (e) {}
+  } catch (e) { /* ignore */ }
 }
 
 function computeConductionStepOrder() {
@@ -123,15 +136,27 @@ function refreshConductionPanel() {
   if (list) conductionPanelDiv.removeChild(list);
   list = document.createElement('div');
   list.className = 'cond-list';
-  list.style.overflow = 'auto';
-  list.style.maxHeight = '60vh';
 
   // Precompute step -> max item duration so headers can show a sensible default
   const stepMaxDur = {};
   for (let it of conductionItems) {
     const s = Number(it.step) || 0;
-    const d = Math.max(50, Number(it.durationMs) || 1200);
-    stepMaxDur[s] = Math.max(stepMaxDur[s] || 0, d);
+    // Determine item-driven duration: if item has a binding to an ECG feature use that, else shape totals or durationMs
+    let itemDur = 0;
+    if (it.durationSource) {
+      const fv = getEcgFeatureMs(it.durationSource);
+      itemDur = Math.max(10, fv || 10);
+    } else if (it.type === 'shape') {
+      // allow per-component bindings; use bound values when present
+      const upVal = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : (Number(it.rampUpMs) || 0);
+      const susVal = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : (Number(it.sustainMs) || 0);
+      const downVal = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : (Number(it.rampDownMs) || 0);
+      const shapeTotal = upVal + susVal + downVal;
+      itemDur = Math.max(10, shapeTotal || 0);
+    } else {
+      itemDur = Math.max(10, Number(it.durationMs) || 1200);
+    }
+    stepMaxDur[s] = Math.max(stepMaxDur[s] || 0, itemDur);
   }
 
   const seenSteps = new Set();
@@ -144,13 +169,32 @@ function refreshConductionPanel() {
       const lbl = document.createElement('div'); lbl.textContent = 'Step ' + String(stepVal); lbl.style.fontWeight='700'; hdr.appendChild(lbl);
       const durWrap = document.createElement('div'); durWrap.style.display='flex'; durWrap.style.alignItems='center'; durWrap.style.gap='6px';
       const durLabel = document.createElement('div'); durLabel.textContent = 'Duration (ms)'; durLabel.style.fontSize='12px'; durLabel.style.opacity='0.8';
-      const durInput = document.createElement('input'); durInput.type='number'; durInput.min='50'; durInput.step='50';
-      // default: existing stored per-step duration, else computed max for step, else 1200
-      const defaultDur = (typeof conductionStepDurations[stepVal] === 'number') ? conductionStepDurations[stepVal] : (stepMaxDur[stepVal] || 1200);
-      durInput.value = String(defaultDur);
-      durInput.style.width = '96px'; durInput.title = 'Duration for this step (ms)';
-      durInput.onchange = (e) => { conductionStepDurations[stepVal] = Math.max(50, Number(e.target.value) || 50); try{ saveConductionStepDurations(); }catch(e){} };
-      durWrap.appendChild(durLabel); durWrap.appendChild(durInput); hdr.appendChild(durWrap);
+      // readonly computed driven duration (max of item-driven durations)
+      const computedSpan = document.createElement('div'); computedSpan.style.fontSize = '12px'; computedSpan.style.opacity = '0.85'; computedSpan.style.minWidth = '64px';
+      const computedDur = (stepMaxDur[stepVal] || 1200);
+      computedSpan.textContent = 'computed: ' + String(Math.max(10, computedDur));
+      // optional per-step override input (empty = use computed)
+      const overrideInput = document.createElement('input'); overrideInput.type = 'number'; overrideInput.min = '10'; overrideInput.step = '10'; overrideInput.placeholder = 'auto'; overrideInput.style.width = '84px';
+      const existingOverride = (conductionStepDurations && Number.isFinite(conductionStepDurations[stepVal])) ? conductionStepDurations[stepVal] : '';
+      overrideInput.value = existingOverride !== '' ? String(existingOverride) : '';
+      overrideInput.title = 'Optional per-step override in ms (leave empty to use computed)';
+      overrideInput.onchange = (e) => {
+        const v = e.target.value === '' ? null : Math.max(10, Number(e.target.value) || 10);
+        if (v === null) {
+          if (conductionStepDurations && (stepVal in conductionStepDurations)) delete conductionStepDurations[stepVal];
+        } else {
+          conductionStepDurations[stepVal] = v;
+        }
+        try { saveConductionStepDurations(); } catch (err) {}
+        // update the UI to reflect the change
+        refreshConductionPanel();
+      };
+      const clearBtn = document.createElement('button'); clearBtn.textContent = 'Clear'; clearBtn.title = 'Clear override'; clearBtn.onclick = () => { if (conductionStepDurations && (stepVal in conductionStepDurations)) delete conductionStepDurations[stepVal]; try { saveConductionStepDurations(); } catch (err) {} refreshConductionPanel(); };
+      durWrap.appendChild(durLabel);
+      durWrap.appendChild(computedSpan);
+      durWrap.appendChild(overrideInput);
+      durWrap.appendChild(clearBtn);
+      hdr.appendChild(durWrap);
       list.appendChild(hdr);
     }
 
@@ -169,9 +213,35 @@ function refreshConductionPanel() {
     modeSel.style.width = '120px';
     modeSel.title = 'Playback mode: sequential (travels) or concurrent (all)';
     modeSel.onchange = (e) => { it.mode = e.target.value; refreshConductionPanel(); };
-    // duration (ms) for traversal
-    const durInput = document.createElement('input'); durInput.type = 'number'; durInput.min = '50'; durInput.step = '50'; durInput.value = String(it.durationMs || 1200); durInput.title = 'Duration (ms) for traversal (per-item; overridden by per-step duration)';
-    durInput.style.width = '64px'; durInput.oninput = (e) => { const v = Number(e.target.value) || 0; it.durationMs = Math.max(50, v); };
+    // duration (ms) for traversal (paths editable; shapes driven by envelope totals)
+    let durInput = null;
+    let durSpan = null;
+    if (it.type === 'shape') {
+      durSpan = document.createElement('div');
+      // compute envelope totals using per-component bindings when present
+      const totUp = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : (Number(it.rampUpMs) || 0);
+      const totSus = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : (Number(it.sustainMs) || 0);
+      const totDown = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : (Number(it.rampDownMs) || 0);
+      const total = totUp + totSus + totDown;
+      // if bound to a single ECG feature for overall duration, show that value instead
+      if (it.durationSource) {
+        const fv = getEcgFeatureMs(it.durationSource) || 0;
+        durSpan.textContent = String(Math.max(10, fv));
+      } else {
+        durSpan.textContent = String(Math.max(10, total));
+      }
+      durSpan.title = 'Shape total duration (driven by envelope components)';
+      durSpan.style.minWidth = '64px';
+    } else {
+      durInput = document.createElement('input'); durInput.type = 'number'; durInput.min = '10'; durInput.step = '10'; durInput.value = String(it.durationMs || 1200); durInput.title = 'Duration (ms) for traversal (per-item)';
+      durInput.style.width = '64px'; durInput.oninput = (e) => { const v = Number(e.target.value) || 0; it.durationMs = Math.max(10, v); };
+      // if bound to ECG feature, show a readonly span instead and hide editable input
+      if (it.durationSource) {
+        const fv = getEcgFeatureMs(it.durationSource) || 0;
+        durSpan = document.createElement('div'); durSpan.textContent = String(Math.max(10, fv)); durSpan.style.minWidth = '64px'; durSpan.title = 'Duration driven from ECG feature';
+        durInput.style.display = 'none';
+      }
+    }
     // step number: items with same step run concurrently; steps advance in order
     const stepInput = document.createElement('input'); stepInput.type = 'number'; stepInput.min = '0'; stepInput.step = '1'; stepInput.value = String(typeof it.step === 'number' ? it.step : 0); stepInput.title = 'Step: items with same step run concurrently'; stepInput.style.width = '56px'; stepInput.oninput = (e) => { const v = Math.max(0, Math.floor(Number(e.target.value) || 0)); it.step = v; refreshConductionPanel(); };
     const upBtn = document.createElement('button'); upBtn.textContent = '↑'; upBtn.title = 'Move up'; upBtn.onclick = () => { if (idx > 0) { conductionItems.splice(idx-1, 0, conductionItems.splice(idx,1)[0]); selectedConductionIndex = idx-1; refreshConductionPanel(); } };
@@ -182,21 +252,48 @@ function refreshConductionPanel() {
 
     const colorIn = document.createElement('input'); colorIn.type = 'color'; colorIn.value = it.color; colorIn.oninput = (e) => { it.color = e.target.value; };
 
-    // If this is a shape, provide envelope controls: ramp up, sustain, ramp down (ms)
-    let rampUpInput = null, sustainInput = null, rampDownInput = null;
+    row.appendChild(nameInput); row.appendChild(typeSel); row.appendChild(colorIn); row.appendChild(modeSel);
+    if (durInput) row.appendChild(durInput); else if (durSpan) row.appendChild(durSpan);
+    // binding select to tie this item's duration to an ECG feature
+    const bindSel = document.createElement('select');
+    const addOpt = (val, text) => { const o = document.createElement('option'); o.value = val; o.text = text; bindSel.appendChild(o); };
+    addOpt('', 'Manual'); addOpt('P', 'P wave'); addOpt('PR', 'PR interval'); addOpt('QRS', 'QRS'); addOpt('QT', 'QT interval'); addOpt('T', 'T wave'); addOpt('TP', 'TP interval');
+    bindSel.value = it.durationSource || '';
+    bindSel.title = 'Bind this item\'s duration to an ECG feature';
+    bindSel.onchange = (e) => { it.durationSource = e.target.value || null; refreshConductionPanel(); };
+    row.appendChild(bindSel);
+    // If this is a shape, provide envelope controls stacked vertically: ramp up, sustain, ramp down (ms)
     if (it.type === 'shape') {
-      rampUpInput = document.createElement('input'); rampUpInput.type = 'number'; rampUpInput.min = '0'; rampUpInput.step = '50'; rampUpInput.value = String(Number(it.rampUpMs) || 200); rampUpInput.title = 'Ramp up time (ms) to full opacity'; rampUpInput.style.width = '84px'; rampUpInput.oninput = (e) => { it.rampUpMs = Math.max(0, Number(e.target.value) || 0); };
-      sustainInput = document.createElement('input'); sustainInput.type = 'number'; sustainInput.min = '0'; sustainInput.step = '50'; sustainInput.value = String(Number(it.sustainMs) || 800); sustainInput.title = 'Sustain time (ms) at full opacity'; sustainInput.style.width = '84px'; sustainInput.oninput = (e) => { it.sustainMs = Math.max(0, Number(e.target.value) || 0); };
-      rampDownInput = document.createElement('input'); rampDownInput.type = 'number'; rampDownInput.min = '0'; rampDownInput.step = '50'; rampDownInput.value = String(Number(it.rampDownMs) || 200); rampDownInput.title = 'Ramp down time (ms) to minimum opacity'; rampDownInput.style.width = '84px'; rampDownInput.oninput = (e) => { it.rampDownMs = Math.max(0, Number(e.target.value) || 0); };
-    }
-
-    row.appendChild(nameInput); row.appendChild(typeSel); row.appendChild(colorIn); row.appendChild(modeSel); row.appendChild(durInput); 
-    if (rampUpInput && sustainInput && rampDownInput) {
-      // labelled wrapper for envelope controls
-      const envWrap = document.createElement('div'); envWrap.style.display = 'flex'; envWrap.style.alignItems = 'center'; envWrap.style.gap = '4px';
-      const rlab = document.createElement('div'); rlab.textContent = '↑/█/↓ (ms)'; rlab.style.fontSize = '11px'; rlab.style.opacity = '0.9'; envWrap.appendChild(rlab);
-      envWrap.appendChild(rampUpInput); envWrap.appendChild(sustainInput); envWrap.appendChild(rampDownInput);
-      row.appendChild(envWrap);
+      const envCol = document.createElement('div'); envCol.style.display = 'flex'; envCol.style.flexDirection = 'column'; envCol.style.gap = '4px'; envCol.style.marginLeft = '8px'; envCol.style.minWidth = '220px';
+      const makeRow = (labelText, initial, onchange, bindingKey) => {
+        const r = document.createElement('div'); r.style.display = 'flex'; r.style.alignItems = 'center'; r.style.gap = '6px';
+        const lab = document.createElement('div'); lab.textContent = labelText; lab.style.width = '70px'; lab.style.fontSize = '12px';
+        const inp = document.createElement('input'); inp.type = 'number'; inp.min = '0'; inp.step = '10'; inp.value = String(Number(initial) || 0); inp.style.width = '100px'; inp.oninput = (e) => { onchange(Number(e.target.value) || 0); };
+        // binding select for this component
+        const bind = document.createElement('select'); bind.style.width = '90px';
+        const addOptComp = (val, text) => { const o = document.createElement('option'); o.value = val; o.text = text; bind.appendChild(o); };
+        addOptComp('', 'Manual'); addOptComp('P', 'P wave'); addOptComp('PR', 'PR interval'); addOptComp('QRS', 'QRS'); addOptComp('QT', 'QT interval'); addOptComp('T', 'T wave'); addOptComp('TP', 'TP interval');
+        // initialize binding value from item
+        if (bindingKey && it[bindingKey]) bind.value = it[bindingKey]; else bind.value = '';
+        bind.title = 'Bind this component\'s duration to an ECG feature';
+        bind.onchange = (e) => { if (bindingKey) it[bindingKey] = e.target.value || null; refreshConductionPanel(); };
+        // resolved-ms tooltip span (shows binding -> ms or numeric ms)
+        const resolved = document.createElement('div'); resolved.style.fontSize = '11px'; resolved.style.opacity = '0.85'; resolved.style.width = '100px'; resolved.style.textAlign = 'right';
+        // initialize resolved text
+        try {
+          const numericKey = bindingKey ? bindingKey.replace('Source', 'Ms') : null;
+          const boundKey = bindingKey ? it[bindingKey] : null;
+          let rv = 0;
+          if (boundKey) rv = getEcgFeatureMs(boundKey) || 0; else if (numericKey) rv = Number(it[numericKey]) || 0; else rv = Number(initial) || 0;
+          resolved.textContent = boundKey ? (boundKey + ' → ' + String(Math.max(0, rv)) + ' ms') : (String(Math.max(0, rv)) + ' ms');
+        } catch (e) { resolved.textContent = '' }
+        r.appendChild(lab); r.appendChild(inp); r.appendChild(bind); r.appendChild(resolved); return r;
+      };
+      const upRow = makeRow('Ramp Up', it.rampUpMs || 200, (v) => { it.rampUpMs = Math.max(0, v); refreshConductionPanel(); }, 'rampUpSource');
+      const susRow = makeRow('Sustain', it.sustainMs || 800, (v) => { it.sustainMs = Math.max(0, v); refreshConductionPanel(); }, 'sustainSource');
+      const downRow = makeRow('Ramp Down', it.rampDownMs || 200, (v) => { it.rampDownMs = Math.max(0, v); refreshConductionPanel(); }, 'rampDownSource');
+      envCol.appendChild(upRow); envCol.appendChild(susRow); envCol.appendChild(downRow);
+      row.appendChild(envCol);
     }
 
     row.appendChild(stepInput); row.appendChild(selBtn); row.appendChild(upBtn); row.appendChild(downBtn); row.appendChild(delBtn);
@@ -216,7 +313,7 @@ function refreshConductionPanel() {
 const CONDUCTION_STORAGE_KEY = 'ecg.conductionItems.v1';
 function saveConductionItems() {
   try {
-    const toSave = conductionItems.map(it => ({ id: it.id, name: it.name, type: it.type, points: it.points.map(p => ({ x: Number(p.x), y: Number(p.y) })), color: it.color, fill: !!it.fill, closed: !!it.closed, mode: it.mode || 'sequential', durationMs: Number(it.durationMs) || 1200, step: Number(it.step) || 0, rampUpMs: Number(it.rampUpMs) || 200, sustainMs: Number(it.sustainMs) || 800, rampDownMs: Number(it.rampDownMs) || 200 }));
+    const toSave = conductionItems.map(it => ({ id: it.id, name: it.name, type: it.type, points: it.points.map(p => ({ x: Number(p.x), y: Number(p.y) })), color: it.color, fill: !!it.fill, closed: !!it.closed, mode: it.mode || 'sequential', durationMs: Number(it.durationMs) || 1200, step: Number(it.step) || 0, rampUpMs: Number(it.rampUpMs) || 200, sustainMs: Number(it.sustainMs) || 800, rampDownMs: Number(it.rampDownMs) || 200, durationSource: it.durationSource || null, rampUpSource: it.rampUpSource || null, sustainSource: it.sustainSource || null, rampDownSource: it.rampDownSource || null }));
     localStorage.setItem(CONDUCTION_STORAGE_KEY, JSON.stringify(toSave));
     // also persist per-step durations
     try { saveConductionStepDurations(); } catch (e) { console.warn('Failed to save step durations', e); }
@@ -245,6 +342,11 @@ function loadConductionItems() {
           rampUpMs: Number(it.rampUpMs) || 200,
           sustainMs: Number(it.sustainMs) || 800,
           rampDownMs: Number(it.rampDownMs) || 200
+        ,
+          durationSource: it.durationSource || null,
+          rampUpSource: it.rampUpSource || null,
+          sustainSource: it.sustainSource || null,
+          rampDownSource: it.rampDownSource || null
         };
     });
     // load per-step durations as well
@@ -293,9 +395,29 @@ function createConductionPanel() {
   conductionPanelDiv.appendChild(pointRow);
 
   document.body.appendChild(conductionPanelDiv);
-  // respect visibility flag (button may have been created earlier)
-  if (typeof window !== 'undefined' && window.conductionPanelVisible === false) conductionPanelDiv.style.display = 'none';
   refreshConductionPanel();
+}
+
+// Helper: return ECG feature duration in ms for binding keys
+function getEcgFeatureMs(key) {
+  if (!key) return null;
+  switch (String(key)) {
+    case 'P': return Math.max(1, Math.round((pDuration || 0) * 1000));
+    case 'PR': return Math.max(1, Math.round((prDur || 0) * 1000));
+    case 'QRS': return Math.max(1, Math.round(((qDur || 0) + (rDur || 0) + (sDur || 0)) * (qrsWidth || 1) * 1000));
+    case 'QT': return Math.max(1, Math.round(qtIntervalMs || 0));
+    case 'T': return Math.max(1, Math.round((tDuration || 0) * 1000));
+    case 'TP': {
+      // TP = interval from end of T to next P. TP = RR - (PR + QT)
+      const hr = (heartRate && Number.isFinite(heartRate)) ? Number(heartRate) : 60;
+      const beatSec = 60.0 / hr;
+      const prSec = (prDur || 0);
+      const qtSec = (qtIntervalMs || 0) / 1000.0;
+      const tpMs = Math.round((beatSec - (prSec + qtSec)) * 1000);
+      return Math.max(1, tpMs);
+    }
+    default: return null;
+  }
 }
 
 // Open the conduction panel in a separate window (pop-out)
@@ -326,7 +448,7 @@ function openConductionWindow() {
       w.document.title = 'Conduction Paths/Shapes';
       // inject basic styles to make the panel readable
       const style = w.document.createElement('style');
-      style.textContent = `body{font-family:Helvetica,Arial,sans-serif;margin:8px;background:#fff;color:#111} .cond-list{max-height:70vh;overflow:auto}`;
+      style.textContent = `body{font-family:Helvetica,Arial,sans-serif;margin:8px;background:#fff;color:#111}`;
       w.document.head.appendChild(style);
       // move the existing panel into the new window
       w.document.body.appendChild(conductionPanelDiv);
@@ -344,6 +466,9 @@ function openConductionWindow() {
       dockBtn.style.position = 'fixed'; dockBtn.style.right = '8px'; dockBtn.style.top = '8px'; dockBtn.style.zIndex = 9999;
       dockBtn.onclick = () => { try { window.dockConductionPanel(); } catch (e) { /* ignore */ } };
       w.document.body.appendChild(dockBtn);
+        // regenerate the panel contents now that it lives in the popup so
+        // inputs are recreated with the current attributes/handlers (10ms step/min)
+        try { refreshConductionPanel(); } catch (e) { /* ignore */ }
     } catch (e) {
       console.warn('Failed to populate conduction popout window', e);
       // fallback: if moving fails, close the window reference
@@ -547,32 +672,13 @@ function setup() {
   };
   document.body.appendChild(viewToggleBtn);
 
-  // Button to show/hide Conduction Path Constructor panel
-  // Keep a simple in-memory flag so the button works even if the panel is created later
-  window.conductionPanelVisible = true;
-  const constructorToggleBtn = document.createElement('button');
-  constructorToggleBtn.textContent = 'Hide Constructor';
-  constructorToggleBtn.style.position = 'fixed';
-  constructorToggleBtn.style.top = '82px';
-  constructorToggleBtn.style.right = '10px';
-  constructorToggleBtn.style.zIndex = 10002;
-  constructorToggleBtn.style.padding = '8px 10px';
-  constructorToggleBtn.style.fontSize = '13px';
-  constructorToggleBtn.style.borderRadius = '6px';
-  constructorToggleBtn.style.border = '1px solid rgba(0,0,0,0.12)';
-  constructorToggleBtn.style.background = 'white';
-  constructorToggleBtn.onclick = () => {
-    window.conductionPanelVisible = !window.conductionPanelVisible;
-    if (conductionPanelDiv) conductionPanelDiv.style.display = window.conductionPanelVisible ? '' : 'none';
-    constructorToggleBtn.textContent = window.conductionPanelVisible ? 'Hide Constructor' : 'Show Constructor';
-  };
-  document.body.appendChild(constructorToggleBtn);
+  // The constructor panel is always visible; removed the hide/show toggle per request.
 
   // Pop-out button to open the Conduction panel in its own window
   const popoutBtn = document.createElement('button');
   popoutBtn.textContent = 'Pop Out Constructor';
   popoutBtn.style.position = 'fixed';
-  popoutBtn.style.top = '118px';
+  popoutBtn.style.top = '84px';
   popoutBtn.style.right = '10px';
   popoutBtn.style.zIndex = 10002;
   popoutBtn.style.padding = '8px 10px';
@@ -613,9 +719,9 @@ function setup() {
   qdurRow.style.display = 'flex'; qdurRow.style.alignItems = 'center'; qdurRow.style.gap = '8px';
   const qdurInput = document.createElement('input');
   qdurInput.type = 'range'; qdurInput.min = '0.005'; qdurInput.max = '0.08'; qdurInput.step = '0.001'; qdurInput.value = String(qDur);
-  qdurInput.oninput = (e) => { qDur = Number(e.target.value); qdurVal.textContent = qDur.toFixed(3); };
+  qdurInput.oninput = (e) => { qDur = Number(e.target.value); qdurVal.textContent = String(Math.round(qDur * 1000)) + ' ms'; refreshConductionPanel(); };
   qdurInput.style.flex = '1';
-  const qdurVal = document.createElement('div'); qdurVal.textContent = qDur.toFixed(3); qdurVal.style.width = '56px'; qdurVal.style.textAlign = 'right';
+  const qdurVal = document.createElement('div'); qdurVal.textContent = String(Math.round(qDur * 1000)) + ' ms'; qdurVal.style.width = '56px'; qdurVal.style.textAlign = 'right';
   qdurRow.appendChild(qdurInput); qdurRow.appendChild(qdurVal); globalPanel.appendChild(qdurRow);
 
   // R duration slider (seconds)
@@ -623,9 +729,9 @@ function setup() {
   rdurRow.style.display = 'flex'; rdurRow.style.alignItems = 'center'; rdurRow.style.gap = '8px';
   const rdurInput = document.createElement('input');
   rdurInput.type = 'range'; rdurInput.min = '0.003'; rdurInput.max = '0.06'; rdurInput.step = '0.001'; rdurInput.value = String(rDur);
-  rdurInput.oninput = (e) => { rDur = Number(e.target.value); rdurVal.textContent = rDur.toFixed(3); };
+  rdurInput.oninput = (e) => { rDur = Number(e.target.value); rdurVal.textContent = String(Math.round(rDur * 1000)) + ' ms'; refreshConductionPanel(); };
   rdurInput.style.flex = '1';
-  const rdurVal = document.createElement('div'); rdurVal.textContent = rDur.toFixed(3); rdurVal.style.width = '56px'; rdurVal.style.textAlign = 'right';
+  const rdurVal = document.createElement('div'); rdurVal.textContent = String(Math.round(rDur * 1000)) + ' ms'; rdurVal.style.width = '56px'; rdurVal.style.textAlign = 'right';
   rdurRow.appendChild(rdurInput); rdurRow.appendChild(rdurVal); globalPanel.appendChild(rdurRow);
 
   // S duration slider (seconds)
@@ -633,10 +739,32 @@ function setup() {
   sdurRow.style.display = 'flex'; sdurRow.style.alignItems = 'center'; sdurRow.style.gap = '8px';
   const sdurInput = document.createElement('input');
   sdurInput.type = 'range'; sdurInput.min = '0.005'; sdurInput.max = '0.12'; sdurInput.step = '0.001'; sdurInput.value = String(sDur);
-  sdurInput.oninput = (e) => { sDur = Number(e.target.value); sdurVal.textContent = sDur.toFixed(3); };
+  sdurInput.oninput = (e) => { sDur = Number(e.target.value); sdurVal.textContent = String(Math.round(sDur * 1000)) + ' ms'; refreshConductionPanel(); };
   sdurInput.style.flex = '1';
-  const sdurVal = document.createElement('div'); sdurVal.textContent = sDur.toFixed(3); sdurVal.style.width = '56px'; sdurVal.style.textAlign = 'right';
+  const sdurVal = document.createElement('div'); sdurVal.textContent = String(Math.round(sDur * 1000)) + ' ms'; sdurVal.style.width = '56px'; sdurVal.style.textAlign = 'right';
   sdurRow.appendChild(sdurInput); sdurRow.appendChild(sdurVal); globalPanel.appendChild(sdurRow);
+
+  // P duration slider (seconds)
+  const pdurRow = document.createElement('div');
+  pdurRow.style.display = 'flex'; pdurRow.style.alignItems = 'center'; pdurRow.style.gap = '8px';
+  const pdurInput = document.createElement('input');
+  pdurInput.type = 'range'; pdurInput.min = '0.01'; pdurInput.max = '0.20'; pdurInput.step = '0.005'; pdurInput.value = String(pDuration);
+  pdurInput.oninput = (e) => { pDuration = Number(e.target.value); pdurVal.textContent = String(Math.round(pDuration * 1000)) + ' ms'; refreshConductionPanel(); };
+  pdurInput.style.flex = '1';
+  const pdurVal = document.createElement('div'); pdurVal.textContent = String(Math.round(pDuration * 1000)) + ' ms'; pdurVal.style.width = '56px'; pdurVal.style.textAlign = 'right';
+  const pdurLab = document.createElement('div'); pdurLab.textContent = 'P'; pdurLab.style.width = '18px'; pdurRow.appendChild(pdurLab);
+  pdurRow.appendChild(pdurInput); pdurRow.appendChild(pdurVal); globalPanel.appendChild(pdurRow);
+
+  // Heart rate slider (bpm)
+  const hrRow = document.createElement('div');
+  hrRow.style.display = 'flex'; hrRow.style.alignItems = 'center'; hrRow.style.gap = '8px';
+  const hrInput = document.createElement('input');
+  hrInput.type = 'range'; hrInput.min = '30'; hrInput.max = '180'; hrInput.step = '1'; hrInput.value = String(heartRate || 70);
+  hrInput.style.flex = '1';
+  const hrVal = document.createElement('div'); hrVal.textContent = String(Math.round(heartRate || 70)) + ' bpm'; hrVal.style.width = '80px'; hrVal.style.textAlign = 'right';
+  const hrLab = document.createElement('div'); hrLab.textContent = 'HR'; hrLab.style.width = '18px';
+  hrInput.oninput = (e) => { heartRate = Number(e.target.value) || 60; hrVal.textContent = String(Math.round(heartRate)) + ' bpm'; refreshConductionPanel(); };
+  hrRow.appendChild(hrLab); hrRow.appendChild(hrInput); hrRow.appendChild(hrVal); globalPanel.appendChild(hrRow);
 
   // Global amplitude sliders for P/Q/R/S/T
   function addAmpRow(label, min, max, step, initial, oninput) {
@@ -657,19 +785,53 @@ function setup() {
   addAmpRow('T', -5.0, 5.0, 0.01, gT, (v) => { gT = v; });
 
   // PR interval (seconds) and QT interval (ms) controls
+  // T duration slider (seconds)
+  const tdurRow = document.createElement('div');
+  tdurRow.style.display = 'flex'; tdurRow.style.alignItems = 'center'; tdurRow.style.gap = '8px';
+  const tdurInput = document.createElement('input');
+  tdurInput.type = 'range'; tdurInput.min = '0.02'; tdurInput.max = '0.50'; tdurInput.step = '0.01'; tdurInput.value = String(tDuration);
+  tdurInput.oninput = (e) => { tDuration = Number(e.target.value); tdurVal.textContent = String(Math.round(tDuration * 1000)) + ' ms'; refreshConductionPanel(); };
+  tdurInput.style.flex = '1';
+  const tdurVal = document.createElement('div'); tdurVal.textContent = String(Math.round(tDuration * 1000)) + ' ms'; tdurVal.style.width = '56px'; tdurVal.style.textAlign = 'right';
+  const tdurLab = document.createElement('div'); tdurLab.textContent = 'T'; tdurLab.style.width = '18px'; tdurRow.appendChild(tdurLab);
+  tdurRow.appendChild(tdurInput); tdurRow.appendChild(tdurVal); globalPanel.appendChild(tdurRow);
+
   const prRow = document.createElement('div'); prRow.style.display = 'flex'; prRow.style.alignItems = 'center'; prRow.style.gap = '8px';
   const prInput = document.createElement('input'); prInput.type = 'range'; prInput.min = '0.06'; prInput.max = '0.30'; prInput.step = '0.005'; prInput.value = String(prDur);
-  prInput.style.flex = '1'; const prVal = document.createElement('div'); prVal.textContent = prDur.toFixed(3); prVal.style.width = '56px'; prVal.style.textAlign = 'right';
-  prInput.oninput = (e) => { prDur = Number(e.target.value); prVal.textContent = prDur.toFixed(3); };
+  prInput.style.flex = '1'; const prVal = document.createElement('div'); prVal.textContent = String(Math.round(prDur * 1000)) + ' ms'; prVal.style.width = '56px'; prVal.style.textAlign = 'right';
+  prInput.oninput = (e) => { prDur = Number(e.target.value); prVal.textContent = String(Math.round(prDur * 1000)) + ' ms'; refreshConductionPanel(); };
   const prLab = document.createElement('div'); prLab.textContent = 'PR'; prLab.style.width = '18px'; prRow.appendChild(prLab); prRow.appendChild(prInput); prRow.appendChild(prVal); globalPanel.appendChild(prRow);
 
   const qtRow = document.createElement('div'); qtRow.style.display = 'flex'; qtRow.style.alignItems = 'center'; qtRow.style.gap = '8px';
   const qtInput = document.createElement('input'); qtInput.type = 'range'; qtInput.min = '200'; qtInput.max = '600'; qtInput.step = '1'; qtInput.value = String(qtIntervalMs);
   qtInput.style.flex = '1'; const qtVal = document.createElement('div'); qtVal.textContent = String(qtIntervalMs); qtVal.style.width = '56px'; qtVal.style.textAlign = 'right';
-  qtInput.oninput = (e) => { qtIntervalMs = Number(e.target.value); qtVal.textContent = String(qtIntervalMs); };
+  qtInput.oninput = (e) => { qtIntervalMs = Number(e.target.value); qtVal.textContent = String(qtIntervalMs); refreshConductionPanel(); };
   const qtLab = document.createElement('div'); qtLab.textContent = 'QTms'; qtLab.style.width = '18px'; qtRow.appendChild(qtLab); qtRow.appendChild(qtInput); qtRow.appendChild(qtVal); globalPanel.appendChild(qtRow);
 
   document.body.appendChild(globalPanel);
+  // create conduction debug box (placed inside the global control panel)
+  try {
+    conductionDebugDiv = document.createElement('div');
+    conductionDebugDiv.style.padding = '6px 8px';
+    conductionDebugDiv.style.background = 'rgba(255,255,255,0.97)';
+    conductionDebugDiv.style.border = '1px solid rgba(0,0,0,0.06)';
+    conductionDebugDiv.style.borderRadius = '6px';
+    conductionDebugDiv.style.fontSize = '12px';
+    conductionDebugDiv.style.maxWidth = '360px';
+    conductionDebugDiv.style.whiteSpace = 'normal';
+    conductionDebugDiv.textContent = 'Conduction debug: awaiting playback...';
+    // position fixed so it's not occluded or scrolled away; anchor below globalPanel
+    try {
+      const rect = globalPanel.getBoundingClientRect();
+      conductionDebugDiv.style.position = 'fixed';
+      conductionDebugDiv.style.left = String(Math.max(6, Math.round(rect.left))) + 'px';
+      conductionDebugDiv.style.top = String(Math.max(6, Math.round(rect.bottom + 8))) + 'px';
+      conductionDebugDiv.style.zIndex = 10004;
+    } catch (e) {
+      conductionDebugDiv.style.position = 'fixed'; conductionDebugDiv.style.left = '10px'; conductionDebugDiv.style.top = '220px'; conductionDebugDiv.style.zIndex = 10004;
+    }
+    document.body.appendChild(conductionDebugDiv);
+  } catch (e) { conductionDebugDiv = null; }
 
   // Open control panel in a new window
   const openBtn = document.createElement('button');
@@ -687,6 +849,49 @@ function setup() {
     window.open('control.html', '_blank', 'width=420,height=320');
   };
   document.body.appendChild(openBtn);
+
+  // Button to open the conduction debug popup window
+  const debugPopBtn = document.createElement('button');
+  debugPopBtn.textContent = 'Open Debug Popup';
+  debugPopBtn.style.position = 'fixed';
+  debugPopBtn.style.top = '46px';
+  debugPopBtn.style.right = '150px';
+  debugPopBtn.style.zIndex = 10002;
+  debugPopBtn.style.padding = '6px 8px';
+  debugPopBtn.style.fontSize = '12px';
+  debugPopBtn.style.borderRadius = '6px';
+  debugPopBtn.style.border = '1px solid rgba(0,0,0,0.12)';
+  debugPopBtn.style.background = 'white';
+  debugPopBtn.onclick = () => { openConductionDebugWindow(); };
+  document.body.appendChild(debugPopBtn);
+
+function openConductionDebugWindow() {
+  try {
+    if (conductionDebugWindow && !conductionDebugWindow.closed) {
+      conductionDebugWindow.focus();
+      return;
+    }
+    const w = window.open('', 'ConductionDebug', 'width=360,height=260,left=120,top=120');
+    if (!w) { alert('Popup blocked: allow popups to open the debug window.'); return; }
+    conductionDebugWindow = w;
+    conductionDebugWinDiv = null;
+    try {
+      w.document.title = 'Conduction Debug';
+      const style = w.document.createElement('style');
+      style.textContent = 'body{font-family:Helvetica,Arial,sans-serif;margin:8px;background:#fff;color:#111} .title{font-weight:700;margin-bottom:6px} .item{margin-bottom:4px}';
+      w.document.head.appendChild(style);
+      const closeBtn = w.document.createElement('button'); closeBtn.textContent = 'Close'; closeBtn.style.float = 'right'; closeBtn.onclick = () => { try { w.close(); } catch (e) {} };
+      w.document.body.appendChild(closeBtn);
+      // create initial container so popup isn't blank
+      conductionDebugWinDiv = w.document.createElement('div');
+      conductionDebugWinDiv.style.marginTop = '6px';
+      conductionDebugWinDiv.textContent = 'Conduction debug: awaiting playback...';
+      w.document.body.appendChild(conductionDebugWinDiv);
+    } catch (e) { /* ignore */ }
+    // when popup closed, clear refs
+    try { w.addEventListener('beforeunload', () => { conductionDebugWindow = null; conductionDebugWinDiv = null; }); } catch (e) {}
+  } catch (e) { console.warn('openConductionDebugWindow error', e); }
+}
 
   // create BroadcastChannel for controls
   try {
@@ -838,22 +1043,29 @@ function draw() {
     if (singleLeadView) {
       // Single-lead layout: CCS image on left half, ECG tracing on right half
       const halfW = Math.floor(width / 2);
-      // draw CCS image on left half, centered and scaled
+      // draw CCS image on left half, centered and scaled (or reserve left half if no image)
+      push();
+      imageMode(CORNER);
+      const imgW = halfW;
+      const imgH = height;
+      let iw = imgW;
+      let ih = imgH;
+      let ix = 0;
+      let iy = 0;
       if (ccsImg) {
-        push();
-        imageMode(CORNER);
-        const imgW = halfW;
-        const imgH = height;
         const s = Math.min(imgW / ccsImg.width, imgH / ccsImg.height);
-        const iw = ccsImg.width * s;
-        const ih = ccsImg.height * s;
-        const ix = Math.round((imgW - iw) / 2);
-        const iy = Math.round((imgH - ih) / 2);
+        iw = ccsImg.width * s;
+        ih = ccsImg.height * s;
+        ix = Math.round((imgW - iw) / 2);
+        iy = Math.round((imgH - ih) / 2);
         image(ccsImg, ix, iy, iw, ih);
-        // draw any conduction overlays on top of CCS
-        try { drawConductionOverlay(ix, iy, iw, ih); } catch (e) { /* ignore overlay errors */ }
-        pop();
+      } else {
+        // draw placeholder rectangle for CCS area when image missing
+        noFill(); stroke(200); rect(0, 0, imgW, imgH);
       }
+      // draw any conduction overlays on top of CCS / placeholder
+      try { drawConductionOverlay(ix, iy, iw, ih); } catch (e) { /* ignore overlay errors */ }
+      pop();
 
       // Render ECG into offscreen buffer and blit into right half
       if (ecgG) {
@@ -1099,8 +1311,8 @@ function hexToRgb(hex) {
 
 // Extend overlay drawing with playback indicators for sequential/concurrent modes
 function drawConductionOverlay(ix, iy, iw, ih) {
-  // Only draw when CCS is visible and in single-lead view
-  if (!singleLeadView || !ccsImg) return;
+  // Only draw when in single-lead view
+  if (!singleLeadView) return;
   push();
   translate(0,0);
   noFill();
@@ -1150,10 +1362,51 @@ function drawConductionOverlay(ix, iy, iw, ih) {
       if ((Number(it.step) || 0) === activeStepVal) activeIdxs.push(i);
     }
     if (activeIdxs.length > 0) {
-      // compute step duration: prefer explicit per-step duration, else max of item durations
+      // compute step duration as the driven max of item durations (shapes use envelope totals)
       let maxDur = 0;
-      for (const ix of activeIdxs) { const it = conductionItems[ix]; const d = Math.max(50, Number(it.durationMs) || 1200); if (d > maxDur) maxDur = d; }
-      const stepDur = (typeof conductionStepDurations[activeStepVal] === 'number') ? Math.max(50, conductionStepDurations[activeStepVal]) : maxDur;
+      for (const ix of activeIdxs) {
+        const it = conductionItems[ix];
+        if (!it) continue;
+        // compute binding-aware per-component values for shapes AND honor
+        // a bound overall duration for non-shape items (durationSource)
+        if (it.durationSource) {
+          const fv = getEcgFeatureMs(it.durationSource) || 0;
+          const d = Math.max(10, fv || 0);
+          if (d > maxDur) maxDur = d;
+          continue;
+        }
+        // shape envelopes: use per-component bindings when present
+        if (it.type === 'shape') {
+          const upVal = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : (Number(it.rampUpMs) || 0);
+          const susVal = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : (Number(it.sustainMs) || 0);
+          const downVal = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : (Number(it.rampDownMs) || 0);
+          const shapeTotal = upVal + susVal + downVal;
+          const d = Math.max(10, shapeTotal || 0);
+          if (d > maxDur) maxDur = d;
+          continue;
+        }
+        // fallback: explicit per-item durationMs
+        const d = Math.max(10, Number(it.durationMs) || 1200);
+        if (d > maxDur) maxDur = d;
+      }
+      // allow per-step override if present in persisted `conductionStepDurations`
+      const overrideVal = (conductionStepDurations && Number.isFinite(conductionStepDurations[activeStepVal])) ? conductionStepDurations[activeStepVal] : null;
+      const stepDur = (Number.isFinite(overrideVal) ? overrideVal : maxDur);
+      // build per-item computed durations for debugging / display
+      const activeItemDurations = activeIdxs.map(ix => {
+        const it = conductionItems[ix];
+        if (!it) return { name: 'Unknown', dur: 0 };
+        if (it.durationSource) {
+          return { name: it.name || ('Item ' + ix), dur: getEcgFeatureMs(it.durationSource) || 0 };
+        } else if (it.type === 'shape') {
+          const upVal = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : (Number(it.rampUpMs) || 0);
+          const susVal = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : (Number(it.sustainMs) || 0);
+          const downVal = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : (Number(it.rampDownMs) || 0);
+          return { name: it.name || ('Item ' + ix), dur: Math.max(10, upVal + susVal + downVal) };
+        } else {
+          return { name: it.name || ('Item ' + ix), dur: Math.max(10, Number(it.durationMs) || 1200) };
+        }
+      });
       const nowMs = millis();
       const elapsed = nowMs - conductionPlayback.stepStartTime;
       const progress = Math.min(1.0, Math.max(0.0, elapsed / Math.max(1, stepDur)));
@@ -1163,32 +1416,36 @@ function drawConductionOverlay(ix, iy, iw, ih) {
         const it = conductionItems[ix]; if (!it) continue;
         // If this item is a closed shape, show depolarization by fading its fill
         if (it.type === 'shape') {
-          // use per-item envelope timings (ms) to compute alpha within the step
-          const rampUp = Math.max(0, Number(it.rampUpMs) || 0);
-          const sustain = Math.max(0, Number(it.sustainMs) || 0);
-          const rampDown = Math.max(0, Number(it.rampDownMs) || 0);
-          const totalEnvelope = rampUp + sustain + rampDown;
+            // determine per-component durations using bindings when present
+            const rampUp = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Math.max(0, Number(it.rampUpMs) || 0);
+            const sustain = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : Math.max(0, Number(it.sustainMs) || 0);
+            const rampDown = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Math.max(0, Number(it.rampDownMs) || 0);
+            const totalEnvelope = rampUp + sustain + rampDown;
+            const boundMs = it.durationSource ? getEcgFeatureMs(it.durationSource) : null;
+            const effectiveItemDur = (boundMs && Number.isFinite(boundMs)) ? Math.max(10, boundMs) : Math.max(10, totalEnvelope || 0);
           let alpha = 0;
-          if (totalEnvelope <= 0) {
-            alpha = Math.max(0, Math.sin(progress * Math.PI));
-          } else {
-            // fit envelope into the available step duration; if envelope is longer than step, scale it down
-            const scale = totalEnvelope > stepDur ? (stepDur / totalEnvelope) : 1.0;
-            const up = rampUp * scale;
-            const sus = sustain * scale;
-            const down = rampDown * scale;
-            const t = Math.max(0, Math.min(stepDur, elapsed)); // elapsed is ms since step start
-            if (t < up) {
-              alpha = t / Math.max(1, up);
-            } else if (t < up + sus) {
-              alpha = 1.0;
-            } else if (t < up + sus + down) {
-              alpha = 1.0 - ((t - up - sus) / Math.max(1, down));
+            if (totalEnvelope <= 0) {
+              alpha = Math.max(0, Math.sin(progress * Math.PI));
             } else {
-              alpha = 0.0;
+              // fit envelope into the available step duration; if envelope is longer than step, scale it down.
+              // Use the effectiveItemDur to decide scaling if bound, otherwise use envelope total.
+              const useDurForScale = effectiveItemDur || totalEnvelope || stepDur;
+              const scale = totalEnvelope > useDurForScale ? (useDurForScale / totalEnvelope) : 1.0;
+              const up = rampUp * scale;
+              const sus = sustain * scale;
+              const down = rampDown * scale;
+              const t = Math.max(0, Math.min(useDurForScale, elapsed)); // elapsed is ms since step start
+              if (t < up) {
+                alpha = t / Math.max(1, up);
+              } else if (t < up + sus) {
+                alpha = 1.0;
+              } else if (t < up + sus + down) {
+                alpha = 1.0 - ((t - up - sus) / Math.max(1, down));
+              } else {
+                alpha = 0.0;
+              }
+              alpha = Math.max(0, Math.min(1, alpha));
             }
-            alpha = Math.max(0, Math.min(1, alpha));
-          }
           const rgb = hexToRgb(it.color || '#ff0000');
           push();
           noStroke();
@@ -1214,6 +1471,48 @@ function drawConductionOverlay(ix, iy, iw, ih) {
         }
       }
 
+      // Draw active element names as text below the CCS image
+      try {
+        const names = activeIdxs.map(i => conductionItems[i] && conductionItems[i].name ? conductionItems[i].name : 'Item ' + i);
+        const txt = names.join('  •  ');
+        // draw just below image area
+        const textX = imgX + 6;
+        const textY = imgY + imgH + 18;
+        push();
+        noStroke(); fill(10); textSize(14); textFont('Helvetica');
+        text(txt, textX, textY);
+        pop();
+      } catch (e) {
+        // ignore
+      }
+
+      // Update the conduction debug DOM (if present) so it's visible in the control panel/popup
+      try {
+        if (conductionDebugDiv) {
+          conductionDebugDiv.innerHTML = '';
+          const h = document.createElement('div'); h.style.fontWeight = '700'; h.textContent = 'Step ' + activeStepVal + ' dur: ' + String(stepDur) + ' ms'; conductionDebugDiv.appendChild(h);
+          for (let i = 0; i < activeItemDurations.length; i++) {
+            const it = activeItemDurations[i]; const r = document.createElement('div'); r.textContent = it.name + ': ' + String(Math.round(it.dur)) + ' ms'; conductionDebugDiv.appendChild(r);
+          }
+        }
+        if (conductionDebugWindow && !conductionDebugWindow.closed) {
+          try {
+            const doc = conductionDebugWindow.document;
+            if (!conductionDebugWinDiv) { conductionDebugWinDiv = doc.createElement('div'); doc.body.appendChild(conductionDebugWinDiv); }
+            let html = '<div class="title">Step ' + activeStepVal + ' dur: ' + String(stepDur) + ' ms</div>';
+            // show override state and provide a clear button that calls back to opener
+            const ov = (conductionStepDurations && Number.isFinite(conductionStepDurations[activeStepVal])) ? conductionStepDurations[activeStepVal] : null;
+            if (Number.isFinite(ov)) {
+              html += '<div class="item">Override: ' + String(ov) + ' ms <button onclick="try{ window.opener.clearConductionStepOverride(' + activeStepVal + '); }catch(e){}">Clear</button></div>';
+            } else {
+              html += '<div class="item">Override: (none)</div>';
+            }
+            for (let i = 0; i < activeItemDurations.length; i++) { const it = activeItemDurations[i]; html += '<div class="item">' + escapeHtml(it.name) + ': ' + String(Math.round(it.dur)) + ' ms</div>'; }
+            conductionDebugWinDiv.innerHTML = html;
+          } catch (e) { /* ignore popup update errors */ }
+        }
+      } catch (e) { /* ignore DOM update issues */ }
+
       // advance to next step when progress complete
       if (progress >= 1.0) {
         conductionPlayback.currentStepIndex = (conductionPlayback.currentStepIndex + 1) % stepOrder.length;
@@ -1236,6 +1535,12 @@ function findNearestPointOnImage(mx, my, ix, iy, iw, ih, radius=12) {
     }
   }
   return null;
+}
+
+// simple HTML escaper for popup content
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 // mouse interactions for editing conduction items (add/move points)
@@ -1825,7 +2130,12 @@ function drawSingleLeadTo(g, hr) {
   g.push();
   g.fill(0); g.noStroke(); g.rect(10, 10, 200, 44, 6);
   g.fill(255); g.textSize(14); g.text('HR: ' + Math.round(hr) + ' bpm', 18, 30);
-  g.textSize(12); g.text('QRS ×' + qrsWidth.toFixed(2) + '  Q:' + qDur.toFixed(3) + ' R:' + rDur.toFixed(3) + ' S:' + sDur.toFixed(3), 18, 44);
+  g.textSize(12);
+  const qDurMs = Math.round((qDur || 0) * 1000);
+  const rDurMs = Math.round((rDur || 0) * 1000);
+  const sDurMs = Math.round((sDur || 0) * 1000);
+  const qrsMs = Math.round(((qDur || 0) + (rDur || 0) + (sDur || 0)) * qrsWidth * 1000);
+  g.text('QRS: ' + qrsMs + ' ms  Q:' + qDurMs + ' ms R:' + rDurMs + ' ms S:' + sDurMs + ' ms', 18, 44);
   g.pop();
 
   g.pop();
