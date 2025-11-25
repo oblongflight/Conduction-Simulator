@@ -1457,16 +1457,51 @@ function drawConductionOverlay(ix, iy, iw, ih) {
           // keep the outline already drawn above; skip dot
         } else {
           strokeWeight(0);
-          noStroke(); fill(it.color || '#ff0000');
-          if (it.points.length >= 2) {
+          noStroke();
+          // draw a short fading trail for sequential path items (traveling pulse)
+          if (it.points.length >= 2 && (it.mode || 'sequential') !== 'concurrent') {
+            const normPts = it.points.map(p => ({ x: p.x * imgW + imgX, y: p.y * imgH + imgY }));
+            // trail length in ms (longer trail for better persistence)
+            const trailMs = Math.min(1200, Math.max(120, stepDur * 0.8));
+            const sampleMs = 40; // ms between trail samples
+            const samples = Math.max(5, Math.ceil(trailMs / sampleMs));
+            const rgb = hexToRgb(it.color || '#ff0000');
+            for (let s = 0; s < samples; s++) {
+              const dt = s * (trailMs / samples);
+              const sampleElapsed = Math.max(0, elapsed - dt);
+              const sampleProgress = Math.min(1.0, Math.max(0.0, sampleElapsed / Math.max(1, stepDur)));
+              const pt = pointAlongPolyline(normPts, sampleProgress);
+              if (!pt) continue;
+              const alpha = (1 - s / Math.max(1, samples - 1)) * 0.95;
+              const size = 6 + 12 * (1 - s / Math.max(1, samples));
+              fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220));
+              ellipse(pt.x, pt.y, size, size);
+            }
+          } else if (it.points.length >= 2) {
+            // concurrent paths or no trail requested: simple dot at current progress
             const normPts = it.points.map(p => ({ x: p.x * imgW + imgX, y: p.y * imgH + imgY }));
             const pt = pointAlongPolyline(normPts, progress);
-            if (pt) ellipse(pt.x, pt.y, 12, 12);
+            if (pt) {
+              const rgb = hexToRgb(it.color || '#ff0000');
+              fill(rgb.r, rgb.g, rgb.b, 220);
+              ellipse(pt.x, pt.y, 12, 12);
+            }
           } else if (it.points.length === 1) {
             const p = it.points[0]; const x = imgX + p.x * imgW; const y = imgY + p.y * imgH;
-            // pulse the single point according to progress
-            const size = 8 + 8 * (0.5 + 0.5 * Math.sin(progress * Math.PI * 2));
-            ellipse(x, y, size, size);
+            // pulse the single point with a longer fading ring trail
+            const trailMs = Math.min(800, Math.max(80, stepDur * 0.6));
+            const sampleMs = 50;
+            const samples = Math.max(3, Math.ceil(trailMs / sampleMs));
+            const rgb = hexToRgb(it.color || '#ff0000');
+            for (let s = 0; s < samples; s++) {
+              const dt = s * (trailMs / samples);
+              const sampleElapsed = Math.max(0, elapsed - dt);
+              const frac = Math.min(1, sampleElapsed / Math.max(1, stepDur));
+              const alpha = (1 - s / Math.max(1, samples - 1)) * (0.6 + 0.4 * frac);
+              const size = 6 + 14 * (1 - s / Math.max(1, samples));
+              fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220));
+              ellipse(x, y, size, size);
+            }
           }
         }
       }
