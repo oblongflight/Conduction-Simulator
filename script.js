@@ -1,3 +1,48 @@
+// Time dilation factor (slider controlled)
+let timeDilation = 1.0;
+const TIME_DILATION_KEY = 'ecg.timeDilation.v1';
+function saveTimeDilation() {
+  try { localStorage.setItem(TIME_DILATION_KEY, String(timeDilation)); } catch (e) {}
+}
+function loadTimeDilation() {
+  try {
+    const raw = localStorage.getItem(TIME_DILATION_KEY);
+    if (raw) timeDilation = parseFloat(raw);
+  } catch (e) {}
+}
+
+// Create time dilation slider on page load
+window.addEventListener('DOMContentLoaded', function() {
+    // Load ECG waveform settings BEFORE any sliders are created
+    loadEcgWaveformSettings();
+  let sliderDiv = document.getElementById('timeDilationDiv');
+  if (!sliderDiv) {
+    sliderDiv = document.createElement('div');
+    sliderDiv.id = 'timeDilationDiv';
+    sliderDiv.style.position = 'fixed';
+    sliderDiv.style.top = '170px';
+    sliderDiv.style.left = '330px';
+    sliderDiv.style.background = '#fff';
+    sliderDiv.style.border = '1px solid #ccc';
+    sliderDiv.style.padding = '10px 16px';
+    sliderDiv.style.zIndex = '10005';
+    sliderDiv.style.borderRadius = '8px';
+    sliderDiv.innerHTML = '<label for="timeDilationSlider">Time Dilation</label> <input type="range" id="timeDilationSlider" min="0.2" max="10.0" step="0.01" value="1.0" style="width:120px;"> <span id="timeDilationValue">1.00x</span>';
+    document.body.appendChild(sliderDiv);
+  }
+  loadTimeDilation();
+  const slider = document.getElementById('timeDilationSlider');
+  const valueSpan = document.getElementById('timeDilationValue');
+  if (slider && valueSpan) {
+    slider.value = String(timeDilation);
+    valueSpan.textContent = timeDilation.toFixed(2) + 'x';
+    slider.addEventListener('input', function() {
+      timeDilation = parseFloat(slider.value);
+      valueSpan.textContent = timeDilation.toFixed(2) + 'x';
+      saveTimeDilation();
+    });
+  }
+});
 let atheroPercent = 0;
 let thrombusPercent = 0;
 let METs = 1.0;
@@ -10,31 +55,58 @@ let amplitude = 60; // pixels per unit ECG amplitude
 let timeWindow = 10.0; // seconds shown across the canvas
 
 // Adjustable waveform parameters (controlled by sliders)
-let tWaveScale = 1.0; // multiplier for T wave amplitude (can be negative)
-let qWaveScale = 1.0; // multiplier for Q wave magnitude
-let stOffset = 0.0; // ST elevation/depression (in signal units)
-let tDuration = 0.12; // T wave duration (seconds, approximate width)
-let qtIntervalMs = 360; // QT interval in milliseconds (Q onset to T end)
-
-// P-wave adjustable parameters
-let pDuration = 0.05; // seconds (default ~50 ms)
-let pAmp = 0.25; // amplitude multiplier (visible by default)
-// Global QRS width multiplier (1.0 == normal)
+let tWaveScale = 1.0;
+let qWaveScale = 1.0;
+let stOffset = 0.0;
+let tDuration = 0.12;
+let qtIntervalMs = 360;
+let pDuration = 0.05;
+let pAmp = 0.25;
 let qrsWidth = 1.0;
-// Individual Q/R/S duration controls (seconds)
-let qDur = 0.02;
+let qDur = 0.1; // 100ms
 let rDur = 0.01;
 let sDur = 0.02;
-// Arrhythmia / morphology controls (global options)
 let pBiphasic = false;
-// Global amplitude multipliers for components
 let gP = 1.0;
 let gQ = 1.0;
 let gR = 1.0;
 let gS = 1.0;
 let gT = 1.0;
-// PR interval (seconds) - preferred delay from P peak to Q onset
-let prDur = 0.16; // typical ~0.12-0.20
+let prDur = 0.2; // 200ms
+
+const ECG_WAVEFORM_KEY = 'ecg.waveformSettings.v1';
+function saveEcgWaveformSettings() {
+  try {
+    const obj = { tWaveScale, qWaveScale, stOffset, tDuration, qtIntervalMs, pDuration, pAmp, qrsWidth, qDur, rDur, sDur, pBiphasic, gP, gQ, gR, gS, gT, prDur };
+    localStorage.setItem(ECG_WAVEFORM_KEY, JSON.stringify(obj));
+  } catch (e) {}
+}
+function loadEcgWaveformSettings() {
+  try {
+    const raw = localStorage.getItem(ECG_WAVEFORM_KEY);
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    if (!obj) return;
+    tWaveScale = obj.tWaveScale ?? tWaveScale;
+    qWaveScale = obj.qWaveScale ?? qWaveScale;
+    stOffset = obj.stOffset ?? stOffset;
+    tDuration = obj.tDuration ?? tDuration;
+    qtIntervalMs = obj.qtIntervalMs ?? qtIntervalMs;
+    pDuration = obj.pDuration ?? pDuration;
+    pAmp = obj.pAmp ?? pAmp;
+    qrsWidth = obj.qrsWidth ?? qrsWidth;
+    qDur = obj.qDur ?? qDur;
+    rDur = obj.rDur ?? rDur;
+    sDur = obj.sDur ?? sDur;
+    pBiphasic = obj.pBiphasic ?? pBiphasic;
+    gP = obj.gP ?? gP;
+    gQ = obj.gQ ?? gQ;
+    gR = obj.gR ?? gR;
+    gS = obj.gS ?? gS;
+    gT = obj.gT ?? gT;
+    prDur = obj.prDur ?? prDur;
+  } catch (e) {}
+}
 
 // CCS image (optional) — loaded if present
 let ccsImg = null;
@@ -112,6 +184,25 @@ function computeConductionStepOrder() {
   if (conductionPlayback.currentStepIndex >= conductionPlayback.stepOrder.length) conductionPlayback.currentStepIndex = 0;
 }
 
+// Trigger a named ECG event programmatically (used by test trigger)
+function triggerEcgEvent(eventKey) {
+  if (!eventKey) return;
+  // find items waiting for this event and jump to their step
+  try {
+    const matches = conductionItems.filter(it => it && it.startMode === 'on_ecg_event' && it.ecgEvent === eventKey);
+    if (matches.length === 0) return;
+    // pick the first match and set playback to its step
+    const it = matches[0];
+    const stepIdx = conductionPlayback.stepOrder.indexOf(Number(it.step) || 0);
+    if (stepIdx >= 0) {
+      conductionPlayback.currentStepIndex = stepIdx;
+      conductionPlayback.stepStartTime = millis();
+      // ensure playback is running so the triggered step is visible
+      conductionPlayback.playing = true;
+    }
+  } catch (e) { console.warn('triggerEcgEvent error', e); }
+}
+
 function resetConductionPlayback() {
   conductionPlayback.stepStartTime = millis();
   conductionPlayback.currentStepIndex = 0;
@@ -123,9 +214,10 @@ function createConductionItem(type = 'path') {
   const name = type === 'path' ? 'Path ' + (conductionItems.length + 1) : 'Shape ' + (conductionItems.length + 1);
   // mode: 'sequential' => animate a traveling dot along the path over durationMs
   // mode: 'concurrent' => show pulses at all points simultaneously
-  const item = { id, name, type, points: [], color: '#ff0000', fill: (type === 'shape'), closed: (type === 'shape'), mode: 'sequential', durationMs: 1200, step: conductionItems.length, rampUpMs: 200, sustainMs: 800, rampDownMs: 200 };
+  const item = { id, name, type, points: [], color: '#ff0000', fill: (type === 'shape'), closed: (type === 'shape'), mode: 'sequential', durationMs: 1200, step: conductionItems.length, rampUpMs: 200, sustainMs: 800, rampDownMs: 200, startMode: 'after_previous', ecgEvent: '' };
   conductionItems.push(item);
   selectedConductionIndex = conductionItems.length - 1;
+  try { saveConductionItems(); } catch (e) {}
   refreshConductionPanel();
 }
 
@@ -204,15 +296,51 @@ function refreshConductionPanel() {
     row.style.flexWrap = 'nowrap';
     row.style.boxSizing = 'border-box';
     row.style.background = (conductionEditMode && idx === selectedConductionIndex) ? 'rgba(0,120,215,0.06)' : 'transparent';
-    const nameInput = document.createElement('input'); nameInput.type = 'text'; nameInput.value = it.name; nameInput.style.flex = '1'; nameInput.onchange = (e) => { it.name = e.target.value; };
+    const nameInput = document.createElement('input'); nameInput.type = 'text'; nameInput.value = it.name; nameInput.style.flex = '1'; nameInput.onchange = (e) => { it.name = e.target.value; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
     // Mode select (sequential vs concurrent)
+        // ECG event trigger dropdown
+        const ecgEventSel = document.createElement('select');
+        ecgEventSel.style.width = '160px';
+        ecgEventSel.title = 'Start this step when the ECG indicator passes the selected event';
+        const ecgEvents = [
+          { value: '', text: 'Manual/Default (no trigger)' },
+          { value: 'P_start', text: 'P wave start' },
+          { value: 'P_end', text: 'P wave end' },
+          { value: 'Q_start', text: 'Q wave start' },
+          { value: 'Q_end', text: 'Q wave end' },
+          { value: 'R_start', text: 'R wave start' },
+          { value: 'R_end', text: 'R wave end' },
+          { value: 'S_start', text: 'S wave start' },
+          { value: 'S_end', text: 'S wave end' },
+          { value: 'T_start', text: 'T wave start' },
+          { value: 'T_end', text: 'T wave end' }
+        ];
+        ecgEvents.forEach(ev => {
+          const opt = document.createElement('option');
+          opt.value = ev.value;
+          opt.text = ev.text;
+          ecgEventSel.appendChild(opt);
+        });
+        ecgEventSel.value = it.ecgEvent || '';
+        ecgEventSel.onchange = (e) => { it.ecgEvent = e.target.value; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
+        // start mode select: after previous step, or wait for ECG event
+        const startModeSel = document.createElement('select');
+        const sm1 = document.createElement('option'); sm1.value = 'after_previous'; sm1.text = 'After previous';
+        const sm2 = document.createElement('option'); sm2.value = 'on_ecg_event'; sm2.text = 'On ECG event';
+        startModeSel.appendChild(sm1); startModeSel.appendChild(sm2);
+        startModeSel.value = it.startMode || 'after_previous';
+        startModeSel.style.width = '140px';
+        startModeSel.title = 'Start this step after the prior step or wait for an ECG event';
+        startModeSel.onchange = (e) => { it.startMode = e.target.value; ecgEventSel.disabled = (it.startMode !== 'on_ecg_event'); try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
+        // enable/disable the ecgEvent selector based on startMode
+        ecgEventSel.disabled = (it.startMode !== 'on_ecg_event');
     const modeSel = document.createElement('select');
     const mo1 = document.createElement('option'); mo1.value = 'sequential'; mo1.text = 'Sequential';
     const mo2 = document.createElement('option'); mo2.value = 'concurrent'; mo2.text = 'Concurrent';
     modeSel.appendChild(mo1); modeSel.appendChild(mo2); modeSel.value = it.mode || 'sequential';
     modeSel.style.width = '120px';
     modeSel.title = 'Playback mode: sequential (travels) or concurrent (all)';
-    modeSel.onchange = (e) => { it.mode = e.target.value; refreshConductionPanel(); };
+    modeSel.onchange = (e) => { it.mode = e.target.value; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
     // duration (ms) for traversal (paths editable; shapes driven by envelope totals)
     let durInput = null;
     let durSpan = null;
@@ -234,7 +362,7 @@ function refreshConductionPanel() {
       durSpan.style.minWidth = '64px';
     } else {
       durInput = document.createElement('input'); durInput.type = 'number'; durInput.min = '10'; durInput.step = '10'; durInput.value = String(it.durationMs || 1200); durInput.title = 'Duration (ms) for traversal (per-item)';
-      durInput.style.width = '64px'; durInput.oninput = (e) => { const v = Number(e.target.value) || 0; it.durationMs = Math.max(10, v); };
+      durInput.style.width = '64px'; durInput.oninput = (e) => { const v = Number(e.target.value) || 0; it.durationMs = Math.max(10, v); try { saveConductionItems(); } catch (err) {} };
       // if bound to ECG feature, show a readonly span instead and hide editable input
       if (it.durationSource) {
         const fv = getEcgFeatureMs(it.durationSource) || 0;
@@ -243,16 +371,16 @@ function refreshConductionPanel() {
       }
     }
     // step number: items with same step run concurrently; steps advance in order
-    const stepInput = document.createElement('input'); stepInput.type = 'number'; stepInput.min = '0'; stepInput.step = '1'; stepInput.value = String(typeof it.step === 'number' ? it.step : 0); stepInput.title = 'Step: items with same step run concurrently'; stepInput.style.width = '56px'; stepInput.oninput = (e) => { const v = Math.max(0, Math.floor(Number(e.target.value) || 0)); it.step = v; refreshConductionPanel(); };
-    const upBtn = document.createElement('button'); upBtn.textContent = '↑'; upBtn.title = 'Move up'; upBtn.onclick = () => { if (idx > 0) { conductionItems.splice(idx-1, 0, conductionItems.splice(idx,1)[0]); selectedConductionIndex = idx-1; refreshConductionPanel(); } };
-    const downBtn = document.createElement('button'); downBtn.textContent = '↓'; downBtn.title = 'Move down'; downBtn.onclick = () => { if (idx < conductionItems.length-1) { conductionItems.splice(idx+1, 0, conductionItems.splice(idx,1)[0]); selectedConductionIndex = idx+1; refreshConductionPanel(); } };
-    const delBtn = document.createElement('button'); delBtn.textContent = '✕'; delBtn.title = 'Delete'; delBtn.onclick = () => { conductionItems.splice(idx,1); if (selectedConductionIndex >= conductionItems.length) selectedConductionIndex = conductionItems.length - 1; refreshConductionPanel(); };
+    const stepInput = document.createElement('input'); stepInput.type = 'number'; stepInput.min = '0'; stepInput.step = '1'; stepInput.value = String(typeof it.step === 'number' ? it.step : 0); stepInput.title = 'Step: items with same step run concurrently'; stepInput.style.width = '56px'; stepInput.oninput = (e) => { const v = Math.max(0, Math.floor(Number(e.target.value) || 0)); it.step = v; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
+    const upBtn = document.createElement('button'); upBtn.textContent = '↑'; upBtn.title = 'Move up'; upBtn.onclick = () => { if (idx > 0) { conductionItems.splice(idx-1, 0, conductionItems.splice(idx,1)[0]); selectedConductionIndex = idx-1; try { saveConductionItems(); } catch (e) {} refreshConductionPanel(); } };
+    const downBtn = document.createElement('button'); downBtn.textContent = '↓'; downBtn.title = 'Move down'; downBtn.onclick = () => { if (idx < conductionItems.length-1) { conductionItems.splice(idx+1, 0, conductionItems.splice(idx,1)[0]); selectedConductionIndex = idx+1; try { saveConductionItems(); } catch (e) {} refreshConductionPanel(); } };
+    const delBtn = document.createElement('button'); delBtn.textContent = '✕'; delBtn.title = 'Delete'; delBtn.onclick = () => { conductionItems.splice(idx,1); if (selectedConductionIndex >= conductionItems.length) selectedConductionIndex = conductionItems.length - 1; try { saveConductionItems(); } catch (e) {} refreshConductionPanel(); };
     const selBtn = document.createElement('button'); selBtn.textContent = 'Edit'; selBtn.title = 'Select/Edit'; selBtn.onclick = () => { selectedConductionIndex = idx; conductionEditMode = true; refreshConductionPanel(); };
-    const typeSel = document.createElement('select'); const opt1 = document.createElement('option'); opt1.value='path'; opt1.text='Path'; const opt2 = document.createElement('option'); opt2.value='shape'; opt2.text='Shape'; typeSel.appendChild(opt1); typeSel.appendChild(opt2); typeSel.value = it.type; typeSel.onchange = (e) => { it.type = e.target.value; it.fill = it.type === 'shape'; it.closed = it.type === 'shape'; refreshConductionPanel(); };
+    const typeSel = document.createElement('select'); const opt1 = document.createElement('option'); opt1.value='path'; opt1.text='Path'; const opt2 = document.createElement('option'); opt2.value='shape'; opt2.text='Shape'; typeSel.appendChild(opt1); typeSel.appendChild(opt2); typeSel.value = it.type; typeSel.onchange = (e) => { it.type = e.target.value; it.fill = it.type === 'shape'; it.closed = it.type === 'shape'; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
 
-    const colorIn = document.createElement('input'); colorIn.type = 'color'; colorIn.value = it.color; colorIn.oninput = (e) => { it.color = e.target.value; };
+    const colorIn = document.createElement('input'); colorIn.type = 'color'; colorIn.value = it.color; colorIn.oninput = (e) => { it.color = e.target.value; try { saveConductionItems(); } catch (err) {} };
 
-    row.appendChild(nameInput); row.appendChild(typeSel); row.appendChild(colorIn); row.appendChild(modeSel);
+    row.appendChild(nameInput); row.appendChild(typeSel); row.appendChild(colorIn); row.appendChild(modeSel); row.appendChild(startModeSel); row.appendChild(ecgEventSel);
     if (durInput) row.appendChild(durInput); else if (durSpan) row.appendChild(durSpan);
     // binding select to tie this item's duration to an ECG feature
     const bindSel = document.createElement('select');
@@ -260,7 +388,7 @@ function refreshConductionPanel() {
     addOpt('', 'Manual'); addOpt('P', 'P wave'); addOpt('PR', 'PR interval'); addOpt('QRS', 'QRS'); addOpt('QT', 'QT interval'); addOpt('T', 'T wave'); addOpt('TP', 'TP interval');
     bindSel.value = it.durationSource || '';
     bindSel.title = 'Bind this item\'s duration to an ECG feature';
-    bindSel.onchange = (e) => { it.durationSource = e.target.value || null; refreshConductionPanel(); };
+    bindSel.onchange = (e) => { it.durationSource = e.target.value || null; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
     row.appendChild(bindSel);
     // If this is a shape, provide envelope controls stacked vertically: ramp up, sustain, ramp down (ms)
     if (it.type === 'shape') {
@@ -313,7 +441,7 @@ function refreshConductionPanel() {
 const CONDUCTION_STORAGE_KEY = 'ecg.conductionItems.v1';
 function saveConductionItems() {
   try {
-    const toSave = conductionItems.map(it => ({ id: it.id, name: it.name, type: it.type, points: it.points.map(p => ({ x: Number(p.x), y: Number(p.y) })), color: it.color, fill: !!it.fill, closed: !!it.closed, mode: it.mode || 'sequential', durationMs: Number(it.durationMs) || 1200, step: Number(it.step) || 0, rampUpMs: Number(it.rampUpMs) || 200, sustainMs: Number(it.sustainMs) || 800, rampDownMs: Number(it.rampDownMs) || 200, durationSource: it.durationSource || null, rampUpSource: it.rampUpSource || null, sustainSource: it.sustainSource || null, rampDownSource: it.rampDownSource || null }));
+    const toSave = conductionItems.map(it => ({ id: it.id, name: it.name, type: it.type, points: it.points.map(p => ({ x: Number(p.x), y: Number(p.y) })), color: it.color, fill: !!it.fill, closed: !!it.closed, mode: it.mode || 'sequential', durationMs: Number(it.durationMs) || 1200, step: Number(it.step) || 0, rampUpMs: Number(it.rampUpMs) || 200, sustainMs: Number(it.sustainMs) || 800, rampDownMs: Number(it.rampDownMs) || 200, durationSource: it.durationSource || null, rampUpSource: it.rampUpSource || null, sustainSource: it.sustainSource || null, rampDownSource: it.rampDownSource || null, startMode: it.startMode || 'after_previous', ecgEvent: it.ecgEvent || '' }));
     localStorage.setItem(CONDUCTION_STORAGE_KEY, JSON.stringify(toSave));
     // also persist per-step durations
     try { saveConductionStepDurations(); } catch (e) { console.warn('Failed to save step durations', e); }
@@ -341,12 +469,13 @@ function loadConductionItems() {
           step: (typeof it.step === 'number') ? it.step : (typeof it.step === 'string' ? Number(it.step) || 0 : idx),
           rampUpMs: Number(it.rampUpMs) || 200,
           sustainMs: Number(it.sustainMs) || 800,
-          rampDownMs: Number(it.rampDownMs) || 200
-        ,
+          rampDownMs: Number(it.rampDownMs) || 200,
           durationSource: it.durationSource || null,
           rampUpSource: it.rampUpSource || null,
           sustainSource: it.sustainSource || null,
-          rampDownSource: it.rampDownSource || null
+          rampDownSource: it.rampDownSource || null,
+          startMode: it.startMode || 'after_previous',
+          ecgEvent: it.ecgEvent || ''
         };
     });
     // load per-step durations as well
@@ -361,7 +490,6 @@ function createConductionPanel() {
   conductionPanelDiv.style.position = 'fixed';
   conductionPanelDiv.style.right = '10px';
   conductionPanelDiv.style.top = '120px';
-  // Make the panel wide to avoid wrapping of controls
   conductionPanelDiv.style.width = '900px';
   conductionPanelDiv.style.maxWidth = '80%';
   conductionPanelDiv.style.background = 'rgba(255,255,255,0.98)';
@@ -370,6 +498,34 @@ function createConductionPanel() {
   conductionPanelDiv.style.padding = '10px';
   conductionPanelDiv.style.zIndex = 10003;
   conductionPanelDiv.style.fontFamily = 'Helvetica, Arial, sans-serif';
+  conductionPanelDiv.style.display = 'none'; // hidden by default
+
+  // Add show/hide button for constructor panel
+  let toggleBtn = document.getElementById('toggleConstructorBtn');
+  if (!toggleBtn) {
+    toggleBtn = document.createElement('button');
+    toggleBtn.id = 'toggleConstructorBtn';
+    toggleBtn.textContent = 'Show Constructor';
+    toggleBtn.style.position = 'fixed';
+    toggleBtn.style.right = '10px';
+    toggleBtn.style.top = '90px';
+    toggleBtn.style.zIndex = 10004;
+    toggleBtn.style.padding = '8px 10px';
+    toggleBtn.style.fontSize = '13px';
+    toggleBtn.style.borderRadius = '6px';
+    toggleBtn.style.border = '1px solid rgba(0,0,0,0.12)';
+    toggleBtn.style.background = 'white';
+    toggleBtn.onclick = function() {
+      if (conductionPanelDiv.style.display === 'none') {
+        conductionPanelDiv.style.display = '';
+        toggleBtn.textContent = 'Hide Constructor';
+      } else {
+        conductionPanelDiv.style.display = 'none';
+        toggleBtn.textContent = 'Show Constructor';
+      }
+    };
+    document.body.appendChild(toggleBtn);
+  }
 
   const title = document.createElement('div'); title.textContent = 'Conduction Paths/Shapes'; title.style.fontWeight = '700'; title.style.marginBottom = '8px'; conductionPanelDiv.appendChild(title);
 
@@ -382,6 +538,12 @@ function createConductionPanel() {
   const playPauseBtn = document.createElement('button'); playPauseBtn.textContent = conductionPlayback.playing ? 'Pause' : 'Play'; playPauseBtn.onclick = () => { conductionPlayback.playing = !conductionPlayback.playing; playPauseBtn.textContent = conductionPlayback.playing ? 'Pause' : 'Play'; if (conductionPlayback.playing) conductionPlayback.stepStartTime = millis(); };
   btnRow.appendChild(addPathBtn); btnRow.appendChild(addShapeBtn); btnRow.appendChild(toggleEdit);
   btnRow.appendChild(playPauseBtn);
+  // Test trigger: allow manual triggering of ECG events for debugging
+  const testSel = document.createElement('select'); testSel.style.marginLeft = '8px';
+  const evs = ['', 'P_start','P_end','Q_start','Q_end','R_start','R_end','S_start','S_end','T_start','T_end'];
+  evs.forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'Select event...' : v; testSel.appendChild(o); });
+  const triggerBtn = document.createElement('button'); triggerBtn.textContent = 'Trigger ECG Event'; triggerBtn.onclick = () => { try { triggerEcgEvent(testSel.value); } catch (e) { console.warn('trigger error', e); } };
+  btnRow.appendChild(testSel); btnRow.appendChild(triggerBtn);
   conductionPanelDiv.appendChild(btnRow);
 
   // placeholder for list
@@ -595,6 +757,46 @@ function loadLeadParams() {
 }
 
 function setup() {
+        // Load waveform settings before any UI creation
+        loadEcgWaveformSettings();
+      // --- Ensure all ECG waveform sliders are set to loaded values and save changes ---
+      setTimeout(() => {
+        const sliderMap = [
+          { id: 'qrsInput', var: 'qrsWidth' },
+          { id: 'qdurInput', var: 'qDur' },
+          { id: 'rdurInput', var: 'rDur' },
+          { id: 'sdurInput', var: 'sDur' },
+          { id: 'pdurInput', var: 'pDuration' },
+          { id: 'hrInput', var: 'heartRate' },
+          { id: 'tdurInput', var: 'tDuration' },
+          { id: 'prInput', var: 'prDur' },
+          { id: 'qtInput', var: 'qtIntervalMs' }
+        ];
+        sliderMap.forEach(({id, var: v}) => {
+          const el = document.getElementById(id);
+          if (el) {
+            el.value = String(window[v]);
+            el.addEventListener('input', () => {
+              window[v] = el.type === 'range' ? parseFloat(el.value) : el.value;
+              saveEcgWaveformSettings();
+            });
+          }
+        });
+      }, 0);
+    // After loading settings, update slider values to match persisted state
+    const updateSliderValue = (id, value) => {
+      const el = document.getElementById(id);
+      if (el) el.value = String(value);
+    };
+    updateSliderValue('qrsInput', qrsWidth);
+    updateSliderValue('qdurInput', qDur);
+    updateSliderValue('rdurInput', rDur);
+    updateSliderValue('sdurInput', sDur);
+    updateSliderValue('pdurInput', pDuration);
+    updateSliderValue('hrInput', heartRate);
+    updateSliderValue('tdurInput', tDuration);
+    updateSliderValue('prInput', prDur);
+    updateSliderValue('qtInput', qtIntervalMs);
   try {
     // responsive canvas
     // match the device pixel ratio for crisp rendering when supported
@@ -710,7 +912,7 @@ function setup() {
   qrsRow.style.display = 'flex'; qrsRow.style.alignItems = 'center'; qrsRow.style.gap = '8px';
   const qrsInput = document.createElement('input');
   qrsInput.type = 'range'; qrsInput.min = '0.5'; qrsInput.max = '10.0'; qrsInput.step = '0.01'; qrsInput.value = String(qrsWidth);
-  qrsInput.oninput = (e) => { qrsWidth = Number(e.target.value); qrsVal.textContent = qrsWidth.toFixed(2); };
+  qrsInput.oninput = (e) => { qrsWidth = Number(e.target.value); qrsVal.textContent = qrsWidth.toFixed(2); saveEcgWaveformSettings(); };
   qrsInput.style.flex = '1';
   const qrsVal = document.createElement('div'); qrsVal.textContent = qrsWidth.toFixed(2); qrsVal.style.width = '44px'; qrsVal.style.textAlign = 'right';
   qrsRow.appendChild(qrsInput); qrsRow.appendChild(qrsVal); globalPanel.appendChild(qrsRow);
@@ -719,7 +921,7 @@ function setup() {
   qdurRow.style.display = 'flex'; qdurRow.style.alignItems = 'center'; qdurRow.style.gap = '8px';
   const qdurInput = document.createElement('input');
   qdurInput.type = 'range'; qdurInput.min = '0.005'; qdurInput.max = '0.08'; qdurInput.step = '0.001'; qdurInput.value = String(qDur);
-  qdurInput.oninput = (e) => { qDur = Number(e.target.value); qdurVal.textContent = String(Math.round(qDur * 1000)) + ' ms'; refreshConductionPanel(); };
+  qdurInput.oninput = (e) => { qDur = Number(e.target.value); qdurVal.textContent = String(Math.round(qDur * 1000)) + ' ms'; refreshConductionPanel(); saveEcgWaveformSettings(); };
   qdurInput.style.flex = '1';
   const qdurVal = document.createElement('div'); qdurVal.textContent = String(Math.round(qDur * 1000)) + ' ms'; qdurVal.style.width = '56px'; qdurVal.style.textAlign = 'right';
   qdurRow.appendChild(qdurInput); qdurRow.appendChild(qdurVal); globalPanel.appendChild(qdurRow);
@@ -729,7 +931,7 @@ function setup() {
   rdurRow.style.display = 'flex'; rdurRow.style.alignItems = 'center'; rdurRow.style.gap = '8px';
   const rdurInput = document.createElement('input');
   rdurInput.type = 'range'; rdurInput.min = '0.003'; rdurInput.max = '0.06'; rdurInput.step = '0.001'; rdurInput.value = String(rDur);
-  rdurInput.oninput = (e) => { rDur = Number(e.target.value); rdurVal.textContent = String(Math.round(rDur * 1000)) + ' ms'; refreshConductionPanel(); };
+  rdurInput.oninput = (e) => { rDur = Number(e.target.value); rdurVal.textContent = String(Math.round(rDur * 1000)) + ' ms'; refreshConductionPanel(); saveEcgWaveformSettings(); };
   rdurInput.style.flex = '1';
   const rdurVal = document.createElement('div'); rdurVal.textContent = String(Math.round(rDur * 1000)) + ' ms'; rdurVal.style.width = '56px'; rdurVal.style.textAlign = 'right';
   rdurRow.appendChild(rdurInput); rdurRow.appendChild(rdurVal); globalPanel.appendChild(rdurRow);
@@ -739,7 +941,7 @@ function setup() {
   sdurRow.style.display = 'flex'; sdurRow.style.alignItems = 'center'; sdurRow.style.gap = '8px';
   const sdurInput = document.createElement('input');
   sdurInput.type = 'range'; sdurInput.min = '0.005'; sdurInput.max = '0.12'; sdurInput.step = '0.001'; sdurInput.value = String(sDur);
-  sdurInput.oninput = (e) => { sDur = Number(e.target.value); sdurVal.textContent = String(Math.round(sDur * 1000)) + ' ms'; refreshConductionPanel(); };
+  sdurInput.oninput = (e) => { sDur = Number(e.target.value); sdurVal.textContent = String(Math.round(sDur * 1000)) + ' ms'; refreshConductionPanel(); saveEcgWaveformSettings(); };
   sdurInput.style.flex = '1';
   const sdurVal = document.createElement('div'); sdurVal.textContent = String(Math.round(sDur * 1000)) + ' ms'; sdurVal.style.width = '56px'; sdurVal.style.textAlign = 'right';
   sdurRow.appendChild(sdurInput); sdurRow.appendChild(sdurVal); globalPanel.appendChild(sdurRow);
@@ -749,7 +951,7 @@ function setup() {
   pdurRow.style.display = 'flex'; pdurRow.style.alignItems = 'center'; pdurRow.style.gap = '8px';
   const pdurInput = document.createElement('input');
   pdurInput.type = 'range'; pdurInput.min = '0.01'; pdurInput.max = '0.20'; pdurInput.step = '0.005'; pdurInput.value = String(pDuration);
-  pdurInput.oninput = (e) => { pDuration = Number(e.target.value); pdurVal.textContent = String(Math.round(pDuration * 1000)) + ' ms'; refreshConductionPanel(); };
+  pdurInput.oninput = (e) => { pDuration = Number(e.target.value); pdurVal.textContent = String(Math.round(pDuration * 1000)) + ' ms'; refreshConductionPanel(); saveEcgWaveformSettings(); };
   pdurInput.style.flex = '1';
   const pdurVal = document.createElement('div'); pdurVal.textContent = String(Math.round(pDuration * 1000)) + ' ms'; pdurVal.style.width = '56px'; pdurVal.style.textAlign = 'right';
   const pdurLab = document.createElement('div'); pdurLab.textContent = 'P'; pdurLab.style.width = '18px'; pdurRow.appendChild(pdurLab);
@@ -763,7 +965,7 @@ function setup() {
   hrInput.style.flex = '1';
   const hrVal = document.createElement('div'); hrVal.textContent = String(Math.round(heartRate || 70)) + ' bpm'; hrVal.style.width = '80px'; hrVal.style.textAlign = 'right';
   const hrLab = document.createElement('div'); hrLab.textContent = 'HR'; hrLab.style.width = '18px';
-  hrInput.oninput = (e) => { heartRate = Number(e.target.value) || 60; hrVal.textContent = String(Math.round(heartRate)) + ' bpm'; refreshConductionPanel(); };
+  hrInput.oninput = (e) => { heartRate = Number(e.target.value) || 60; hrVal.textContent = String(Math.round(heartRate)) + ' bpm'; refreshConductionPanel(); saveEcgWaveformSettings(); };
   hrRow.appendChild(hrLab); hrRow.appendChild(hrInput); hrRow.appendChild(hrVal); globalPanel.appendChild(hrRow);
 
   // Global amplitude sliders for P/Q/R/S/T
@@ -773,7 +975,7 @@ function setup() {
     const lab = document.createElement('div'); lab.textContent = label; lab.style.width = '18px'; row.appendChild(lab);
     const input = document.createElement('input'); input.type = 'range'; input.min = String(min); input.max = String(max); input.step = String(step); input.value = String(initial); input.style.flex = '1';
     const val = document.createElement('div'); val.textContent = (typeof initial === 'number' ? initial.toFixed(2) : String(initial)); val.style.width = '48px'; val.style.textAlign = 'right';
-    input.oninput = (e) => { const num = Number(e.target.value); val.textContent = num.toFixed(2); oninput(num); };
+    input.oninput = (e) => { const num = Number(e.target.value); val.textContent = num.toFixed(2); oninput(num); saveEcgWaveformSettings(); };
     row.appendChild(input); row.appendChild(val); globalPanel.appendChild(row);
     return {input, val, row};
   }
@@ -799,13 +1001,13 @@ function setup() {
   const prRow = document.createElement('div'); prRow.style.display = 'flex'; prRow.style.alignItems = 'center'; prRow.style.gap = '8px';
   const prInput = document.createElement('input'); prInput.type = 'range'; prInput.min = '0.06'; prInput.max = '0.30'; prInput.step = '0.005'; prInput.value = String(prDur);
   prInput.style.flex = '1'; const prVal = document.createElement('div'); prVal.textContent = String(Math.round(prDur * 1000)) + ' ms'; prVal.style.width = '56px'; prVal.style.textAlign = 'right';
-  prInput.oninput = (e) => { prDur = Number(e.target.value); prVal.textContent = String(Math.round(prDur * 1000)) + ' ms'; refreshConductionPanel(); };
+  prInput.oninput = (e) => { prDur = Number(e.target.value); prVal.textContent = String(Math.round(prDur * 1000)) + ' ms'; refreshConductionPanel(); saveEcgWaveformSettings(); };
   const prLab = document.createElement('div'); prLab.textContent = 'PR'; prLab.style.width = '18px'; prRow.appendChild(prLab); prRow.appendChild(prInput); prRow.appendChild(prVal); globalPanel.appendChild(prRow);
 
   const qtRow = document.createElement('div'); qtRow.style.display = 'flex'; qtRow.style.alignItems = 'center'; qtRow.style.gap = '8px';
   const qtInput = document.createElement('input'); qtInput.type = 'range'; qtInput.min = '200'; qtInput.max = '600'; qtInput.step = '1'; qtInput.value = String(qtIntervalMs);
   qtInput.style.flex = '1'; const qtVal = document.createElement('div'); qtVal.textContent = String(qtIntervalMs); qtVal.style.width = '56px'; qtVal.style.textAlign = 'right';
-  qtInput.oninput = (e) => { qtIntervalMs = Number(e.target.value); qtVal.textContent = String(qtIntervalMs); refreshConductionPanel(); };
+  qtInput.oninput = (e) => { qtIntervalMs = Number(e.target.value); qtVal.textContent = String(qtIntervalMs); refreshConductionPanel(); saveEcgWaveformSettings(); };
   const qtLab = document.createElement('div'); qtLab.textContent = 'QTms'; qtLab.style.width = '18px'; qtRow.appendChild(qtLab); qtRow.appendChild(qtInput); qtRow.appendChild(qtVal); globalPanel.appendChild(qtRow);
 
   document.body.appendChild(globalPanel);
@@ -921,8 +1123,33 @@ function openConductionDebugWindow() {
   }
 
   // load persisted values (if any) before creating controls
+  loadTimeDilation();
   loadLeadParams();
 
+  // After all sliders are created, update their values to match loaded settings and ensure changes are saved
+  const sliderMap = [
+    { id: 'qrsInput', var: 'qrsWidth' },
+    { id: 'qdurInput', var: 'qDur' },
+    { id: 'rdurInput', var: 'rDur' },
+    { id: 'sdurInput', var: 'sDur' },
+    { id: 'pdurInput', var: 'pDuration' },
+    { id: 'hrInput', var: 'heartRate' },
+    { id: 'tdurInput', var: 'tDuration' },
+    { id: 'prInput', var: 'prDur' },
+    { id: 'qtInput', var: 'qtIntervalMs' }
+  ];
+  setTimeout(() => {
+    sliderMap.forEach(({id, var: v}) => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.value = String(window[v]);
+        el.addEventListener('input', () => {
+          window[v] = el.type === 'range' ? parseFloat(el.value) : el.value;
+          saveEcgWaveformSettings();
+        });
+      }
+    });
+  }, 0);
   // load persisted conduction items so the panel is populated on startup
   try {
     loadConductionItems();
@@ -1018,8 +1245,55 @@ function openConductionDebugWindow() {
   try { if (typeof ecgG.pixelDensity === 'function') ecgG.pixelDensity(window._ecg_dpr || 1); } catch (e) {}
   try { if (ecgG.drawingContext && 'imageSmoothingEnabled' in ecgG.drawingContext) ecgG.drawingContext.imageSmoothingEnabled = false; } catch (e) {}
 
-  // create conduction panel UI
+  // load persisted conduction items then create conduction panel UI
+  try { loadConductionItems(); } catch (e) { /* ignore */ }
   try { createConductionPanel(); } catch (e) { console.warn('Failed to create conduction panel', e); }
+
+  // Listen for changes to ECG waveform constructor sliders and persist
+  const persistWaveform = () => { saveEcgWaveformSettings(); };
+  // QRS width
+  const qrsInputEl = document.getElementById('qrsInput');
+  if (qrsInputEl) {
+    qrsInputEl.value = String(qrsWidth);
+    qrsInputEl.addEventListener('input', () => {
+      qrsWidth = Number(qrsInputEl.value);
+      persistWaveform();
+    });
+  }
+  // Q duration
+  const qdurInputEl = document.getElementById('qdurInput');
+  if (qdurInputEl) {
+    qdurInputEl.value = String(qDur);
+    qdurInputEl.addEventListener('input', () => {
+      qDur = Number(qdurInputEl.value);
+      persistWaveform();
+    });
+  }
+  // R duration
+  const rdurInputEl = document.getElementById('rdurInput');
+  if (rdurInputEl) {
+    rdurInputEl.value = String(rDur);
+    rdurInputEl.addEventListener('input', () => {
+      rDur = Number(rdurInputEl.value);
+      persistWaveform();
+    });
+  }
+  // S duration
+  const sdurInputEl = document.getElementById('sdurInput');
+  if (sdurInputEl) {
+    sdurInputEl.value = String(sDur);
+    sdurInputEl.addEventListener('input', () => {
+      sDur = Number(sdurInputEl.value);
+      persistWaveform();
+    });
+  }
+  // Other sliders (P duration, HR, T duration, PR, QT)
+  [
+    'pdurInput','hrInput','tdurInput','prInput','qtInput'
+  ].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', persistWaveform);
+  });
 }
 
 function windowResized() {
@@ -1067,11 +1341,194 @@ function draw() {
       try { drawConductionOverlay(ix, iy, iw, ih); } catch (e) { /* ignore overlay errors */ }
       pop();
 
-      // Render ECG into offscreen buffer and blit into right half
+      // Render static PQRST waveform and moving indicator synced to heart rate and conduction
       if (ecgG) {
         ecgG.clear();
-        // grid and waveform
-        drawSingleLeadTo(ecgG, heartRate);
+        // Draw grid
+        ecgG.push();
+        ecgG.background(255);
+        ecgG.stroke(230);
+        ecgG.strokeWeight(1);
+        for (let x = 0; x < ecgG.width; x += 20) ecgG.line(x, 0, x, ecgG.height);
+        for (let y = 0; y < ecgG.height; y += 20) ecgG.line(0, y, ecgG.width, y);
+        ecgG.pop();
+
+        // Draw static PQRST waveform and sync indicator
+        const padLeft = 40, padRight = 40, padTop = 40, padBottom = 40;
+        const w = ecgG.width - padLeft - padRight;
+        const h = ecgG.height - padTop - padBottom;
+        const centerY = padTop + h / 2;
+        const amplitude = h * 0.35;
+        const sampleCount = w;
+        let points = [];
+        let pStartIdx = 0;
+        let foundPStart = false;
+        let prevV = null;
+        // Use the same time reference as ECG rendering
+        const beatPeriod = 60.0 / heartRate;
+        const duration = beatPeriod * 1000 * timeDilation;
+        const now = millis();
+        // t_rel range: -0.2s to +0.6s
+        // Shift waveform 150ms (0.15s) to the left
+        const tRelStart = -0.2 - 0.15;
+        const tRelEnd = 0.6 - 0.15;
+        const tRelRange = tRelEnd - tRelStart;
+        // Calculate time within current beat, mapped to t_rel range
+        const beatFrac = (now / duration) % 1.0;
+        const beatTime = tRelStart + beatFrac * tRelRange;
+        for (let i = 0; i <= sampleCount; i++) {
+          const t_rel = (i / sampleCount) * tRelRange + tRelStart;
+          const v = singleBeatSignal(t_rel, tWaveScale, stOffset, {p:1,q:1,r:1,s:1,t:1});
+          const x = padLeft + i;
+          const y = centerY - v * amplitude;
+          points.push({x, y, t_rel, v});
+          // Find start of P wave (where signal rises above a threshold)
+          if (!foundPStart && prevV !== null && v > 0.02 && prevV <= 0.02) {
+            pStartIdx = i;
+            foundPStart = true;
+          }
+          prevV = v;
+          // Find start indices for Q, R, S, T waves
+          if (i > 0) {
+            // Q: sharp negative deflection after P
+            if (!window._foundQStart && points[i-1].v > -0.02 && v <= -0.02) {
+              window._qStartIdx = i;
+              window._foundQStart = true;
+            }
+            // R: sharp positive after Q
+            if (!window._foundRStart && points[i-1].v < 0.02 && v >= 0.02 && foundPStart && window._foundQStart) {
+              window._rStartIdx = i;
+              window._foundRStart = true;
+            }
+            // S: negative after R
+            if (!window._foundSStart && points[i-1].v > -0.02 && v <= -0.02 && window._foundRStart) {
+              window._sStartIdx = i;
+              window._foundSStart = true;
+            }
+            // T: positive after S
+            if (!window._foundTStart && points[i-1].v < 0.02 && v >= 0.02 && window._foundSStart) {
+              window._tStartIdx = i;
+              window._foundTStart = true;
+            }
+          }
+        }
+        ecgG.push();
+        ecgG.stroke(0, 120, 0);
+        ecgG.strokeWeight(3);
+        ecgG.noFill();
+        ecgG.beginShape();
+        for (let pt of points) ecgG.vertex(pt.x, pt.y);
+        ecgG.endShape();
+        ecgG.pop();
+
+        // Find indicator position by matching beatTime to t_rel (smooth interpolation)
+        let indicatorX, indicatorIdx = 0;
+        if (beatTime <= points[0].t_rel) {
+          indicatorX = points[0].x;
+          indicatorIdx = 0;
+        } else if (beatTime >= points[points.length-1].t_rel) {
+          indicatorX = points[points.length-1].x;
+          indicatorIdx = points.length-1;
+        } else {
+          for (let i = 1; i < points.length; i++) {
+            if (points[i].t_rel >= beatTime) {
+              const prev = points[i-1], curr = points[i];
+              const frac = (beatTime - prev.t_rel) / (curr.t_rel - prev.t_rel);
+              indicatorX = prev.x + frac * (curr.x - prev.x);
+              indicatorIdx = i;
+              break;
+            }
+          }
+        }
+        ecgG.push();
+        ecgG.stroke(255,0,0);
+        ecgG.strokeWeight(2);
+        ecgG.line(indicatorX, padTop, indicatorX, ecgG.height - padBottom);
+        ecgG.pop();
+
+        // Debugging: Track indicator crossing wave starts and log to popup
+        if (!window._waveCrossLog) window._waveCrossLog = [];
+        function logWaveCross(wave, x) {
+          const now = new Date();
+          window._waveCrossLog.push({wave, time: now.toLocaleTimeString(), x: Math.round(x)});
+          if (window.conductionDebugWindow && !window.conductionDebugWindow.closed) {
+            try {
+              const doc = window.conductionDebugWindow.document;
+              let logDiv = doc.getElementById('waveCrossLog');
+              if (!logDiv) {
+                logDiv = doc.createElement('div');
+                logDiv.id = 'waveCrossLog';
+                doc.body.appendChild(logDiv);
+              }
+              let html = '<div style="font-weight:700;margin-bottom:4px">Wave Crossings</div>';
+              for (let i = Math.max(0, window._waveCrossLog.length-20); i < window._waveCrossLog.length; i++) {
+                const entry = window._waveCrossLog[i];
+                html += `<div>${entry.time}: <b>${entry.wave}</b> at x=${entry.x}</div>`;
+              }
+              logDiv.innerHTML = html;
+            } catch (e) {}
+          }
+        }
+        // Track indicator crossing wave starts and trigger conduction steps by ECG event
+        const eventCrossings = [];
+        if (typeof window._lastIndicatorX === 'number') {
+          // Helper: push event if indicator crosses from left to right
+          function checkCross(idx, label, eventKey) {
+            if (typeof idx === 'number') {
+              const x = points[idx].x;
+              if (window._lastIndicatorX < x && indicatorX >= x) {
+                logWaveCross(label, x);
+                eventCrossings.push(eventKey);
+              }
+            }
+          }
+          if (foundPStart) checkCross(pStartIdx, 'P', 'P_start');
+          if (window._foundQStart) checkCross(window._qStartIdx, 'Q', 'Q_start');
+          if (window._foundRStart) checkCross(window._rStartIdx, 'R', 'R_start');
+          if (window._foundSStart) checkCross(window._sStartIdx, 'S', 'S_start');
+          if (window._foundTStart) checkCross(window._tStartIdx, 'T', 'T_start');
+          // End events: next sample after start
+          function checkEnd(idx, label, eventKey) {
+            if (typeof idx === 'number' && idx+1 < points.length) {
+              const x = points[idx+1].x;
+              if (window._lastIndicatorX < x && indicatorX >= x) {
+                logWaveCross(label + ' end', x);
+                eventCrossings.push(eventKey);
+              }
+            }
+          }
+          if (foundPStart) checkEnd(pStartIdx, 'P', 'P_end');
+          if (window._foundQStart) checkEnd(window._qStartIdx, 'Q', 'Q_end');
+          if (window._foundRStart) checkEnd(window._rStartIdx, 'R', 'R_end');
+          if (window._foundSStart) checkEnd(window._sStartIdx, 'S', 'S_end');
+          if (window._foundTStart) checkEnd(window._tStartIdx, 'T', 'T_end');
+          // Reset trigger when indicator wraps around to left
+          if (window._lastIndicatorX > indicatorX) {
+            window._conductionTriggered = false;
+            window._foundQStart = false;
+            window._foundRStart = false;
+            window._foundSStart = false;
+            window._foundTStart = false;
+          }
+        }
+        window._lastIndicatorX = indicatorX;
+
+        // Activate conduction steps whose ecgEvent matches any crossing
+        if (eventCrossings.length > 0) {
+          conductionItems.forEach((it, idx) => {
+            if (it.startMode === 'on_ecg_event' && it.ecgEvent && eventCrossings.includes(it.ecgEvent)) {
+              // When an ECG event matches and item is waiting for ECG event, jump to that step
+              const stepIdx = conductionPlayback.stepOrder.indexOf(Number(it.step) || 0);
+              if (stepIdx >= 0) {
+                conductionPlayback.currentStepIndex = stepIdx;
+                conductionPlayback.stepStartTime = millis();
+                // ensure playback is running so the triggered step is visible
+                conductionPlayback.playing = true;
+              }
+            }
+          });
+        }
+
         // blit to right half
         image(ecgG, halfW, 0);
       }
@@ -1391,7 +1848,7 @@ function drawConductionOverlay(ix, iy, iw, ih) {
       }
       // allow per-step override if present in persisted `conductionStepDurations`
       const overrideVal = (conductionStepDurations && Number.isFinite(conductionStepDurations[activeStepVal])) ? conductionStepDurations[activeStepVal] : null;
-      const stepDur = (Number.isFinite(overrideVal) ? overrideVal : maxDur);
+      const stepDur = (Number.isFinite(overrideVal) ? overrideVal : maxDur) * (typeof timeDilation === 'number' ? timeDilation : 1.0);
       // build per-item computed durations for debugging / display
       const activeItemDurations = activeIdxs.map(ix => {
         const it = conductionItems[ix];
@@ -1417,9 +1874,10 @@ function drawConductionOverlay(ix, iy, iw, ih) {
         // If this item is a closed shape, show depolarization by fading its fill
         if (it.type === 'shape') {
             // determine per-component durations using bindings when present
-            const rampUp = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Math.max(0, Number(it.rampUpMs) || 0);
-            const sustain = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : Math.max(0, Number(it.sustainMs) || 0);
-            const rampDown = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Math.max(0, Number(it.rampDownMs) || 0);
+            const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
+            const rampUp = (it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Math.max(0, Number(it.rampUpMs) || 0)) * dilation;
+            const sustain = (it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : Math.max(0, Number(it.sustainMs) || 0)) * dilation;
+            const rampDown = (it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Math.max(0, Number(it.rampDownMs) || 0)) * dilation;
             const totalEnvelope = rampUp + sustain + rampDown;
             const boundMs = it.durationSource ? getEcgFeatureMs(it.durationSource) : null;
             const effectiveItemDur = (boundMs && Number.isFinite(boundMs)) ? Math.max(10, boundMs) : Math.max(10, totalEnvelope || 0);
