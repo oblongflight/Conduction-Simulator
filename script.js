@@ -7,42 +7,29 @@ function saveTimeDilation() {
 function loadTimeDilation() {
   try {
     const raw = localStorage.getItem(TIME_DILATION_KEY);
-    if (raw) timeDilation = parseFloat(raw);
+    if (raw !== null) {
+      const v = parseFloat(raw);
+      if (!Number.isNaN(v) && v > 0) timeDilation = v;
+    }
   } catch (e) {}
 }
 
-// Create time dilation slider on page load
-window.addEventListener('DOMContentLoaded', function() {
-    // Load ECG waveform settings BEFORE any sliders are created
-    loadEcgWaveformSettings();
-  let sliderDiv = document.getElementById('timeDilationDiv');
-  if (!sliderDiv) {
-    sliderDiv = document.createElement('div');
-    sliderDiv.id = 'timeDilationDiv';
-    sliderDiv.style.position = 'fixed';
-    sliderDiv.style.top = '170px';
-    sliderDiv.style.left = '330px';
-    sliderDiv.style.background = '#fff';
-    sliderDiv.style.border = '1px solid #ccc';
-    sliderDiv.style.padding = '10px 16px';
-    sliderDiv.style.zIndex = '10005';
-    sliderDiv.style.borderRadius = '8px';
-    sliderDiv.innerHTML = '<label for="timeDilationSlider">Time Dilation</label> <input type="range" id="timeDilationSlider" min="0.2" max="10.0" step="0.01" value="1.0" style="width:120px;"> <span id="timeDilationValue">1.00x</span>';
-    document.body.appendChild(sliderDiv);
-  }
-  loadTimeDilation();
-  const slider = document.getElementById('timeDilationSlider');
-  const valueSpan = document.getElementById('timeDilationValue');
-  if (slider && valueSpan) {
-    slider.value = String(timeDilation);
-    valueSpan.textContent = timeDilation.toFixed(2) + 'x';
-    slider.addEventListener('input', function() {
-      timeDilation = parseFloat(slider.value);
-      valueSpan.textContent = timeDilation.toFixed(2) + 'x';
-      saveTimeDilation();
-    });
-  }
-});
+// Conduction state and persistence keys
+const CONDUCTION_EXPLICIT_STEPS_KEY = 'ecg.conductionExplicitSteps.v1';
+const CONDUCTION_STEPS_KEY = 'ecg.conductionStepDurations.v1';
+
+let conductionItems = [];
+// Runtime UI/window refs and helper state
+let conductionWindow = null;
+let conductionPanelDiv = null;
+let conductionPanelOriginalStyles = null;
+let conductionDebugWindow = null;
+let conductionDebugWinDiv = null;
+let selectedConductionIndex = -1;
+let conductionExplicitSteps = [];
+let conductionStepDurations = {};
+
+// --- ECG & Conduction top-level state (restored defaults) ---
 let atheroPercent = 0;
 let thrombusPercent = 0;
 let METs = 1.0;
@@ -55,434 +42,405 @@ let amplitude = 60; // pixels per unit ECG amplitude
 let timeWindow = 10.0; // seconds shown across the canvas
 
 // Adjustable waveform parameters (controlled by sliders)
-let tWaveScale = 1.0;
-let qWaveScale = 1.0;
-let stOffset = 0.0;
-let tDuration = 0.12;
-let qtIntervalMs = 360;
-let pDuration = 0.05;
-let pAmp = 0.25;
+let tWaveScale = 1.0; // multiplier for T wave amplitude (can be negative)
+let qWaveScale = 1.0; // multiplier for Q wave magnitude
+let stOffset = 0.0; // ST elevation/depression (in signal units)
+let tDuration = 0.12; // T wave duration (seconds, approximate width)
+let qtIntervalMs = 360; // QT interval in milliseconds (Q onset to T end)
+
+// P-wave adjustable parameters
+let pDuration = 0.05; // seconds (default ~50 ms)
+let pAmp = 0.25; // amplitude multiplier (visible by default)
+// Global QRS width multiplier (1.0 == normal)
 let qrsWidth = 1.0;
-let qDur = 0.1; // 100ms
+// Individual Q/R/S duration controls (seconds)
+let qDur = 0.02;
 let rDur = 0.01;
 let sDur = 0.02;
+// Arrhythmia / morphology controls (global options)
 let pBiphasic = false;
+// Global amplitude multipliers for components
 let gP = 1.0;
 let gQ = 1.0;
 let gR = 1.0;
 let gS = 1.0;
 let gT = 1.0;
-let prDur = 0.2; // 200ms
+// PR interval (seconds) - preferred delay from P peak to Q onset
+let prDur = 0.16; // typical ~0.12-0.20
 
-const ECG_WAVEFORM_KEY = 'ecg.waveformSettings.v1';
-function saveEcgWaveformSettings() {
-  try {
-    const obj = { tWaveScale, qWaveScale, stOffset, tDuration, qtIntervalMs, pDuration, pAmp, qrsWidth, qDur, rDur, sDur, pBiphasic, gP, gQ, gR, gS, gT, prDur };
-    localStorage.setItem(ECG_WAVEFORM_KEY, JSON.stringify(obj));
-  } catch (e) {}
-}
-function loadEcgWaveformSettings() {
-  try {
-    const raw = localStorage.getItem(ECG_WAVEFORM_KEY);
-    if (!raw) return;
-    const obj = JSON.parse(raw);
-    if (!obj) return;
-    tWaveScale = obj.tWaveScale ?? tWaveScale;
-    qWaveScale = obj.qWaveScale ?? qWaveScale;
-    stOffset = obj.stOffset ?? stOffset;
-    tDuration = obj.tDuration ?? tDuration;
-    qtIntervalMs = obj.qtIntervalMs ?? qtIntervalMs;
-    pDuration = obj.pDuration ?? pDuration;
-    pAmp = obj.pAmp ?? pAmp;
-    qrsWidth = obj.qrsWidth ?? qrsWidth;
-    qDur = obj.qDur ?? qDur;
-    rDur = obj.rDur ?? rDur;
-    sDur = obj.sDur ?? sDur;
-    pBiphasic = obj.pBiphasic ?? pBiphasic;
-    gP = obj.gP ?? gP;
-    gQ = obj.gQ ?? gQ;
-    gR = obj.gR ?? gR;
-    gS = obj.gS ?? gS;
-    gT = obj.gT ?? gT;
-    prDur = obj.prDur ?? prDur;
-  } catch (e) {}
-}
-
-// CCS image (optional) — loaded if present
+// CCS image (optional)
 let ccsImg = null;
 
 // View mode: true = single-lead (CCS left + ECG right), false = 12-lead grid
 let singleLeadView = true;
 
-// Labels for 12-lead layout
-const leadLabelsGlobal = ['I','II','III','aVR','aVL','aVF','V1','V2','V3','V4','V5','V6'];
-
-// Conduction overlay data structures (paths/shapes over CCS image)
-let conductionItems = []; // each: { id, name, type:'path'|'shape', points:[{x,y}], color, fill, closed }
-let selectedConductionIndex = -1;
-let conductionEditMode = false; // when true, clicks edit/add points
+// Diagnostic / UI state
 let conductionDragging = { idx: -1, pt: -1 };
-let conductionPanelDiv = null;
-// Pop-out window state for the conduction panel
-let conductionWindow = null;
-let conductionPanelOriginalStyles = null;
-// DOM debug container for conduction step/item durations
-let conductionDebugDiv = null;
-let conductionDebugWindow = null;
-let conductionDebugWinDiv = null;
+// whether the user is in edit mode for conduction shapes/paths
+let conductionEditMode = false;
 
-// Playback/scheduler state for conduction steps
-let conductionPlayback = {
-  playing: true,
-  stepOrder: [], // ordered unique step values as they appear in conductionItems
-  currentStepIndex: 0,
-  stepStartTime: 0
-};
+// Persistence for waveform settings
+const ECG_WAVEFORM_KEY = 'ecg.waveform.v1';
 
-// Per-step durations (ms). Keyed by step value (number -> ms)
-let conductionStepDurations = {};
-const CONDUCTION_STEPS_KEY = 'ecg.conductionSteps.v1';
-
-function saveConductionStepDurations() {
+function saveEcgWaveformSettings() {
   try {
-    localStorage.setItem(CONDUCTION_STEPS_KEY, JSON.stringify(conductionStepDurations));
-  } catch (e) { console.warn('Failed to save conduction step durations', e); }
+    const payload = {
+      atheroPercent, thrombusPercent, METs,
+      heartRate, amplitude, timeWindow,
+      tWaveScale, qWaveScale, stOffset, tDuration, qtIntervalMs,
+      pDuration, pAmp, qrsWidth, qDur, rDur, sDur, pBiphasic, gP, gQ, gR, gS, gT, prDur
+    };
+    localStorage.setItem(ECG_WAVEFORM_KEY, JSON.stringify(payload));
+  } catch (e) { console.warn('saveEcgWaveformSettings error', e); }
 }
 
-function loadConductionStepDurations() {
+function loadEcgWaveformSettings() {
   try {
-    const raw = localStorage.getItem(CONDUCTION_STEPS_KEY);
+    const raw = localStorage.getItem(ECG_WAVEFORM_KEY);
     if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return;
-    conductionStepDurations = {};
-    for (const k of Object.keys(parsed)) {
-      const n = Number(k);
-      if (Number.isFinite(n)) conductionStepDurations[n] = Math.max(10, Number(parsed[k]) || 10);
-    }
-  } catch (e) { console.warn('Failed to load conduction step durations', e); }
+    const p = JSON.parse(raw);
+    if (!p || typeof p !== 'object') return;
+    if (typeof p.atheroPercent === 'number') atheroPercent = p.atheroPercent;
+    if (typeof p.thrombusPercent === 'number') thrombusPercent = p.thrombusPercent;
+    if (typeof p.METs === 'number') METs = p.METs;
+    if (typeof p.heartRate === 'number') heartRate = p.heartRate;
+    if (typeof p.amplitude === 'number') amplitude = p.amplitude;
+    if (typeof p.timeWindow === 'number') timeWindow = p.timeWindow;
+    if (typeof p.tWaveScale === 'number') tWaveScale = p.tWaveScale;
+    if (typeof p.qWaveScale === 'number') qWaveScale = p.qWaveScale;
+    if (typeof p.stOffset === 'number') stOffset = p.stOffset;
+    if (typeof p.tDuration === 'number') tDuration = p.tDuration;
+    if (typeof p.qtIntervalMs === 'number') qtIntervalMs = p.qtIntervalMs;
+    if (typeof p.pDuration === 'number') pDuration = p.pDuration;
+    if (typeof p.pAmp === 'number') pAmp = p.pAmp;
+    if (typeof p.qrsWidth === 'number') qrsWidth = p.qrsWidth;
+    if (typeof p.qDur === 'number') qDur = p.qDur;
+    if (typeof p.rDur === 'number') rDur = p.rDur;
+    if (typeof p.sDur === 'number') sDur = p.sDur;
+    if (typeof p.pBiphasic === 'boolean') pBiphasic = p.pBiphasic;
+    if (typeof p.gP === 'number') gP = p.gP;
+    if (typeof p.gQ === 'number') gQ = p.gQ;
+    if (typeof p.gR === 'number') gR = p.gR;
+    if (typeof p.gS === 'number') gS = p.gS;
+    if (typeof p.gT === 'number') gT = p.gT;
+    if (typeof p.prDur === 'number') prDur = p.prDur;
+  } catch (e) { console.warn('loadEcgWaveformSettings error', e); }
 }
 
-// Clear a per-step override (callable from popup via window.opener)
-function clearConductionStepOverride(step) {
+// Export current conduction data (items, explicit steps, step durations) as JSON file
+function exportConductionData() {
   try {
-    if (conductionStepDurations && (step in conductionStepDurations)) delete conductionStepDurations[step];
-    try { saveConductionStepDurations(); } catch (e) {}
-    try { refreshConductionPanel(); } catch (e) {}
-  } catch (e) { /* ignore */ }
+    const payload = {
+      conductionItems: conductionItems.map(it => ({ id: it.id, name: it.name, type: it.type, points: it.points, color: it.color, fill: it.fill, closed: it.closed, mode: it.mode, durationMs: it.durationMs, step: it.step, rampUpMs: it.rampUpMs, sustainMs: it.sustainMs, rampDownMs: it.rampDownMs, durationSource: it.durationSource || null, rampUpSource: it.rampUpSource || null, sustainSource: it.sustainSource || null, rampDownSource: it.rampDownSource || null, startMode: it.startMode || 'after_previous', ecgEvent: it.ecgEvent || '' })),
+      conductionExplicitSteps: Array.isArray(conductionExplicitSteps) ? conductionExplicitSteps.slice() : [],
+      conductionStepDurations: conductionStepDurations || {}
+    };
+    const filename = 'conduction_export_' + (new Date()).toISOString().replace(/[:.]/g,'-') + '.json';
+    downloadJSON(payload, filename);
+  } catch (e) { console.warn('exportConductionData error', e); alert('Export failed: ' + String(e)); }
 }
 
-function computeConductionStepOrder() {
-  const seen = new Set();
-  const order = [];
-  for (let it of conductionItems) {
-    const s = Number(it.step) || 0;
-    if (!seen.has(s)) { seen.add(s); order.push(s); }
-  }
-  conductionPlayback.stepOrder = order;
-  // clamp currentStepIndex
-  if (conductionPlayback.currentStepIndex >= conductionPlayback.stepOrder.length) conductionPlayback.currentStepIndex = 0;
-}
-
-// Trigger a named ECG event programmatically (used by test trigger)
-function triggerEcgEvent(eventKey) {
-  if (!eventKey) return;
-  // find items waiting for this event and jump to their step
+function downloadJSON(obj, filename) {
   try {
-    const matches = conductionItems.filter(it => it && it.startMode === 'on_ecg_event' && it.ecgEvent === eventKey);
-    if (matches.length === 0) return;
-    // pick the first match and set playback to its step
-    const it = matches[0];
-    const stepIdx = conductionPlayback.stepOrder.indexOf(Number(it.step) || 0);
-    if (stepIdx >= 0) {
-      conductionPlayback.currentStepIndex = stepIdx;
-      conductionPlayback.stepStartTime = millis();
-      // ensure playback is running so the triggered step is visible
-      conductionPlayback.playing = true;
+    const data = JSON.stringify(obj, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); setTimeout(() => { try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch (e) {} }, 500);
+  } catch (e) { console.warn('downloadJSON error', e); alert('Download failed: ' + String(e)); }
+}
+
+// Handle parsed imported object; allow replace or merge
+function handleImportedConduction(parsed) {
+  try {
+    if (!parsed) { alert('No data found in import'); return; }
+    // support raw array of items or wrapped object
+    let importedItems = null;
+    if (Array.isArray(parsed)) importedItems = parsed;
+    else if (parsed.conductionItems && Array.isArray(parsed.conductionItems)) importedItems = parsed.conductionItems;
+    else { alert('Imported JSON does not contain conduction items'); return; }
+
+    // simple validation: ensure items have points array
+    for (const it of importedItems) {
+      if (!it.points || !Array.isArray(it.points)) { alert('Imported items malformed (missing points)'); return; }
     }
-  } catch (e) { console.warn('triggerEcgEvent error', e); }
-}
 
-function resetConductionPlayback() {
-  conductionPlayback.stepStartTime = millis();
-  conductionPlayback.currentStepIndex = 0;
-  computeConductionStepOrder();
-}
-
-function createConductionItem(type = 'path') {
-  const id = Date.now();
-  const name = type === 'path' ? 'Path ' + (conductionItems.length + 1) : 'Shape ' + (conductionItems.length + 1);
-  // mode: 'sequential' => animate a traveling dot along the path over durationMs
-  // mode: 'concurrent' => show pulses at all points simultaneously
-  const item = { id, name, type, points: [], color: '#ff0000', fill: (type === 'shape'), closed: (type === 'shape'), mode: 'sequential', durationMs: 1200, step: conductionItems.length, rampUpMs: 200, sustainMs: 800, rampDownMs: 200, startMode: 'after_previous', ecgEvent: '' };
-  conductionItems.push(item);
-  selectedConductionIndex = conductionItems.length - 1;
-  try { saveConductionItems(); } catch (e) {}
-  refreshConductionPanel();
-}
-
-function refreshConductionPanel() {
-  if (!conductionPanelDiv) return;
-  // remove existing list area if present
-  let list = conductionPanelDiv.querySelector('.cond-list');
-  if (list) conductionPanelDiv.removeChild(list);
-  list = document.createElement('div');
-  list.className = 'cond-list';
-
-  // Precompute step -> max item duration so headers can show a sensible default
-  const stepMaxDur = {};
-  for (let it of conductionItems) {
-    const s = Number(it.step) || 0;
-    // Determine item-driven duration: if item has a binding to an ECG feature use that, else shape totals or durationMs
-    let itemDur = 0;
-    if (it.durationSource) {
-      const fv = getEcgFeatureMs(it.durationSource);
-      itemDur = Math.max(10, fv || 10);
-    } else if (it.type === 'shape') {
-      // allow per-component bindings; use bound values when present
-      const upVal = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : (Number(it.rampUpMs) || 0);
-      const susVal = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : (Number(it.sustainMs) || 0);
-      const downVal = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : (Number(it.rampDownMs) || 0);
-      const shapeTotal = upVal + susVal + downVal;
-      itemDur = Math.max(10, shapeTotal || 0);
-    } else {
-      itemDur = Math.max(10, Number(it.durationMs) || 1200);
+    const choice = confirm('Replace existing conduction items with imported data? Cancel to merge (append) instead.');
+    if (choice) {
+      // replace
+      conductionItems = importedItems.map((it, idx) => ({
+        id: it.id || Date.now() + idx,
+        name: it.name || ('Item ' + (idx+1)),
+        type: it.type === 'shape' ? 'shape' : 'path',
+        points: it.points.map(p => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 })),
+        color: it.color || '#ff0000',
+        fill: !!it.fill,
+        closed: !!it.closed,
+        mode: (it.mode === 'concurrent' ? 'concurrent' : 'sequential'),
+        durationMs: Number(it.durationMs) || 1200,
+        step: (typeof it.step === 'number') ? it.step : (typeof it.step === 'string' ? Number(it.step) || 0 : idx),
+        rampUpMs: Number(it.rampUpMs) || 200,
+        sustainMs: Number(it.sustainMs) || 800,
+        rampDownMs: Number(it.rampDownMs) || 200,
+        durationSource: it.durationSource || null,
+        rampUpSource: it.rampUpSource || null,
+        sustainSource: it.sustainSource || null,
+        rampDownSource: it.rampDownSource || null,
+        startMode: it.startMode || 'after_previous',
+        ecgEvent: it.ecgEvent || ''
+      }));
+      // optionally import explicit steps and durations if present
+      if (parsed.conductionExplicitSteps && Array.isArray(parsed.conductionExplicitSteps)) conductionExplicitSteps = parsed.conductionExplicitSteps.slice();
+      if (parsed.conductionStepDurations && typeof parsed.conductionStepDurations === 'object') conductionStepDurations = Object.assign({}, parsed.conductionStepDurations);
+      try { saveConductionItems(); } catch (e) { console.warn('save after import failed', e); }
+      refreshConductionPanel();
+      alert('Import successful: replaced existing items.');
+      console.log('Imported conduction items (replace):', conductionItems);
+      return;
     }
-    stepMaxDur[s] = Math.max(stepMaxDur[s] || 0, itemDur);
-  }
 
-  const seenSteps = new Set();
-  conductionItems.forEach((it, idx) => {
-    const stepVal = Number(it.step) || 0;
-    // insert a step header when we encounter a new step
-    if (!seenSteps.has(stepVal)) {
-      seenSteps.add(stepVal);
-      const hdr = document.createElement('div'); hdr.style.display='flex'; hdr.style.alignItems='center'; hdr.style.justifyContent='space-between'; hdr.style.gap='8px'; hdr.style.padding='6px 4px'; hdr.style.background='rgba(0,0,0,0.02)'; hdr.style.borderBottom='1px solid rgba(0,0,0,0.04)';
-      const lbl = document.createElement('div'); lbl.textContent = 'Step ' + String(stepVal); lbl.style.fontWeight='700'; hdr.appendChild(lbl);
-      const durWrap = document.createElement('div'); durWrap.style.display='flex'; durWrap.style.alignItems='center'; durWrap.style.gap='6px';
-      const durLabel = document.createElement('div'); durLabel.textContent = 'Duration (ms)'; durLabel.style.fontSize='12px'; durLabel.style.opacity='0.8';
-      // readonly computed driven duration (max of item-driven durations)
-      const computedSpan = document.createElement('div'); computedSpan.style.fontSize = '12px'; computedSpan.style.opacity = '0.85'; computedSpan.style.minWidth = '64px';
-      const computedDur = (stepMaxDur[stepVal] || 1200);
-      computedSpan.textContent = 'computed: ' + String(Math.max(10, computedDur));
-      // optional per-step override input (empty = use computed)
-      const overrideInput = document.createElement('input'); overrideInput.type = 'number'; overrideInput.min = '10'; overrideInput.step = '10'; overrideInput.placeholder = 'auto'; overrideInput.style.width = '84px';
-      const existingOverride = (conductionStepDurations && Number.isFinite(conductionStepDurations[stepVal])) ? conductionStepDurations[stepVal] : '';
-      overrideInput.value = existingOverride !== '' ? String(existingOverride) : '';
-      overrideInput.title = 'Optional per-step override in ms (leave empty to use computed)';
-      overrideInput.onchange = (e) => {
-        const v = e.target.value === '' ? null : Math.max(10, Number(e.target.value) || 10);
-        if (v === null) {
-          if (conductionStepDurations && (stepVal in conductionStepDurations)) delete conductionStepDurations[stepVal];
-        } else {
-          conductionStepDurations[stepVal] = v;
-        }
-        try { saveConductionStepDurations(); } catch (err) {}
-        // update the UI to reflect the change
-        refreshConductionPanel();
+    // merge: append imported items but avoid id collisions
+    const existingIds = new Set(conductionItems.map(it => it.id));
+    const toAppend = importedItems.map((it, idx) => {
+      let newId = it.id || (Date.now() + idx);
+      while (existingIds.has(newId)) newId = newId + 1;
+      existingIds.add(newId);
+      return {
+        id: newId,
+        name: it.name || ('Imported ' + (idx+1)),
+        type: it.type === 'shape' ? 'shape' : 'path',
+        points: it.points.map(p => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 })),
+        color: it.color || '#ff0000',
+        fill: !!it.fill,
+        closed: !!it.closed,
+        mode: (it.mode === 'concurrent' ? 'concurrent' : 'sequential'),
+        durationMs: Number(it.durationMs) || 1200,
+        step: (typeof it.step === 'number') ? it.step : (typeof it.step === 'string' ? Number(it.step) || 0 : conductionItems.length),
+        rampUpMs: Number(it.rampUpMs) || 200,
+        sustainMs: Number(it.sustainMs) || 800,
+        rampDownMs: Number(it.rampDownMs) || 200,
+        durationSource: it.durationSource || null,
+        rampUpSource: it.rampUpSource || null,
+        sustainSource: it.sustainSource || null,
+        rampDownSource: it.rampDownSource || null,
+        startMode: it.startMode || 'after_previous',
+        ecgEvent: it.ecgEvent || ''
       };
-      const clearBtn = document.createElement('button'); clearBtn.textContent = 'Clear'; clearBtn.title = 'Clear override'; clearBtn.onclick = () => { if (conductionStepDurations && (stepVal in conductionStepDurations)) delete conductionStepDurations[stepVal]; try { saveConductionStepDurations(); } catch (err) {} refreshConductionPanel(); };
-      durWrap.appendChild(durLabel);
-      durWrap.appendChild(computedSpan);
-      durWrap.appendChild(overrideInput);
-      durWrap.appendChild(clearBtn);
-      hdr.appendChild(durWrap);
-      list.appendChild(hdr);
-    }
-
-    const row = document.createElement('div');
-    row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '6px'; row.style.padding = '6px'; row.style.borderBottom = '1px solid rgba(0,0,0,0.06)';
-    // prevent wrapping so controls stay on a single line (avoid visual wrapping)
-    row.style.flexWrap = 'nowrap';
-    row.style.boxSizing = 'border-box';
-    row.style.background = (conductionEditMode && idx === selectedConductionIndex) ? 'rgba(0,120,215,0.06)' : 'transparent';
-    const nameInput = document.createElement('input'); nameInput.type = 'text'; nameInput.value = it.name; nameInput.style.flex = '1'; nameInput.onchange = (e) => { it.name = e.target.value; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
-    // Mode select (sequential vs concurrent)
-        // ECG event trigger dropdown
-        const ecgEventSel = document.createElement('select');
-        ecgEventSel.style.width = '160px';
-        ecgEventSel.title = 'Start this step when the ECG indicator passes the selected event';
-        const ecgEvents = [
-          { value: '', text: 'Manual/Default (no trigger)' },
-          { value: 'P_start', text: 'P wave start' },
-          { value: 'P_end', text: 'P wave end' },
-          { value: 'Q_start', text: 'Q wave start' },
-          { value: 'Q_end', text: 'Q wave end' },
-          { value: 'R_start', text: 'R wave start' },
-          { value: 'R_end', text: 'R wave end' },
-          { value: 'S_start', text: 'S wave start' },
-          { value: 'S_end', text: 'S wave end' },
-          { value: 'T_start', text: 'T wave start' },
-          { value: 'T_end', text: 'T wave end' }
-        ];
-        ecgEvents.forEach(ev => {
-          const opt = document.createElement('option');
-          opt.value = ev.value;
-          opt.text = ev.text;
-          ecgEventSel.appendChild(opt);
-        });
-        ecgEventSel.value = it.ecgEvent || '';
-        ecgEventSel.onchange = (e) => { it.ecgEvent = e.target.value; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
-        // start mode select: after previous step, or wait for ECG event
-        const startModeSel = document.createElement('select');
-        const sm1 = document.createElement('option'); sm1.value = 'after_previous'; sm1.text = 'After previous';
-        const sm2 = document.createElement('option'); sm2.value = 'on_ecg_event'; sm2.text = 'On ECG event';
-        startModeSel.appendChild(sm1); startModeSel.appendChild(sm2);
-        startModeSel.value = it.startMode || 'after_previous';
-        startModeSel.style.width = '140px';
-        startModeSel.title = 'Start this step after the prior step or wait for an ECG event';
-        startModeSel.onchange = (e) => { it.startMode = e.target.value; ecgEventSel.disabled = (it.startMode !== 'on_ecg_event'); try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
-        // enable/disable the ecgEvent selector based on startMode
-        ecgEventSel.disabled = (it.startMode !== 'on_ecg_event');
-    const modeSel = document.createElement('select');
-    const mo1 = document.createElement('option'); mo1.value = 'sequential'; mo1.text = 'Sequential';
-    const mo2 = document.createElement('option'); mo2.value = 'concurrent'; mo2.text = 'Concurrent';
-    modeSel.appendChild(mo1); modeSel.appendChild(mo2); modeSel.value = it.mode || 'sequential';
-    modeSel.style.width = '120px';
-    modeSel.title = 'Playback mode: sequential (travels) or concurrent (all)';
-    modeSel.onchange = (e) => { it.mode = e.target.value; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
-    // duration (ms) for traversal (paths editable; shapes driven by envelope totals)
-    let durInput = null;
-    let durSpan = null;
-    if (it.type === 'shape') {
-      durSpan = document.createElement('div');
-      // compute envelope totals using per-component bindings when present
-      const totUp = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : (Number(it.rampUpMs) || 0);
-      const totSus = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : (Number(it.sustainMs) || 0);
-      const totDown = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : (Number(it.rampDownMs) || 0);
-      const total = totUp + totSus + totDown;
-      // if bound to a single ECG feature for overall duration, show that value instead
-      if (it.durationSource) {
-        const fv = getEcgFeatureMs(it.durationSource) || 0;
-        durSpan.textContent = String(Math.max(10, fv));
-      } else {
-        durSpan.textContent = String(Math.max(10, total));
-      }
-      durSpan.title = 'Shape total duration (driven by envelope components)';
-      durSpan.style.minWidth = '64px';
-    } else {
-      durInput = document.createElement('input'); durInput.type = 'number'; durInput.min = '10'; durInput.step = '10'; durInput.value = String(it.durationMs || 1200); durInput.title = 'Duration (ms) for traversal (per-item)';
-      durInput.style.width = '64px'; durInput.oninput = (e) => { const v = Number(e.target.value) || 0; it.durationMs = Math.max(10, v); try { saveConductionItems(); } catch (err) {} };
-      // if bound to ECG feature, show a readonly span instead and hide editable input
-      if (it.durationSource) {
-        const fv = getEcgFeatureMs(it.durationSource) || 0;
-        durSpan = document.createElement('div'); durSpan.textContent = String(Math.max(10, fv)); durSpan.style.minWidth = '64px'; durSpan.title = 'Duration driven from ECG feature';
-        durInput.style.display = 'none';
-      }
-    }
-    // step number: items with same step run concurrently; steps advance in order
-    const stepInput = document.createElement('input'); stepInput.type = 'number'; stepInput.min = '0'; stepInput.step = '1'; stepInput.value = String(typeof it.step === 'number' ? it.step : 0); stepInput.title = 'Step: items with same step run concurrently'; stepInput.style.width = '56px'; stepInput.oninput = (e) => { const v = Math.max(0, Math.floor(Number(e.target.value) || 0)); it.step = v; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
-    const upBtn = document.createElement('button'); upBtn.textContent = '↑'; upBtn.title = 'Move up'; upBtn.onclick = () => { if (idx > 0) { conductionItems.splice(idx-1, 0, conductionItems.splice(idx,1)[0]); selectedConductionIndex = idx-1; try { saveConductionItems(); } catch (e) {} refreshConductionPanel(); } };
-    const downBtn = document.createElement('button'); downBtn.textContent = '↓'; downBtn.title = 'Move down'; downBtn.onclick = () => { if (idx < conductionItems.length-1) { conductionItems.splice(idx+1, 0, conductionItems.splice(idx,1)[0]); selectedConductionIndex = idx+1; try { saveConductionItems(); } catch (e) {} refreshConductionPanel(); } };
-    const delBtn = document.createElement('button'); delBtn.textContent = '✕'; delBtn.title = 'Delete'; delBtn.onclick = () => { conductionItems.splice(idx,1); if (selectedConductionIndex >= conductionItems.length) selectedConductionIndex = conductionItems.length - 1; try { saveConductionItems(); } catch (e) {} refreshConductionPanel(); };
-    const selBtn = document.createElement('button'); selBtn.textContent = 'Edit'; selBtn.title = 'Select/Edit'; selBtn.onclick = () => { selectedConductionIndex = idx; conductionEditMode = true; refreshConductionPanel(); };
-    const typeSel = document.createElement('select'); const opt1 = document.createElement('option'); opt1.value='path'; opt1.text='Path'; const opt2 = document.createElement('option'); opt2.value='shape'; opt2.text='Shape'; typeSel.appendChild(opt1); typeSel.appendChild(opt2); typeSel.value = it.type; typeSel.onchange = (e) => { it.type = e.target.value; it.fill = it.type === 'shape'; it.closed = it.type === 'shape'; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
-
-    const colorIn = document.createElement('input'); colorIn.type = 'color'; colorIn.value = it.color; colorIn.oninput = (e) => { it.color = e.target.value; try { saveConductionItems(); } catch (err) {} };
-
-    row.appendChild(nameInput); row.appendChild(typeSel); row.appendChild(colorIn); row.appendChild(modeSel); row.appendChild(startModeSel); row.appendChild(ecgEventSel);
-    if (durInput) row.appendChild(durInput); else if (durSpan) row.appendChild(durSpan);
-    // binding select to tie this item's duration to an ECG feature
-    const bindSel = document.createElement('select');
-    const addOpt = (val, text) => { const o = document.createElement('option'); o.value = val; o.text = text; bindSel.appendChild(o); };
-    addOpt('', 'Manual'); addOpt('P', 'P wave'); addOpt('PR', 'PR interval'); addOpt('QRS', 'QRS'); addOpt('QT', 'QT interval'); addOpt('T', 'T wave'); addOpt('TP', 'TP interval');
-    bindSel.value = it.durationSource || '';
-    bindSel.title = 'Bind this item\'s duration to an ECG feature';
-    bindSel.onchange = (e) => { it.durationSource = e.target.value || null; try { saveConductionItems(); } catch (err) {} refreshConductionPanel(); };
-    row.appendChild(bindSel);
-    // If this is a shape, provide envelope controls stacked vertically: ramp up, sustain, ramp down (ms)
-    if (it.type === 'shape') {
-      const envCol = document.createElement('div'); envCol.style.display = 'flex'; envCol.style.flexDirection = 'column'; envCol.style.gap = '4px'; envCol.style.marginLeft = '8px'; envCol.style.minWidth = '220px';
-      const makeRow = (labelText, initial, onchange, bindingKey) => {
-        const r = document.createElement('div'); r.style.display = 'flex'; r.style.alignItems = 'center'; r.style.gap = '6px';
-        const lab = document.createElement('div'); lab.textContent = labelText; lab.style.width = '70px'; lab.style.fontSize = '12px';
-        const inp = document.createElement('input'); inp.type = 'number'; inp.min = '0'; inp.step = '10'; inp.value = String(Number(initial) || 0); inp.style.width = '100px'; inp.oninput = (e) => { onchange(Number(e.target.value) || 0); };
-        // binding select for this component
-        const bind = document.createElement('select'); bind.style.width = '90px';
-        const addOptComp = (val, text) => { const o = document.createElement('option'); o.value = val; o.text = text; bind.appendChild(o); };
-        addOptComp('', 'Manual'); addOptComp('P', 'P wave'); addOptComp('PR', 'PR interval'); addOptComp('QRS', 'QRS'); addOptComp('QT', 'QT interval'); addOptComp('T', 'T wave'); addOptComp('TP', 'TP interval');
-        // initialize binding value from item
-        if (bindingKey && it[bindingKey]) bind.value = it[bindingKey]; else bind.value = '';
-        bind.title = 'Bind this component\'s duration to an ECG feature';
-        bind.onchange = (e) => { if (bindingKey) it[bindingKey] = e.target.value || null; refreshConductionPanel(); };
-        // resolved-ms tooltip span (shows binding -> ms or numeric ms)
-        const resolved = document.createElement('div'); resolved.style.fontSize = '11px'; resolved.style.opacity = '0.85'; resolved.style.width = '100px'; resolved.style.textAlign = 'right';
-        // initialize resolved text
-        try {
-          const numericKey = bindingKey ? bindingKey.replace('Source', 'Ms') : null;
-          const boundKey = bindingKey ? it[bindingKey] : null;
-          let rv = 0;
-          if (boundKey) rv = getEcgFeatureMs(boundKey) || 0; else if (numericKey) rv = Number(it[numericKey]) || 0; else rv = Number(initial) || 0;
-          resolved.textContent = boundKey ? (boundKey + ' → ' + String(Math.max(0, rv)) + ' ms') : (String(Math.max(0, rv)) + ' ms');
-        } catch (e) { resolved.textContent = '' }
-        r.appendChild(lab); r.appendChild(inp); r.appendChild(bind); r.appendChild(resolved); return r;
-      };
-      const upRow = makeRow('Ramp Up', it.rampUpMs || 200, (v) => { it.rampUpMs = Math.max(0, v); refreshConductionPanel(); }, 'rampUpSource');
-      const susRow = makeRow('Sustain', it.sustainMs || 800, (v) => { it.sustainMs = Math.max(0, v); refreshConductionPanel(); }, 'sustainSource');
-      const downRow = makeRow('Ramp Down', it.rampDownMs || 200, (v) => { it.rampDownMs = Math.max(0, v); refreshConductionPanel(); }, 'rampDownSource');
-      envCol.appendChild(upRow); envCol.appendChild(susRow); envCol.appendChild(downRow);
-      row.appendChild(envCol);
-    }
-
-    row.appendChild(stepInput); row.appendChild(selBtn); row.appendChild(upBtn); row.appendChild(downBtn); row.appendChild(delBtn);
-    row.onclick = (e) => { selectedConductionIndex = idx; refreshConductionPanel(); };
-    list.appendChild(row);
-  });
-
-  conductionPanelDiv.appendChild(list);
-  // persist the current list
-  try { saveConductionItems(); } catch (e) { console.warn('Failed to save conduction items', e); }
-
-  // recompute step order for playback whenever list changes
-  try { computeConductionStepOrder(); } catch (e) { /* ignore */ }
+    });
+    conductionItems = conductionItems.concat(toAppend);
+    try { saveConductionItems(); } catch (e) { console.warn('save after import merge failed', e); }
+    refreshConductionPanel();
+    alert('Import merged: appended ' + toAppend.length + ' items.');
+    console.log('Imported conduction items (merged):', toAppend);
+  } catch (e) { console.warn('handleImportedConduction error', e); alert('Import failed: ' + String(e)); }
 }
 
-// Persistence for conduction items
-const CONDUCTION_STORAGE_KEY = 'ecg.conductionItems.v1';
+// Persist / load conduction items
+const CONDUCTION_ITEMS_KEY = 'ecg.conductionItems.v1';
+const ECG_TRIGGER_KEY = 'ecg.triggering.v1';
+let ecgTriggeringEnabled = false;
 function saveConductionItems() {
   try {
-    const toSave = conductionItems.map(it => ({ id: it.id, name: it.name, type: it.type, points: it.points.map(p => ({ x: Number(p.x), y: Number(p.y) })), color: it.color, fill: !!it.fill, closed: !!it.closed, mode: it.mode || 'sequential', durationMs: Number(it.durationMs) || 1200, step: Number(it.step) || 0, rampUpMs: Number(it.rampUpMs) || 200, sustainMs: Number(it.sustainMs) || 800, rampDownMs: Number(it.rampDownMs) || 200, durationSource: it.durationSource || null, rampUpSource: it.rampUpSource || null, sustainSource: it.sustainSource || null, rampDownSource: it.rampDownSource || null, startMode: it.startMode || 'after_previous', ecgEvent: it.ecgEvent || '' }));
-    localStorage.setItem(CONDUCTION_STORAGE_KEY, JSON.stringify(toSave));
-    // also persist per-step durations
-    try { saveConductionStepDurations(); } catch (e) { console.warn('Failed to save step durations', e); }
+    localStorage.setItem(CONDUCTION_ITEMS_KEY, JSON.stringify(conductionItems));
   } catch (e) { console.warn('saveConductionItems error', e); }
 }
 
 function loadConductionItems() {
   try {
-    const raw = localStorage.getItem(CONDUCTION_STORAGE_KEY);
+    const raw = localStorage.getItem(CONDUCTION_ITEMS_KEY);
+    if (!raw) { conductionItems = conductionItems || []; return; }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) { conductionItems = conductionItems || []; return; }
+    // normalize items to expected shape
+    conductionItems = parsed.map((it, idx) => {
+      const pts = Array.isArray(it.points) ? it.points.map(p => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 })) : [];
+      return {
+        id: it.id || (Date.now() + idx),
+        name: it.name || ('Item ' + (idx + 1)),
+        type: (it.type === 'shape' ? 'shape' : 'path'),
+        points: pts,
+        color: it.color || '#ff0000',
+        fill: !!it.fill,
+        closed: !!it.closed,
+        mode: it.mode || 'sequential',
+        durationMs: Number(it.durationMs) || 1200,
+        step: (typeof it.step === 'number') ? it.step : idx,
+        rampUpMs: Number(it.rampUpMs) || 200,
+        sustainMs: Number(it.sustainMs) || 800,
+        rampDownMs: Number(it.rampDownMs) || 200,
+        durationSource: it.durationSource || null,
+        rampUpSource: it.rampUpSource || null,
+        sustainSource: it.sustainSource || null,
+        rampDownSource: it.rampDownSource || null,
+        startMode: it.startMode || 'after_previous',
+        ecgEvent: it.ecgEvent || '',
+        playbackStartTime: 0
+      };
+    });
+  } catch (e) { console.warn('loadConductionItems error', e); conductionItems = conductionItems || []; }
+}
+
+// Persist / load ECG-triggering toggle
+function saveEcgTriggering() {
+  try { localStorage.setItem(ECG_TRIGGER_KEY, JSON.stringify({ enabled: !!ecgTriggeringEnabled })); } catch (e) { console.warn('saveEcgTriggering error', e); }
+}
+function loadEcgTriggering() {
+  try {
+    const raw = localStorage.getItem(ECG_TRIGGER_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return;
-    conductionItems = parsed.map((it, idx) => {
-      const safePoints = Array.isArray(it.points) ? it.points.map(p => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 })) : [];
-        return {
-          id: it.id || Date.now(),
-          name: it.name || ('Item ' + (idx + 1)),
-          type: it.type === 'shape' ? 'shape' : 'path',
-          points: safePoints,
-          color: it.color || '#ff0000',
-          fill: !!it.fill,
-          closed: !!it.closed,
-          mode: (it.mode === 'concurrent' ? 'concurrent' : 'sequential'),
-          durationMs: Number(it.durationMs) || 1200,
-          step: (typeof it.step === 'number') ? it.step : (typeof it.step === 'string' ? Number(it.step) || 0 : idx),
-          rampUpMs: Number(it.rampUpMs) || 200,
-          sustainMs: Number(it.sustainMs) || 800,
-          rampDownMs: Number(it.rampDownMs) || 200,
-          durationSource: it.durationSource || null,
-          rampUpSource: it.rampUpSource || null,
-          sustainSource: it.sustainSource || null,
-          rampDownSource: it.rampDownSource || null,
-          startMode: it.startMode || 'after_previous',
-          ecgEvent: it.ecgEvent || ''
+    ecgTriggeringEnabled = !!(parsed && parsed.enabled);
+  } catch (e) { console.warn('loadEcgTriggering error', e); ecgTriggeringEnabled = false; }
+}
+
+// Create a new conduction item and refresh UI
+function createConductionItem(type) {
+  const idx = conductionItems.length;
+  const newItem = {
+    id: Date.now() + Math.floor(Math.random() * 1000),
+    name: (type === 'shape' ? 'Shape ' : 'Path ') + (idx + 1),
+    type: type === 'shape' ? 'shape' : 'path',
+    points: type === 'shape' ? [{ x: 0.3, y: 0.4 }, { x: 0.5, y: 0.2 }, { x: 0.7, y: 0.6 }] : [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.8 }],
+    color: '#ff0000',
+    fill: false,
+    closed: type === 'shape',
+    mode: 'sequential',
+    durationMs: 1200,
+    step: conductionItems.length,
+    rampUpMs: 200,
+    sustainMs: 800,
+    rampDownMs: 200,
+    durationSource: null,
+    rampUpSource: null,
+    sustainSource: null,
+    rampDownSource: null,
+    startMode: 'after_previous',
+    ecgEvent: '',
+    playbackStartTime: 0
+  };
+  conductionItems.push(newItem);
+  try { saveConductionItems(); } catch (e) { console.warn('save after create failed', e); }
+  try { refreshConductionPanel(); } catch (e) { /* ignore */ }
+  return newItem;
+}
+
+// Rebuild the conduction panel's list UI
+function refreshConductionPanel() {
+  try {
+    if (!conductionPanelDiv) return;
+    const holder = conductionPanelDiv.querySelector('.cond-list');
+    if (!holder) return;
+    // clear
+    holder.innerHTML = '';
+
+    const ecgOptions = ['', 'P','PR','QRS','QT','QT*','T','TP'];
+
+    // build list with richer controls
+    conductionItems.forEach((it, idx) => {
+      const row = document.createElement('div');
+      row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '8px'; row.style.marginBottom = '6px'; row.style.padding = '6px';
+      row.style.border = '1px solid rgba(0,0,0,0.04)'; row.style.borderRadius = '6px';
+
+      // left: name and color
+      const left = document.createElement('div'); left.style.display = 'flex'; left.style.alignItems = 'center'; left.style.gap = '8px'; left.style.flex = '1';
+      const nameInp = document.createElement('input'); nameInp.type = 'text'; nameInp.value = it.name || ('Item ' + (idx+1)); nameInp.style.flex = '1';
+      nameInp.onchange = () => { it.name = nameInp.value; saveConductionItems(); };
+      const color = document.createElement('input'); color.type = 'color'; color.value = it.color || '#ff0000'; color.onchange = () => { it.color = color.value; saveConductionItems(); };
+      left.appendChild(nameInp); left.appendChild(color);
+
+      // middle: playback and editing controls
+      const middle = document.createElement('div'); middle.style.display = 'flex'; middle.style.alignItems = 'center'; middle.style.gap = '6px';
+      const trig = document.createElement('button'); trig.textContent = 'Trigger'; trig.onclick = () => { try { it.playbackStartTime = millis(); } catch (e) { console.warn('trigger error', e); } };
+      // Edit toggle: enables point editing for this item
+      const editBtn = document.createElement('button'); editBtn.textContent = (selectedConductionIndex === idx && conductionEditMode) ? 'Editing' : 'Edit';
+      editBtn.style.background = (selectedConductionIndex === idx && conductionEditMode) ? '#ffe' : '';
+      editBtn.onclick = () => {
+        if (selectedConductionIndex === idx && conductionEditMode) {
+          conductionEditMode = false; selectedConductionIndex = -1; editBtn.textContent = 'Edit';
+        } else {
+          conductionEditMode = true; selectedConductionIndex = idx; editBtn.textContent = 'Editing';
+        }
+        refreshConductionPanel();
+      };
+      middle.appendChild(trig); middle.appendChild(editBtn);
+
+      // start mode selector
+      const startSel = document.createElement('select');
+      ['after_previous','on_ecg_event','manual'].forEach(opt => { const o = document.createElement('option'); o.value = opt; o.text = opt.replace('_',' '); if ((it.startMode||'after_previous')===opt) o.selected = true; startSel.appendChild(o); });
+      startSel.onchange = () => { it.startMode = startSel.value; saveConductionItems(); refreshConductionPanel(); };
+      startSel.title = 'Start mode';
+      middle.appendChild(startSel);
+
+      // if start on ECG event, show event selector
+      const evSel = document.createElement('select'); evSel.style.marginLeft = '4px';
+      ['', 'P_start','P_end','Q_start','Q_end','R_start','R_end','S_start','S_end','T_start','T_end'].forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'event...' : v; if ((it.ecgEvent||'') === v) o.selected = true; evSel.appendChild(o); });
+      evSel.onchange = () => { it.ecgEvent = evSel.value; saveConductionItems(); };
+      if ((it.startMode||'after_previous') === 'on_ecg_event') middle.appendChild(evSel);
+
+      // duration source selector (manual or ECG feature)
+      const durSel = document.createElement('select'); ecgOptions.forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'manual' : v; if ((it.durationSource||'') === v) o.selected = true; durSel.appendChild(o); });
+      durSel.onchange = () => { it.durationSource = durSel.value || null; saveConductionItems(); refreshConductionPanel(); };
+      middle.appendChild(durSel);
+
+      // manual duration input (ms) shown when manual selected
+      const durInput = document.createElement('input'); durInput.type = 'number'; durInput.min = '10'; durInput.step = '10'; durInput.style.width = '90px'; durInput.value = Number(it.durationMs || 1200);
+      durInput.onchange = () => { it.durationMs = Math.max(10, Number(durInput.value) || 10); saveConductionItems(); };
+      if (!it.durationSource) middle.appendChild(durInput);
+
+      // shape-specific ramp fields
+      if (it.type === 'shape') {
+        const rampRow = document.createElement('div'); rampRow.style.display='flex'; rampRow.style.alignItems='center'; rampRow.style.gap='6px';
+        // Create source selects for Up / Sustain / Down (allow manual when empty)
+        const makeSourceSelect = (prop) => {
+          const sel = document.createElement('select');
+          ecgOptions.forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'manual' : v; if ((it[prop]||'') === v) o.selected = true; sel.appendChild(o); });
+          sel.onchange = () => { it[prop] = sel.value || null; saveConductionItems(); refreshConductionPanel(); };
+          sel.title = prop;
+          return sel;
         };
+        const upSel = makeSourceSelect('rampUpSource');
+        const susSel = makeSourceSelect('sustainSource');
+        const downSel = makeSourceSelect('rampDownSource');
+
+        const upIn = document.createElement('input'); upIn.type='number'; upIn.min='0'; upIn.step='50'; upIn.style.width='80px'; upIn.value = Number(it.rampUpMs || 200); upIn.onchange = () => { it.rampUpMs = Math.max(0, Number(upIn.value) || 0); saveConductionItems(); };
+        const susIn = document.createElement('input'); susIn.type='number'; susIn.min='0'; susIn.step='50'; susIn.style.width='80px'; susIn.value = Number(it.sustainMs || 800); susIn.onchange = () => { it.sustainMs = Math.max(0, Number(susIn.value) || 0); saveConductionItems(); };
+        const downIn = document.createElement('input'); downIn.type='number'; downIn.min='0'; downIn.step='50'; downIn.style.width='80px'; downIn.value = Number(it.rampDownMs || 200); downIn.onchange = () => { it.rampDownMs = Math.max(0, Number(downIn.value) || 0); saveConductionItems(); };
+
+        const labUp = document.createElement('div'); labUp.textContent='Up'; labUp.style.fontSize='11px';
+        const labSus = document.createElement('div'); labSus.textContent='Sustain'; labSus.style.fontSize='11px';
+        const labDown = document.createElement('div'); labDown.textContent='Down'; labDown.style.fontSize='11px';
+
+        // For each segment: append select then either manual number input (if manual selected) or the selected label
+        rampRow.appendChild(labUp); rampRow.appendChild(upSel); if (!it.rampUpSource) rampRow.appendChild(upIn);
+        rampRow.appendChild(labSus); rampRow.appendChild(susSel); if (!it.sustainSource) rampRow.appendChild(susIn);
+        rampRow.appendChild(labDown); rampRow.appendChild(downSel); if (!it.rampDownSource) rampRow.appendChild(downIn);
+        middle.appendChild(rampRow);
+      }
+
+      // right: reorder and delete
+      const right = document.createElement('div'); right.style.display='flex'; right.style.alignItems='center'; right.style.gap='6px';
+      const up = document.createElement('button'); up.textContent = '↑'; up.title = 'Move up'; up.onclick = () => { if (idx <= 0) return; const a = conductionItems.splice(idx,1)[0]; conductionItems.splice(idx-1,0,a); saveConductionItems(); refreshConductionPanel(); };
+      const down = document.createElement('button'); down.textContent = '↓'; down.title = 'Move down'; down.onclick = () => { if (idx >= conductionItems.length-1) return; const a = conductionItems.splice(idx,1)[0]; conductionItems.splice(idx+1,0,a); saveConductionItems(); refreshConductionPanel(); };
+      const del = document.createElement('button'); del.textContent = 'Delete'; del.onclick = () => { if (!confirm('Delete "' + (it.name||'item') + '"?')) return; conductionItems.splice(idx,1); saveConductionItems(); refreshConductionPanel(); };
+      // playing indicator
+      const playDot = document.createElement('div'); playDot.style.width='10px'; playDot.style.height='10px'; playDot.style.borderRadius='50%'; playDot.style.marginLeft='6px';
+      const start = it.playbackStartTime || 0; const nowMs = millis(); let effDur = Number(it.durationMs || 1200);
+      if (it.durationSource) effDur = Math.max(10, (getEcgFeatureMs(it.durationSource) || 0));
+      const playing = (start > 0 && (nowMs - start) >= 0 && (nowMs - start) < effDur);
+      playDot.style.background = playing ? 'limegreen' : 'transparent'; playDot.style.border = '1px solid ' + (playing ? 'green' : '#ccc');
+
+      right.appendChild(up); right.appendChild(down); right.appendChild(del); right.appendChild(playDot);
+
+      row.appendChild(left); row.appendChild(middle); row.appendChild(right);
+      holder.appendChild(row);
     });
-    // load per-step durations as well
-    try { loadConductionStepDurations(); } catch (e) { /* ignore */ }
-    // ensure scheduler step order known
-    try { computeConductionStepOrder(); } catch (e) {}
-  } catch (e) { console.warn('loadConductionItems error', e); }
+
+    // small footer showing count and a clear all button
+    const footer = document.createElement('div'); footer.style.marginTop = '8px'; footer.style.fontSize = '12px'; footer.style.display='flex'; footer.style.justifyContent='space-between';
+    const info = document.createElement('div'); info.textContent = 'Items: ' + conductionItems.length; footer.appendChild(info);
+    const clearBtn = document.createElement('button'); clearBtn.textContent = 'Clear All'; clearBtn.onclick = () => { if (!confirm('Clear all conduction items?')) return; conductionItems = []; saveConductionItems(); refreshConductionPanel(); };
+    footer.appendChild(clearBtn);
+    holder.appendChild(footer);
+  } catch (e) { console.warn('refreshConductionPanel error', e); }
 }
 
 function createConductionPanel() {
@@ -532,29 +490,50 @@ function createConductionPanel() {
   const btnRow = document.createElement('div'); btnRow.style.display='flex'; btnRow.style.gap='6px'; btnRow.style.marginBottom='8px';
   const addPathBtn = document.createElement('button'); addPathBtn.textContent = 'Add Path'; addPathBtn.onclick = () => { createConductionItem('path'); };
   const addShapeBtn = document.createElement('button'); addShapeBtn.textContent = 'Add Shape'; addShapeBtn.onclick = () => { createConductionItem('shape'); };
-  const toggleEdit = document.createElement('button'); toggleEdit.textContent = 'Toggle Edit'; toggleEdit.onclick = () => { conductionEditMode = !conductionEditMode; toggleEdit.style.background = conductionEditMode ? '#eef' : ''; };
-  // refresh UI when toggling edit so highlights update immediately
-  toggleEdit.onclick = () => { conductionEditMode = !conductionEditMode; toggleEdit.style.background = conductionEditMode ? '#eef' : ''; refreshConductionPanel(); };
-  const playPauseBtn = document.createElement('button'); playPauseBtn.textContent = conductionPlayback.playing ? 'Pause' : 'Play'; playPauseBtn.onclick = () => { conductionPlayback.playing = !conductionPlayback.playing; playPauseBtn.textContent = conductionPlayback.playing ? 'Pause' : 'Play'; if (conductionPlayback.playing) conductionPlayback.stepStartTime = millis(); };
-  btnRow.appendChild(addPathBtn); btnRow.appendChild(addShapeBtn); btnRow.appendChild(toggleEdit);
-  btnRow.appendChild(playPauseBtn);
+  // Removed path/point constructor controls - simplified UI (soundboard style)
+  const toggleEdit = document.createElement('div'); toggleEdit.textContent = '';
   // Test trigger: allow manual triggering of ECG events for debugging
   const testSel = document.createElement('select'); testSel.style.marginLeft = '8px';
   const evs = ['', 'P_start','P_end','Q_start','Q_end','R_start','R_end','S_start','S_end','T_start','T_end'];
   evs.forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'Select event...' : v; testSel.appendChild(o); });
   const triggerBtn = document.createElement('button'); triggerBtn.textContent = 'Trigger ECG Event'; triggerBtn.onclick = () => { try { triggerEcgEvent(testSel.value); } catch (e) { console.warn('trigger error', e); } };
   btnRow.appendChild(testSel); btnRow.appendChild(triggerBtn);
+  // ECG-triggering toggle: when enabled, ECG crossings will auto-start bound items
+  const ecgToggleBtn = document.createElement('button');
+  ecgToggleBtn.textContent = ecgTriggeringEnabled ? 'Disable ECG Triggers' : 'Enable ECG Triggers';
+  ecgToggleBtn.title = 'Toggle automatic triggering of conduction items on ECG events';
+  ecgToggleBtn.style.marginLeft = '8px';
+  ecgToggleBtn.onclick = () => {
+    ecgTriggeringEnabled = !ecgTriggeringEnabled;
+    ecgToggleBtn.textContent = ecgTriggeringEnabled ? 'Disable ECG Triggers' : 'Enable ECG Triggers';
+    saveEcgTriggering();
+  };
+  btnRow.appendChild(ecgToggleBtn);
+  // removed explicit step controls (we'll keep ordering via up/down in the list below)
+
+  // Export / Import controls
+  const expBtn = document.createElement('button'); expBtn.textContent = 'Export Paths/Shapes';
+  expBtn.title = 'Export conduction items to JSON file';
+  expBtn.onclick = () => { try { exportConductionData(); } catch (e) { console.warn('export error', e); alert('Export failed: ' + String(e)); } };
+
+  const importFileInput = document.createElement('input'); importFileInput.type = 'file'; importFileInput.accept = '.json,application/json'; importFileInput.style.display = 'none';
+  importFileInput.onchange = (e) => { const f = e.target.files && e.target.files[0]; if (!f) return; const reader = new FileReader(); reader.onload = (ev) => { try { const parsed = JSON.parse(ev.target.result); handleImportedConduction(parsed); } catch (err) { alert('Invalid JSON file'); console.warn('import parse error', err); } }; reader.readAsText(f); importFileInput.value = ''; };
+  const impBtn = document.createElement('button'); impBtn.textContent = 'Import From File'; impBtn.title = 'Import conduction items from a JSON file'; impBtn.onclick = () => { importFileInput.click(); };
+
+  // Paste area for JSON import
+  const pasteArea = document.createElement('textarea'); pasteArea.placeholder = 'Or paste JSON here to import'; pasteArea.style.width = '320px'; pasteArea.style.height = '56px'; pasteArea.style.marginLeft = '8px';
+  const pasteImpBtn = document.createElement('button'); pasteImpBtn.textContent = 'Import Pasted JSON'; pasteImpBtn.onclick = () => {
+    const txt = pasteArea.value && pasteArea.value.trim(); if (!txt) { alert('Paste JSON into the box first'); return; }
+    try { const parsed = JSON.parse(txt); handleImportedConduction(parsed); pasteArea.value = ''; } catch (err) { alert('Invalid JSON pasted'); console.warn('paste import error', err); }
+  };
+
+  btnRow.appendChild(expBtn); btnRow.appendChild(impBtn); btnRow.appendChild(pasteImpBtn);
   conductionPanelDiv.appendChild(btnRow);
 
   // placeholder for list
   const listHolder = document.createElement('div'); listHolder.className = 'cond-list'; conductionPanelDiv.appendChild(listHolder);
 
-  // point controls
-  const pointRow = document.createElement('div'); pointRow.style.display='flex'; pointRow.style.gap='6px'; pointRow.style.marginTop='8px';
-  const delPointBtn = document.createElement('button'); delPointBtn.textContent = 'Delete Point'; delPointBtn.onclick = () => { if (selectedConductionIndex >=0) { const it = conductionItems[selectedConductionIndex]; if (it && conductionDragging.pt >=0) { it.points.splice(conductionDragging.pt,1); conductionDragging.pt = -1; refreshConductionPanel(); } } };
-  const clearPtsBtn = document.createElement('button'); clearPtsBtn.textContent = 'Clear Points'; clearPtsBtn.onclick = () => { if (selectedConductionIndex >=0) { conductionItems[selectedConductionIndex].points = []; refreshConductionPanel(); } };
-  pointRow.appendChild(delPointBtn); pointRow.appendChild(clearPtsBtn);
-  conductionPanelDiv.appendChild(pointRow);
+  // constructor point-editing removed in simplified UI
 
   document.body.appendChild(conductionPanelDiv);
   refreshConductionPanel();
@@ -568,6 +547,7 @@ function getEcgFeatureMs(key) {
     case 'PR': return Math.max(1, Math.round((prDur || 0) * 1000));
     case 'QRS': return Math.max(1, Math.round(((qDur || 0) + (rDur || 0) + (sDur || 0)) * (qrsWidth || 1) * 1000));
     case 'QT': return Math.max(1, Math.round(qtIntervalMs || 0));
+    case 'QT*': return Math.max(1, Math.round(qtIntervalMs || 0));
     case 'T': return Math.max(1, Math.round((tDuration || 0) * 1000));
     case 'TP': {
       // TP = interval from end of T to next P. TP = RR - (PR + QT)
@@ -580,6 +560,25 @@ function getEcgFeatureMs(key) {
     }
     default: return null;
   }
+}
+
+// Trigger conduction items for a given ECG event key (e.g. 'R_start')
+function triggerEcgEvent(eventKey) {
+  try {
+    if (!eventKey) return;
+    const now = millis();
+    let triggered = 0;
+    conductionItems.forEach(it => {
+      if (!it) return;
+      if ((it.startMode === 'on_ecg_event') && (it.ecgEvent === eventKey)) {
+        it.playbackStartTime = now;
+        triggered++;
+      }
+    });
+    if (triggered > 0 && conductionDebugDiv) {
+      conductionDebugDiv.textContent = 'Triggered ' + triggered + ' items for ' + eventKey;
+    }
+  } catch (e) { console.warn('triggerEcgEvent error', e); }
 }
 
 // Open the conduction panel in a separate window (pop-out)
@@ -1010,7 +1009,44 @@ function setup() {
   qtInput.oninput = (e) => { qtIntervalMs = Number(e.target.value); qtVal.textContent = String(qtIntervalMs); refreshConductionPanel(); saveEcgWaveformSettings(); };
   const qtLab = document.createElement('div'); qtLab.textContent = 'QTms'; qtLab.style.width = '18px'; qtRow.appendChild(qtLab); qtRow.appendChild(qtInput); qtRow.appendChild(qtVal); globalPanel.appendChild(qtRow);
 
+  // Time dilation slider (affects ECG/playback speed)
+  const tdRow = document.createElement('div'); tdRow.style.display = 'flex'; tdRow.style.alignItems = 'center'; tdRow.style.gap = '8px';
+  const tdLabel = document.createElement('div'); tdLabel.textContent = 'Time dilation'; tdLabel.style.width = '90px';
+  const tdInput = document.createElement('input'); tdInput.type = 'range'; tdInput.min = '0.2'; tdInput.max = '10.0'; tdInput.step = '0.05'; tdInput.value = String(timeDilation); tdInput.style.flex = '1';
+  const tdVal = document.createElement('div'); tdVal.textContent = String(timeDilation.toFixed(2)); tdVal.style.width = '56px'; tdVal.style.textAlign = 'right';
+  tdInput.oninput = (e) => { timeDilation = Number(e.target.value) || 1.0; tdVal.textContent = timeDilation.toFixed(2); saveTimeDilation(); refreshConductionPanel(); };
+  tdRow.appendChild(tdLabel); tdRow.appendChild(tdInput); tdRow.appendChild(tdVal); globalPanel.appendChild(tdRow);
+
   document.body.appendChild(globalPanel);
+  // Small always-visible Time Dilation control (helps when global panel is hidden)
+  try {
+    let tdControl = document.getElementById('timeDilationControl');
+    if (!tdControl) {
+      tdControl = document.createElement('div');
+      tdControl.id = 'timeDilationControl';
+      tdControl.style.position = 'fixed';
+      tdControl.style.left = '10px';
+      tdControl.style.top = '60px';
+      tdControl.style.zIndex = 10005;
+      tdControl.style.padding = '6px 8px';
+      tdControl.style.background = 'rgba(255,255,255,0.98)';
+      tdControl.style.border = '1px solid rgba(0,0,0,0.12)';
+      tdControl.style.borderRadius = '6px';
+      tdControl.style.fontFamily = 'Helvetica, Arial, sans-serif';
+      tdControl.style.fontSize = '13px';
+
+      const lab = document.createElement('div'); lab.textContent = 'Time dilation'; lab.style.fontSize = '12px'; lab.style.marginBottom = '4px'; tdControl.appendChild(lab);
+      const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '8px';
+      const input = document.createElement('input'); input.type = 'range'; input.min = '0.2'; input.max = '10.0'; input.step = '0.05'; input.value = String(timeDilation); input.style.width = '160px';
+      const val = document.createElement('div'); val.textContent = String(timeDilation.toFixed ? timeDilation.toFixed(2) : String(timeDilation)); val.style.width = '48px'; val.style.textAlign = 'right';
+      input.oninput = (e) => { timeDilation = Number(e.target.value) || 1.0; val.textContent = timeDilation.toFixed(2); saveTimeDilation(); refreshConductionPanel(); };
+      row.appendChild(input); row.appendChild(val); tdControl.appendChild(row);
+      document.body.appendChild(tdControl);
+    } else {
+      // sync existing control value
+      try { const input = tdControl.querySelector('input'); const val = tdControl.querySelector('div:nth-child(2) div'); if (input) input.value = String(timeDilation); if (val) val.textContent = timeDilation.toFixed(2); } catch (e) {}
+    }
+  } catch (e) { /* ignore */ }
   // create conduction debug box (placed inside the global control panel)
   try {
     conductionDebugDiv = document.createElement('div');
@@ -1154,6 +1190,7 @@ function openConductionDebugWindow() {
   try {
     loadConductionItems();
     if (conductionItems && conductionItems.length > 0) selectedConductionIndex = 0;
+    try { loadConductionExplicitSteps(); } catch (e) { /* ignore */ }
   } catch (e) {
     console.warn('Failed to load conduction items at startup', e);
   }
@@ -1247,6 +1284,8 @@ function openConductionDebugWindow() {
 
   // load persisted conduction items then create conduction panel UI
   try { loadConductionItems(); } catch (e) { /* ignore */ }
+  try { loadConductionExplicitSteps(); } catch (e) { /* ignore */ }
+  try { loadEcgTriggering(); } catch (e) { /* ignore */ }
   try { createConductionPanel(); } catch (e) { console.warn('Failed to create conduction panel', e); }
 
   // Listen for changes to ECG waveform constructor sliders and persist
@@ -1489,8 +1528,24 @@ function draw() {
           if (window._foundTStart) checkCross(window._tStartIdx, 'T', 'T_start');
           // End events: next sample after start
           function checkEnd(idx, label, eventKey) {
-            if (typeof idx === 'number' && idx+1 < points.length) {
-              const x = points[idx+1].x;
+            if (typeof idx !== 'number') return;
+            // Default: use the next sample as the end marker
+            let endIdx = idx + 1;
+            // For P waves, prefer a duration-based end: P_end = P_start + pDuration
+            if (label === 'P') {
+              try {
+                const pStartTRel = points[idx] && points[idx].t_rel;
+                if (typeof pStartTRel === 'number' && (typeof pDuration === 'number' && pDuration > 0)) {
+                  const targetT = pStartTRel + pDuration; // seconds relative
+                  for (let j = idx + 1; j < points.length; j++) {
+                    if (points[j].t_rel >= targetT) { endIdx = j; break; }
+                  }
+                  if (endIdx >= points.length) endIdx = points.length - 1;
+                }
+              } catch (e) { /* fall back to idx+1 */ }
+            }
+            if (endIdx < points.length) {
+              const x = points[endIdx].x;
               if (window._lastIndicatorX < x && indicatorX >= x) {
                 logWaveCross(label + ' end', x);
                 eventCrossings.push(eventKey);
@@ -1513,20 +1568,15 @@ function draw() {
         }
         window._lastIndicatorX = indicatorX;
 
-        // Activate conduction steps whose ecgEvent matches any crossing
+        // ECG event crossings detected. We optionally forward events to the
+        // global trigger handler when ECG-triggering is enabled (user toggle).
+        // Manual triggers (the per-item Trigger buttons) still work.
         if (eventCrossings.length > 0) {
-          conductionItems.forEach((it, idx) => {
-            if (it.startMode === 'on_ecg_event' && it.ecgEvent && eventCrossings.includes(it.ecgEvent)) {
-              // When an ECG event matches and item is waiting for ECG event, jump to that step
-              const stepIdx = conductionPlayback.stepOrder.indexOf(Number(it.step) || 0);
-              if (stepIdx >= 0) {
-                conductionPlayback.currentStepIndex = stepIdx;
-                conductionPlayback.stepStartTime = millis();
-                // ensure playback is running so the triggered step is visible
-                conductionPlayback.playing = true;
-              }
-            }
-          });
+          if (ecgTriggeringEnabled) {
+            try {
+              eventCrossings.forEach(evKey => { try { triggerEcgEvent(evKey); } catch (e) {} });
+            } catch (e) { /* ignore */ }
+          }
         }
 
         // blit to right half
@@ -1804,217 +1854,147 @@ function drawConductionOverlay(ix, iy, iw, ih) {
     }
     // (playback visuals handled by centralized scheduler below)
   }
-  // centralized step scheduler: draw moving impulses for the active step
-  // compute step order if empty
-  if (!conductionPlayback.stepOrder || conductionPlayback.stepOrder.length === 0) computeConductionStepOrder();
-  const stepOrder = conductionPlayback.stepOrder || [];
-  if (stepOrder.length > 0 && conductionPlayback.playing) {
-    // ensure stepStartTime initialized
-    if (!conductionPlayback.stepStartTime || conductionPlayback.stepStartTime <= 0) conductionPlayback.stepStartTime = millis();
-    const activeStepVal = stepOrder[conductionPlayback.currentStepIndex] || 0;
-    // find items in the active step in panel order
-    const activeIdxs = [];
-    for (let i = 0; i < conductionItems.length; i++) {
-      const it = conductionItems[i]; if (!it) continue;
-      if ((Number(it.step) || 0) === activeStepVal) activeIdxs.push(i);
-    }
-    if (activeIdxs.length > 0) {
-      // compute step duration as the driven max of item durations (shapes use envelope totals)
-      let maxDur = 0;
-      for (const ix of activeIdxs) {
-        const it = conductionItems[ix];
-        if (!it) continue;
-        // compute binding-aware per-component values for shapes AND honor
-        // a bound overall duration for non-shape items (durationSource)
-        if (it.durationSource) {
-          const fv = getEcgFeatureMs(it.durationSource) || 0;
-          const d = Math.max(10, fv || 0);
-          if (d > maxDur) maxDur = d;
-          continue;
-        }
-        // shape envelopes: use per-component bindings when present
-        if (it.type === 'shape') {
-          const upVal = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : (Number(it.rampUpMs) || 0);
-          const susVal = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : (Number(it.sustainMs) || 0);
-          const downVal = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : (Number(it.rampDownMs) || 0);
-          const shapeTotal = upVal + susVal + downVal;
-          const d = Math.max(10, shapeTotal || 0);
-          if (d > maxDur) maxDur = d;
-          continue;
-        }
-        // fallback: explicit per-item durationMs
-        const d = Math.max(10, Number(it.durationMs) || 1200);
-        if (d > maxDur) maxDur = d;
-      }
-      // allow per-step override if present in persisted `conductionStepDurations`
-      const overrideVal = (conductionStepDurations && Number.isFinite(conductionStepDurations[activeStepVal])) ? conductionStepDurations[activeStepVal] : null;
-      const stepDur = (Number.isFinite(overrideVal) ? overrideVal : maxDur) * (typeof timeDilation === 'number' ? timeDilation : 1.0);
-      // build per-item computed durations for debugging / display
-      const activeItemDurations = activeIdxs.map(ix => {
-        const it = conductionItems[ix];
-        if (!it) return { name: 'Unknown', dur: 0 };
-        if (it.durationSource) {
-          return { name: it.name || ('Item ' + ix), dur: getEcgFeatureMs(it.durationSource) || 0 };
-        } else if (it.type === 'shape') {
-          const upVal = it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : (Number(it.rampUpMs) || 0);
-          const susVal = it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : (Number(it.sustainMs) || 0);
-          const downVal = it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : (Number(it.rampDownMs) || 0);
-          return { name: it.name || ('Item ' + ix), dur: Math.max(10, upVal + susVal + downVal) };
-        } else {
-          return { name: it.name || ('Item ' + ix), dur: Math.max(10, Number(it.durationMs) || 1200) };
-        }
-      });
-      const nowMs = millis();
-      const elapsed = nowMs - conductionPlayback.stepStartTime;
-      const progress = Math.min(1.0, Math.max(0.0, elapsed / Math.max(1, stepDur)));
+  // Per-item playback renderer: iterate all conduction items and draw any
+  // item that has an active `playbackStartTime`. This replaces the old
+  // step-based scheduler so items only play when manually triggered and
+  // can overlap independently.
+  try {
+    const nowMs = millis();
+    for (let ix = 0; ix < conductionItems.length; ix++) {
+      const it = conductionItems[ix]; if (!it) continue;
+      const itStart = it.playbackStartTime || 0;
+      const perItemElapsed = nowMs - itStart;
+      if (!itStart || perItemElapsed < 0) continue; // not started
 
-      // draw moving dot along each active item (or shape depolarization)
-      for (const ix of activeIdxs) {
-        const it = conductionItems[ix]; if (!it) continue;
-        // If this item is a closed shape, show depolarization by fading its fill
-        if (it.type === 'shape') {
-            // determine per-component durations using bindings when present
-            const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
-            const rampUp = (it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Math.max(0, Number(it.rampUpMs) || 0)) * dilation;
-            const sustain = (it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : Math.max(0, Number(it.sustainMs) || 0)) * dilation;
-            const rampDown = (it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Math.max(0, Number(it.rampDownMs) || 0)) * dilation;
-            const totalEnvelope = rampUp + sustain + rampDown;
-            const boundMs = it.durationSource ? getEcgFeatureMs(it.durationSource) : null;
-            const effectiveItemDur = (boundMs && Number.isFinite(boundMs)) ? Math.max(10, boundMs) : Math.max(10, totalEnvelope || 0);
-          let alpha = 0;
-            if (totalEnvelope <= 0) {
-              alpha = Math.max(0, Math.sin(progress * Math.PI));
-            } else {
-              // fit envelope into the available step duration; if envelope is longer than step, scale it down.
-              // Use the effectiveItemDur to decide scaling if bound, otherwise use envelope total.
-              const useDurForScale = effectiveItemDur || totalEnvelope || stepDur;
-              const scale = totalEnvelope > useDurForScale ? (useDurForScale / totalEnvelope) : 1.0;
-              const up = rampUp * scale;
-              const sus = sustain * scale;
-              const down = rampDown * scale;
-              const t = Math.max(0, Math.min(useDurForScale, elapsed)); // elapsed is ms since step start
-              if (t < up) {
-                alpha = t / Math.max(1, up);
-              } else if (t < up + sus) {
-                alpha = 1.0;
-              } else if (t < up + sus + down) {
-                alpha = 1.0 - ((t - up - sus) / Math.max(1, down));
-              } else {
-                alpha = 0.0;
-              }
-              alpha = Math.max(0, Math.min(1, alpha));
-            }
+      const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
+      let perItemEffectiveDur = 0;
+      if (it.durationSource) {
+        perItemEffectiveDur = Math.max(10, (getEcgFeatureMs(it.durationSource) || 0)) * dilation;
+      } else if (it.type === 'shape') {
+        const rampUp = (it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Math.max(0, Number(it.rampUpMs) || 0)) * dilation;
+        const sustain = (it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : Math.max(0, Number(it.sustainMs) || 0)) * dilation;
+        const rampDown = (it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Math.max(0, Number(it.rampDownMs) || 0)) * dilation;
+        perItemEffectiveDur = Math.max(10, rampUp + sustain + rampDown);
+      } else {
+        perItemEffectiveDur = Math.max(10, Number(it.durationMs) || 1200) * dilation;
+      }
+
+      if (perItemElapsed >= perItemEffectiveDur) {
+        // finished playing; clear start time so it won't replay until retriggered
+        it.playbackStartTime = 0;
+        continue;
+      }
+
+      const progressItem = Math.min(1.0, Math.max(0.0, perItemElapsed / Math.max(1, perItemEffectiveDur)));
+
+      if (it.type === 'shape') {
+        const rampUp = (it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Math.max(0, Number(it.rampUpMs) || 0)) * dilation;
+        const sustain = (it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : Math.max(0, Number(it.sustainMs) || 0)) * dilation;
+        const rampDown = (it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Math.max(0, Number(it.rampDownMs) || 0)) * dilation;
+        const totalEnvelope = rampUp + sustain + rampDown;
+        let alpha = 0;
+        if (totalEnvelope <= 0) {
+          alpha = Math.max(0, Math.sin(progressItem * Math.PI));
+        } else {
+          const useDurForScale = perItemEffectiveDur || totalEnvelope;
+          const scale = totalEnvelope > useDurForScale ? (useDurForScale / totalEnvelope) : 1.0;
+          const up = rampUp * scale;
+          const sus = sustain * scale;
+          const down = rampDown * scale;
+          const t = Math.max(0, Math.min(useDurForScale, perItemElapsed));
+          if (t < up) alpha = t / Math.max(1, up);
+          else if (t < up + sus) alpha = 1.0;
+          else if (t < up + sus + down) alpha = 1.0 - ((t - up - sus) / Math.max(1, down));
+          else alpha = 0.0;
+          alpha = Math.max(0, Math.min(1, alpha));
+        }
+        const rgb = hexToRgb(it.color || '#ff0000');
+        push(); noStroke(); fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220)); beginShape();
+        for (let p of it.points) vertex(imgX + p.x * imgW, imgY + p.y * imgH);
+        endShape(CLOSE); pop();
+      } else {
+        strokeWeight(0); noStroke();
+        if (it.points.length >= 2 && (it.mode || 'sequential') !== 'concurrent') {
+          const normPts = it.points.map(p => ({ x: p.x * imgW + imgX, y: p.y * imgH + imgY }));
+          const trailMs = Math.min(1200, Math.max(120, perItemEffectiveDur * 0.8));
+          const sampleMs = 40;
+          const samples = Math.max(5, Math.ceil(trailMs / sampleMs));
           const rgb = hexToRgb(it.color || '#ff0000');
-          push();
-          noStroke();
-          fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220));
-          beginShape();
-          for (let p of it.points) vertex(imgX + p.x * imgW, imgY + p.y * imgH);
-          endShape(CLOSE);
-          pop();
-          // keep the outline already drawn above; skip dot
-        } else {
-          strokeWeight(0);
-          noStroke();
-          // draw a short fading trail for sequential path items (traveling pulse)
-          if (it.points.length >= 2 && (it.mode || 'sequential') !== 'concurrent') {
-            const normPts = it.points.map(p => ({ x: p.x * imgW + imgX, y: p.y * imgH + imgY }));
-            // trail length in ms (longer trail for better persistence)
-            const trailMs = Math.min(1200, Math.max(120, stepDur * 0.8));
-            const sampleMs = 40; // ms between trail samples
-            const samples = Math.max(5, Math.ceil(trailMs / sampleMs));
-            const rgb = hexToRgb(it.color || '#ff0000');
-            for (let s = 0; s < samples; s++) {
-              const dt = s * (trailMs / samples);
-              const sampleElapsed = Math.max(0, elapsed - dt);
-              const sampleProgress = Math.min(1.0, Math.max(0.0, sampleElapsed / Math.max(1, stepDur)));
-              const pt = pointAlongPolyline(normPts, sampleProgress);
-              if (!pt) continue;
-              const alpha = (1 - s / Math.max(1, samples - 1)) * 0.95;
-              const size = 6 + 12 * (1 - s / Math.max(1, samples));
-              fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220));
-              ellipse(pt.x, pt.y, size, size);
-            }
-          } else if (it.points.length >= 2) {
-            // concurrent paths or no trail requested: simple dot at current progress
-            const normPts = it.points.map(p => ({ x: p.x * imgW + imgX, y: p.y * imgH + imgY }));
-            const pt = pointAlongPolyline(normPts, progress);
-            if (pt) {
-              const rgb = hexToRgb(it.color || '#ff0000');
-              fill(rgb.r, rgb.g, rgb.b, 220);
-              ellipse(pt.x, pt.y, 12, 12);
-            }
-          } else if (it.points.length === 1) {
-            const p = it.points[0]; const x = imgX + p.x * imgW; const y = imgY + p.y * imgH;
-            // pulse the single point with a longer fading ring trail
-            const trailMs = Math.min(800, Math.max(80, stepDur * 0.6));
-            const sampleMs = 50;
-            const samples = Math.max(3, Math.ceil(trailMs / sampleMs));
-            const rgb = hexToRgb(it.color || '#ff0000');
-            for (let s = 0; s < samples; s++) {
-              const dt = s * (trailMs / samples);
-              const sampleElapsed = Math.max(0, elapsed - dt);
-              const frac = Math.min(1, sampleElapsed / Math.max(1, stepDur));
-              const alpha = (1 - s / Math.max(1, samples - 1)) * (0.6 + 0.4 * frac);
-              const size = 6 + 14 * (1 - s / Math.max(1, samples));
-              fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220));
-              ellipse(x, y, size, size);
-            }
+          for (let s = 0; s < samples; s++) {
+            const dt = s * (trailMs / samples);
+            const sampleElapsed = Math.max(0, perItemElapsed - dt);
+            const sampleProgress = Math.min(1.0, Math.max(0.0, sampleElapsed / Math.max(1, perItemEffectiveDur)));
+            const pt = pointAlongPolyline(normPts, sampleProgress);
+            if (!pt) continue;
+            const alpha = (1 - s / Math.max(1, samples - 1)) * 0.95;
+            const size = 6 + 12 * (1 - s / Math.max(1, samples));
+            fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220)); ellipse(pt.x, pt.y, size, size);
+          }
+        } else if (it.points.length >= 2) {
+          const normPts = it.points.map(p => ({ x: p.x * imgW + imgX, y: p.y * imgH + imgY }));
+          const pt = pointAlongPolyline(normPts, progressItem);
+          if (pt) { const rgb = hexToRgb(it.color || '#ff0000'); fill(rgb.r, rgb.g, rgb.b, 220); ellipse(pt.x, pt.y, 12, 12); }
+        } else if (it.points.length === 1) {
+          const p = it.points[0]; const x = imgX + p.x * imgW; const y = imgY + p.y * imgH;
+          const trailMs = Math.min(800, Math.max(80, perItemEffectiveDur * 0.6));
+          const sampleMs = 50; const samples = Math.max(3, Math.ceil(trailMs / sampleMs));
+          const rgb = hexToRgb(it.color || '#ff0000');
+          for (let s = 0; s < samples; s++) {
+            const dt = s * (trailMs / samples); const sampleElapsed = Math.max(0, perItemElapsed - dt);
+            const frac = Math.min(1, sampleElapsed / Math.max(1, perItemEffectiveDur));
+            const alpha = (1 - s / Math.max(1, samples - 1)) * (0.6 + 0.4 * frac);
+            const size = 6 + 14 * (1 - s / Math.max(1, samples)); fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220)); ellipse(x, y, size, size);
           }
         }
-      }
-
-      // Draw active element names as text below the CCS image
-      try {
-        const names = activeIdxs.map(i => conductionItems[i] && conductionItems[i].name ? conductionItems[i].name : 'Item ' + i);
-        const txt = names.join('  •  ');
-        // draw just below image area
-        const textX = imgX + 6;
-        const textY = imgY + imgH + 18;
-        push();
-        noStroke(); fill(10); textSize(14); textFont('Helvetica');
-        text(txt, textX, textY);
-        pop();
-      } catch (e) {
-        // ignore
-      }
-
-      // Update the conduction debug DOM (if present) so it's visible in the control panel/popup
-      try {
-        if (conductionDebugDiv) {
-          conductionDebugDiv.innerHTML = '';
-          const h = document.createElement('div'); h.style.fontWeight = '700'; h.textContent = 'Step ' + activeStepVal + ' dur: ' + String(stepDur) + ' ms'; conductionDebugDiv.appendChild(h);
-          for (let i = 0; i < activeItemDurations.length; i++) {
-            const it = activeItemDurations[i]; const r = document.createElement('div'); r.textContent = it.name + ': ' + String(Math.round(it.dur)) + ' ms'; conductionDebugDiv.appendChild(r);
-          }
-        }
-        if (conductionDebugWindow && !conductionDebugWindow.closed) {
-          try {
-            const doc = conductionDebugWindow.document;
-            if (!conductionDebugWinDiv) { conductionDebugWinDiv = doc.createElement('div'); doc.body.appendChild(conductionDebugWinDiv); }
-            let html = '<div class="title">Step ' + activeStepVal + ' dur: ' + String(stepDur) + ' ms</div>';
-            // show override state and provide a clear button that calls back to opener
-            const ov = (conductionStepDurations && Number.isFinite(conductionStepDurations[activeStepVal])) ? conductionStepDurations[activeStepVal] : null;
-            if (Number.isFinite(ov)) {
-              html += '<div class="item">Override: ' + String(ov) + ' ms <button onclick="try{ window.opener.clearConductionStepOverride(' + activeStepVal + '); }catch(e){}">Clear</button></div>';
-            } else {
-              html += '<div class="item">Override: (none)</div>';
-            }
-            for (let i = 0; i < activeItemDurations.length; i++) { const it = activeItemDurations[i]; html += '<div class="item">' + escapeHtml(it.name) + ': ' + String(Math.round(it.dur)) + ' ms</div>'; }
-            conductionDebugWinDiv.innerHTML = html;
-          } catch (e) { /* ignore popup update errors */ }
-        }
-      } catch (e) { /* ignore DOM update issues */ }
-
-      // advance to next step when progress complete
-      if (progress >= 1.0) {
-        conductionPlayback.currentStepIndex = (conductionPlayback.currentStepIndex + 1) % stepOrder.length;
-        conductionPlayback.stepStartTime = millis();
       }
     }
+  } catch (e) {
+    // keep draw loop robust; ignore per-item render errors
   }
 
-  pop();
+        // Diagnostic overlay: show per-item playback state to help debug why an item
+        // (e.g., Right Ventricle) may not be animating. This is lightweight and safe
+        // to leave in during testing; it's drawn in the top-right of the CCS image.
+        try {
+          const diagX = imgX + imgW - 224;
+          const diagY = imgY + 8;
+          const boxW = 216;
+          const lines = [];
+          for (let i = 0; i < conductionItems.length; i++) {
+            const it = conductionItems[i];
+            if (!it) continue;
+            const start = it.playbackStartTime || 0;
+            const elapsed = Math.round(nowMs - start);
+            // compute per-item effective duration (ms)
+            let effDur = 0;
+            const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
+            if (it.durationSource) effDur = Math.max(10, (getEcgFeatureMs(it.durationSource) || 0)) * dilation;
+            else if (it.type === 'shape') {
+              const up = (it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Number(it.rampUpMs) || 0) * dilation;
+              const sus = (it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : Number(it.sustainMs) || 0) * dilation;
+              const down = (it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Number(it.rampDownMs) || 0) * dilation;
+              effDur = Math.max(10, up + sus + down);
+            } else effDur = Math.max(10, Number(it.durationMs) || 1200) * dilation;
+            const playing = (start > 0 && elapsed >= 0 && elapsed < effDur);
+            lines.push({ name: it.name || ('Item ' + i), playing, start, elapsed, effDur });
+            if (lines.length >= 12) break;
+          }
+          push();
+          noStroke(); fill(255, 255, 255, 230); rect(diagX, diagY, boxW, 18 + lines.length * 14, 6);
+          stroke(0,0,0,40); noFill(); rect(diagX, diagY, boxW, 18 + lines.length * 14, 6);
+          noStroke(); fill(20); textSize(12); textAlign(LEFT, TOP);
+          text('Conduction Debug', diagX + 6, diagY + 3);
+          for (let li = 0; li < lines.length; li++) {
+            const L = lines[li];
+            const y = diagY + 18 + li * 14;
+            fill(L.playing ? 'green' : 'black');
+            const txt = L.name + (L.playing ? ' • PLAYING' : ' • idle') + '  (' + String(L.elapsed) + ' / ' + String(Math.round(L.effDur)) + 'ms)';
+            text(txt, diagX + 6, y);
+          }
+          pop();
+        } catch (ee) { /* ignore diagnostic errors */ }
+
+      pop();
 }
 
 // Helper: find nearest point within radius (in pixels) on image area; returns {idx, ptIdx} or null
