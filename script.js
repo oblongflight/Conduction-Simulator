@@ -53,6 +53,8 @@ let amplitude = 60; // pixels per unit ECG amplitude
 let timeWindow = 10.0; // seconds shown across the canvas
 // Horizontal shift of ECG waveform (seconds). Positive moves waveform to the right.
 let ecgWaveShift = 0.0;
+// Whether overlay bands reflect dilated playback durations
+let overlayUsesDilation = true;
 
 // Adjustable waveform parameters (controlled by sliders)
 let tWaveScale = 1.0; // multiplier for T wave amplitude (can be negative)
@@ -105,11 +107,32 @@ const ECG_WAVEFORM_KEY = 'ecg.waveform.v1';
 function saveEcgWaveformSettings() {
   try {
     const payload = {
-      atheroPercent, thrombusPercent, METs,
-      heartRate, amplitude, timeWindow,
-      tWaveScale, qWaveScale, stOffset, tDuration, qtIntervalMs,
-      pDuration, pAmp, qrsWidth, qDur, rDur, sDur, pBiphasic, gP, gQ, gR, gS, gT, prDur
-      , ecgWaveShift
+      atheroPercent: atheroPercent,
+      thrombusPercent: thrombusPercent,
+      METs: METs,
+      heartRate: heartRate,
+      amplitude: amplitude,
+      timeWindow: timeWindow,
+      tWaveScale: tWaveScale,
+      qWaveScale: qWaveScale,
+      stOffset: stOffset,
+      tDuration: tDuration,
+      qtIntervalMs: qtIntervalMs,
+      pDuration: pDuration,
+      pAmp: pAmp,
+      qrsWidth: qrsWidth,
+      qDur: qDur,
+      rDur: rDur,
+      sDur: sDur,
+      pBiphasic: pBiphasic,
+      gP: gP,
+      gQ: gQ,
+      gR: gR,
+      gS: gS,
+      gT: gT,
+      prDur: prDur,
+      ecgWaveShift: ecgWaveShift,
+      overlayUsesDilation: !!overlayUsesDilation
     };
     localStorage.setItem(ECG_WAVEFORM_KEY, JSON.stringify(payload));
   } catch (e) { console.warn('saveEcgWaveformSettings error', e); }
@@ -135,6 +158,7 @@ function loadEcgWaveformSettings() {
     if (typeof p.pDuration === 'number') pDuration = p.pDuration;
     if (typeof p.pAmp === 'number') pAmp = p.pAmp;
     if (typeof p.ecgWaveShift === 'number') ecgWaveShift = p.ecgWaveShift;
+      if (typeof p.overlayUsesDilation === 'boolean') overlayUsesDilation = p.overlayUsesDilation;
     if (typeof p.qrsWidth === 'number') qrsWidth = p.qrsWidth;
     if (typeof p.qDur === 'number') qDur = p.qDur;
     if (typeof p.rDur === 'number') rDur = p.rDur;
@@ -1118,6 +1142,11 @@ function setup() {
   const densVal = document.createElement('div'); densVal.textContent = 'x' + (conductionDensityScale || 1.0).toFixed(2); densVal.style.width = '56px'; densVal.style.textAlign = 'right';
   densInput.oninput = (e) => { conductionDensityScale = Number(e.target.value) || 1.0; densVal.textContent = 'x' + conductionDensityScale.toFixed(2); };
   densRow.appendChild(densLab); densRow.appendChild(densInput); densRow.appendChild(densVal); globalPanel.appendChild(densRow);
+    // Overlay dilation toggle
+    const ovRow = document.createElement('div'); ovRow.style.display='flex'; ovRow.style.alignItems='center'; ovRow.style.gap='8px'; ovRow.style.marginTop='6px';
+    const ovLabel = document.createElement('div'); ovLabel.textContent = 'Overlay uses dilation'; ovLabel.style.width = '140px';
+    const ovChk = document.createElement('input'); ovChk.type = 'checkbox'; ovChk.checked = !!overlayUsesDilation; ovChk.onchange = (e) => { overlayUsesDilation = !!e.target.checked; saveEcgWaveformSettings(); };
+    ovRow.appendChild(ovLabel); ovRow.appendChild(ovChk); globalPanel.appendChild(ovRow);
   // Reset time dilation to 1 (user requested) and persist immediately
   try {
     timeDilation = 1.0;
@@ -2187,7 +2216,9 @@ function drawConductionOverlay(ix, iy, iw, ih) {
         if (it.points.length >= 2 && (it.mode || 'sequential') !== 'concurrent') {
           const normPts = it.points.map(p => ({ x: p.x * imgW + imgX, y: p.y * imgH + imgY }));
           // Density scales with timeDilation: maximum density when timeDilation==1
-          const trailMs = Math.min(1200, Math.max(120, perItemEffectiveDur * 0.8));
+          // Use a trail window proportional to the effective duration so
+          // animations remain consistent across heart rates (avoid fixed upper cap).
+          const trailMs = Math.max(120, Math.round(perItemEffectiveDur * 0.8));
           // Use user-controlled density only; do not scale with timeDilation
           let factor = (typeof conductionDensityScale === 'number' ? conductionDensityScale : 1.0);
           // clamp to a reasonable range (slider already provides 0.2..5.0)
@@ -2213,7 +2244,8 @@ function drawConductionOverlay(ix, iy, iw, ih) {
           if (pt) { const rgb = hexToRgb(it.color || '#ff0000'); fill(rgb.r, rgb.g, rgb.b, 220); ellipse(pt.x, pt.y, 12, 12); }
         } else if (it.points.length === 1) {
           const p = it.points[0]; const x = imgX + p.x * imgW; const y = imgY + p.y * imgH;
-          const trailMs = Math.min(800, Math.max(80, perItemEffectiveDur * 0.6));
+          // For single-point items scale trail with effective duration as well.
+          const trailMs = Math.max(80, Math.round(perItemEffectiveDur * 0.6));
           // Use user-controlled density only; do not scale with timeDilation
           let factor2 = (typeof conductionDensityScale === 'number' ? conductionDensityScale : 1.0);
           factor2 = Math.max(0, factor2);
