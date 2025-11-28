@@ -14,6 +14,17 @@ function loadTimeDilation() {
   } catch (e) {}
 }
 
+// Pause / time-offset helpers for ECG and Conduction animations
+let ecgTimeOffsetMs = 0; // subtract from millis() to get ECG effective time
+let conductionTimeOffsetMs = 0; // subtract from millis() for conduction animations
+let pausedEcg = false;
+let pausedConduction = false;
+let lastPStartMs = 0; // timestamp (effective ECG ms) when last P_start occurred
+let ecgPausedAtMs = 0;
+let conductionPausedAtMs = 0;
+// reference to the global control panel DOM so draw() can update ms counter
+let globalControlPanel = null;
+
 // Conduction state and persistence keys
 const CONDUCTION_EXPLICIT_STEPS_KEY = 'ecg.conductionExplicitSteps.v1';
 const CONDUCTION_STEPS_KEY = 'ecg.conductionStepDurations.v1';
@@ -40,6 +51,8 @@ let heartRate = 70; // bpm (editable)
 // Visual tuning
 let amplitude = 60; // pixels per unit ECG amplitude
 let timeWindow = 10.0; // seconds shown across the canvas
+// Horizontal shift of ECG waveform (seconds). Positive moves waveform to the right.
+let ecgWaveShift = 0.0;
 
 // Adjustable waveform parameters (controlled by sliders)
 let tWaveScale = 1.0; // multiplier for T wave amplitude (can be negative)
@@ -51,8 +64,15 @@ let qtIntervalMs = 360; // QT interval in milliseconds (Q onset to T end)
 // P-wave adjustable parameters
 let pDuration = 0.05; // seconds (default ~50 ms)
 let pAmp = 0.25; // amplitude multiplier (visible by default)
+// Debug hooks for P-wave placement (seconds)
+let __debug_pStart = null;
+let __debug_pCenter = null;
+let __debug_pEnd = null;
+let __debug_pDur = null;
 // Global QRS width multiplier (1.0 == normal)
 let qrsWidth = 1.0;
+// Overall conduction-dot density multiplier (1.0 = default)
+let conductionDensityScale = 1.0;
 // Individual Q/R/S duration controls (seconds)
 let qDur = 0.02;
 let rDur = 0.01;
@@ -89,6 +109,7 @@ function saveEcgWaveformSettings() {
       heartRate, amplitude, timeWindow,
       tWaveScale, qWaveScale, stOffset, tDuration, qtIntervalMs,
       pDuration, pAmp, qrsWidth, qDur, rDur, sDur, pBiphasic, gP, gQ, gR, gS, gT, prDur
+      , ecgWaveShift
     };
     localStorage.setItem(ECG_WAVEFORM_KEY, JSON.stringify(payload));
   } catch (e) { console.warn('saveEcgWaveformSettings error', e); }
@@ -113,6 +134,7 @@ function loadEcgWaveformSettings() {
     if (typeof p.qtIntervalMs === 'number') qtIntervalMs = p.qtIntervalMs;
     if (typeof p.pDuration === 'number') pDuration = p.pDuration;
     if (typeof p.pAmp === 'number') pAmp = p.pAmp;
+    if (typeof p.ecgWaveShift === 'number') ecgWaveShift = p.ecgWaveShift;
     if (typeof p.qrsWidth === 'number') qrsWidth = p.qrsWidth;
     if (typeof p.qDur === 'number') qDur = p.qDur;
     if (typeof p.rDur === 'number') rDur = p.rDur;
@@ -349,7 +371,7 @@ function refreshConductionPanel() {
 
       // middle: playback and editing controls
       const middle = document.createElement('div'); middle.style.display = 'flex'; middle.style.alignItems = 'center'; middle.style.gap = '6px';
-      const trig = document.createElement('button'); trig.textContent = 'Trigger'; trig.onclick = () => { try { it.playbackStartTime = millis(); } catch (e) { console.warn('trigger error', e); } };
+      const trig = document.createElement('button'); trig.textContent = 'Trigger'; trig.onclick = () => { try { it.playbackStartTime = (pausedConduction ? conductionPausedAtMs : (millis() - conductionTimeOffsetMs)); saveConductionItems(); refreshConductionPanel(); } catch (e) { console.warn('trigger error', e); } };
       // Edit toggle: enables point editing for this item
       const editBtn = document.createElement('button'); editBtn.textContent = (selectedConductionIndex === idx && conductionEditMode) ? 'Editing' : 'Edit';
       editBtn.style.background = (selectedConductionIndex === idx && conductionEditMode) ? '#ffe' : '';
@@ -423,7 +445,7 @@ function refreshConductionPanel() {
       const del = document.createElement('button'); del.textContent = 'Delete'; del.onclick = () => { if (!confirm('Delete "' + (it.name||'item') + '"?')) return; conductionItems.splice(idx,1); saveConductionItems(); refreshConductionPanel(); };
       // playing indicator
       const playDot = document.createElement('div'); playDot.style.width='10px'; playDot.style.height='10px'; playDot.style.borderRadius='50%'; playDot.style.marginLeft='6px';
-      const start = it.playbackStartTime || 0; const nowMs = millis(); let effDur = Number(it.durationMs || 1200);
+      const start = it.playbackStartTime || 0; const nowMs = (pausedConduction ? conductionPausedAtMs : (millis() - conductionTimeOffsetMs)); let effDur = Number(it.durationMs || 1200);
       if (it.durationSource) effDur = Math.max(10, (getEcgFeatureMs(it.durationSource) || 0));
       const playing = (start > 0 && (nowMs - start) >= 0 && (nowMs - start) < effDur);
       playDot.style.background = playing ? 'limegreen' : 'transparent'; playDot.style.border = '1px solid ' + (playing ? 'green' : '#ccc');
@@ -545,9 +567,45 @@ function getEcgFeatureMs(key) {
   switch (String(key)) {
     case 'P': return Math.max(1, Math.round((pDuration || 0) * 1000));
     case 'PR': return Math.max(1, Math.round((prDur || 0) * 1000));
-    case 'QRS': return Math.max(1, Math.round(((qDur || 0) + (rDur || 0) + (sDur || 0)) * (qrsWidth || 1) * 1000));
+    case 'QRS': {
+      try {
+        // Compute QRS as Q onset -> S end using same geometry as singleBeatSignal
+        const qCenter = -0.03;
+        const rCenter = 0.0;
+        const qHalf = (qDur || 0) * (qrsWidth || 1) / 2.0;
+        const rHalf = (rDur || 0) * (qrsWidth || 1) / 2.0;
+        const sHalf = (sDur || 0) * (qrsWidth || 1) / 2.0;
+        const qStart = qCenter - qHalf;
+        const rEnd = rCenter + rHalf;
+        const sGapLocal = typeof sGap !== 'undefined' ? sGap : 0.006;
+        const sEnd = rEnd + sGapLocal + sHalf;
+        const qrsSec = Math.max(0.001, sEnd - qStart);
+        return Math.max(1, Math.round(qrsSec * 1000));
+      } catch (e) {
+        return Math.max(1, Math.round(((qDur || 0) + (rDur || 0) + (sDur || 0)) * (qrsWidth || 1) * 1000));
+      }
+    }
     case 'QT': return Math.max(1, Math.round(qtIntervalMs || 0));
-    case 'QT*': return Math.max(1, Math.round(qtIntervalMs || 0));
+    case 'QT*': {
+      try {
+        // Compute S end and T start similar to singleBeatSignal() internals
+        const qCenter = -0.03;
+        const rCenter = 0.0;
+        const qHalf = (qDur || 0) * (qrsWidth || 1) / 2.0;
+        const rHalf = (rDur || 0) * (qrsWidth || 1) / 2.0;
+        const sHalf = (sDur || 0) * (qrsWidth || 1) / 2.0;
+        const qStart = qCenter - qHalf;
+        const rEnd = rCenter + rHalf;
+        const sGapLocal = typeof sGap !== 'undefined' ? sGap : 0.006;
+        const sEnd = rEnd + sGapLocal + sHalf;
+        // desired T end from Q onset
+        const desiredTEnd = qStart + (qtIntervalMs || 0) / 1000.0;
+        const minTdur = Math.max(0.02, tDuration || 0.02);
+        const tStart = Math.max(sEnd + (typeof sStOverlap !== 'undefined' ? sStOverlap : 0.085), desiredTEnd - minTdur);
+        const qtStarMs = Math.round(Math.max(1, (tStart - sEnd) * 1000));
+        return qtStarMs;
+      } catch (e) { return Math.max(1, Math.round(qtIntervalMs || 0)); }
+    }
     case 'T': return Math.max(1, Math.round((tDuration || 0) * 1000));
     case 'TP': {
       // TP = interval from end of T to next P. TP = RR - (PR + QT)
@@ -562,16 +620,42 @@ function getEcgFeatureMs(key) {
   }
 }
 
+// Compute the effective duration (ms) for a conduction item using current ECG feature mappings.
+function computeItemEffectiveDurationMs(it, includeDilation = true) {
+  try {
+    const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
+    const mult = includeDilation ? dilation : 1.0;
+    if (!it) return 0;
+    if (it.durationSource) {
+      return Math.max(1, (getEcgFeatureMs(it.durationSource) || 0)) * mult;
+    }
+    if (it.type === 'shape') {
+      const rampUp = (it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Math.max(0, Number(it.rampUpMs) || 0)) * mult;
+      const sustain = (it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : Math.max(0, Number(it.sustainMs) || 0)) * mult;
+      const rampDown = (it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Math.max(0, Number(it.rampDownMs) || 0)) * mult;
+      return Math.max(1, rampUp + sustain + rampDown);
+    }
+    return Math.max(1, Number(it.durationMs || 1200)) * mult;
+  } catch (e) { console.warn('computeItemEffectiveDurationMs error', e); return 0; }
+}
+
 // Trigger conduction items for a given ECG event key (e.g. 'R_start')
 function triggerEcgEvent(eventKey) {
   try {
     if (!eventKey) return;
-    const now = millis();
+    const now = (pausedConduction ? conductionPausedAtMs : (millis() - conductionTimeOffsetMs));
     let triggered = 0;
     conductionItems.forEach(it => {
       if (!it) return;
       if ((it.startMode === 'on_ecg_event') && (it.ecgEvent === eventKey)) {
         it.playbackStartTime = now;
+        // log computed durations to help debug mismatches between items
+        try {
+          const eff = computeItemEffectiveDurationMs(it, true);
+          const effNoDil = computeItemEffectiveDurationMs(it, false);
+          console.log('triggerEcgEvent:', eventKey, '->', it.name, 'start@', now, 'dur(ms,withDil/noDil)=', eff, '/', effNoDil, 'config=', { startMode: it.startMode, durationSource: it.durationSource, rampUpSource: it.rampUpSource, sustainSource: it.sustainSource, rampDownSource: it.rampDownSource, durationMs: it.durationMs });
+          if (conductionDebugDiv) conductionDebugDiv.textContent = 'Triggered ' + it.name + ' for ' + eventKey + ' dur=' + Math.round(eff) + 'ms';
+        } catch (e) { console.warn('trigger log error', e); }
         triggered++;
       }
     });
@@ -950,11 +1034,14 @@ function setup() {
   pdurRow.style.display = 'flex'; pdurRow.style.alignItems = 'center'; pdurRow.style.gap = '8px';
   const pdurInput = document.createElement('input');
   pdurInput.type = 'range'; pdurInput.min = '0.01'; pdurInput.max = '0.20'; pdurInput.step = '0.005'; pdurInput.value = String(pDuration);
+  pdurInput.id = 'pdurInput';
   pdurInput.oninput = (e) => { pDuration = Number(e.target.value); pdurVal.textContent = String(Math.round(pDuration * 1000)) + ' ms'; refreshConductionPanel(); saveEcgWaveformSettings(); };
   pdurInput.style.flex = '1';
   const pdurVal = document.createElement('div'); pdurVal.textContent = String(Math.round(pDuration * 1000)) + ' ms'; pdurVal.style.width = '56px'; pdurVal.style.textAlign = 'right';
   const pdurLab = document.createElement('div'); pdurLab.textContent = 'P'; pdurLab.style.width = '18px'; pdurRow.appendChild(pdurLab);
   pdurRow.appendChild(pdurInput); pdurRow.appendChild(pdurVal); globalPanel.appendChild(pdurRow);
+
+  
 
   // Heart rate slider (bpm)
   const hrRow = document.createElement('div');
@@ -999,6 +1086,7 @@ function setup() {
 
   const prRow = document.createElement('div'); prRow.style.display = 'flex'; prRow.style.alignItems = 'center'; prRow.style.gap = '8px';
   const prInput = document.createElement('input'); prInput.type = 'range'; prInput.min = '0.06'; prInput.max = '0.30'; prInput.step = '0.005'; prInput.value = String(prDur);
+  prInput.id = 'prInput';
   prInput.style.flex = '1'; const prVal = document.createElement('div'); prVal.textContent = String(Math.round(prDur * 1000)) + ' ms'; prVal.style.width = '56px'; prVal.style.textAlign = 'right';
   prInput.oninput = (e) => { prDur = Number(e.target.value); prVal.textContent = String(Math.round(prDur * 1000)) + ' ms'; refreshConductionPanel(); saveEcgWaveformSettings(); };
   const prLab = document.createElement('div'); prLab.textContent = 'PR'; prLab.style.width = '18px'; prRow.appendChild(prLab); prRow.appendChild(prInput); prRow.appendChild(prVal); globalPanel.appendChild(prRow);
@@ -1016,37 +1104,97 @@ function setup() {
   const tdVal = document.createElement('div'); tdVal.textContent = String(timeDilation.toFixed(2)); tdVal.style.width = '56px'; tdVal.style.textAlign = 'right';
   tdInput.oninput = (e) => { timeDilation = Number(e.target.value) || 1.0; tdVal.textContent = timeDilation.toFixed(2); saveTimeDilation(); refreshConductionPanel(); };
   tdRow.appendChild(tdLabel); tdRow.appendChild(tdInput); tdRow.appendChild(tdVal); globalPanel.appendChild(tdRow);
+  // ECG horizontal shift slider
+  const shiftRow = document.createElement('div'); shiftRow.style.display='flex'; shiftRow.style.alignItems='center'; shiftRow.style.gap='8px'; shiftRow.style.marginTop='6px';
+  const shiftLab = document.createElement('div'); shiftLab.textContent = 'ECG shift'; shiftLab.style.width = '90px';
+  const shiftInput = document.createElement('input'); shiftInput.type = 'range'; shiftInput.min = '-0.3'; shiftInput.max = '0.3'; shiftInput.step = '0.005'; shiftInput.value = String(ecgWaveShift || 0); shiftInput.style.flex = '1';
+  const shiftVal = document.createElement('div'); shiftVal.textContent = String(((ecgWaveShift||0)*1000).toFixed(0)) + ' ms'; shiftVal.style.width = '56px'; shiftVal.style.textAlign = 'right';
+  shiftInput.oninput = (e) => { ecgWaveShift = Number(e.target.value) || 0; shiftVal.textContent = String(Math.round(ecgWaveShift*1000)) + ' ms'; saveEcgWaveformSettings(); };
+  shiftRow.appendChild(shiftLab); shiftRow.appendChild(shiftInput); shiftRow.appendChild(shiftVal); globalPanel.appendChild(shiftRow);
+  // Conduction density scale slider
+  const densRow = document.createElement('div'); densRow.style.display='flex'; densRow.style.alignItems='center'; densRow.style.gap='8px'; densRow.style.marginTop='6px';
+  const densLab = document.createElement('div'); densLab.textContent = 'Conduction density'; densLab.style.width = '90px';
+  const densInput = document.createElement('input'); densInput.type = 'range'; densInput.min = '0.2'; densInput.max = '5.0'; densInput.step = '0.05'; densInput.value = String(conductionDensityScale || 1.0); densInput.style.flex = '1';
+  const densVal = document.createElement('div'); densVal.textContent = 'x' + (conductionDensityScale || 1.0).toFixed(2); densVal.style.width = '56px'; densVal.style.textAlign = 'right';
+  densInput.oninput = (e) => { conductionDensityScale = Number(e.target.value) || 1.0; densVal.textContent = 'x' + conductionDensityScale.toFixed(2); };
+  densRow.appendChild(densLab); densRow.appendChild(densInput); densRow.appendChild(densVal); globalPanel.appendChild(densRow);
+  // Reset time dilation to 1 (user requested) and persist immediately
+  try {
+    timeDilation = 1.0;
+    saveTimeDilation();
+    try { tdInput.value = String(timeDilation); } catch (e) {}
+    try { tdVal.textContent = String(timeDilation.toFixed(2)); } catch (e) {}
+  } catch (e) {}
+
+  // MS counter and Pause/Resume controls for ECG and Conduction
+  try {
+    const msRow = document.createElement('div'); msRow.style.display = 'flex'; msRow.style.alignItems = 'center'; msRow.style.gap = '8px'; msRow.style.marginTop = '6px';
+    const msCounter = document.createElement('div'); msCounter.textContent = 'ms since P: -'; msCounter.style.minWidth = '140px'; msCounter.style.fontSize = '13px'; msRow.appendChild(msCounter);
+    const gameMsCounter = document.createElement('div'); gameMsCounter.textContent = 'game ms since P: -'; gameMsCounter.style.minWidth = '160px'; gameMsCounter.style.fontSize = '13px'; gameMsCounter.style.marginLeft = '6px'; msRow.appendChild(gameMsCounter);
+    const ecgPauseBtn = document.createElement('button'); ecgPauseBtn.textContent = pausedEcg ? 'Resume ECG' : 'Pause ECG';
+    ecgPauseBtn.onclick = () => {
+      if (!pausedEcg) {
+        ecgPausedAtMs = millis() - ecgTimeOffsetMs;
+        pausedEcg = true;
+      } else {
+        pausedEcg = false;
+        ecgTimeOffsetMs = millis() - ecgPausedAtMs;
+      }
+      ecgPauseBtn.textContent = pausedEcg ? 'Resume ECG' : 'Pause ECG';
+    };
+    msRow.appendChild(ecgPauseBtn);
+
+    const conductionPauseBtn = document.createElement('button'); conductionPauseBtn.textContent = pausedConduction ? 'Resume Conduction' : 'Pause Conduction';
+    conductionPauseBtn.onclick = () => {
+      if (!pausedConduction) {
+        conductionPausedAtMs = millis() - conductionTimeOffsetMs;
+        pausedConduction = true;
+      } else {
+        pausedConduction = false;
+        conductionTimeOffsetMs = millis() - conductionPausedAtMs;
+      }
+      conductionPauseBtn.textContent = pausedConduction ? 'Resume Conduction' : 'Pause Conduction';
+    };
+    msRow.appendChild(conductionPauseBtn);
+
+    // Button to pause/resume BOTH ECG and Conduction simultaneously
+    const pauseBothBtn = document.createElement('button'); pauseBothBtn.textContent = (pausedEcg && pausedConduction) ? 'Resume Both' : 'Pause Both';
+    pauseBothBtn.title = 'Pause or resume both ECG and Conduction together';
+    pauseBothBtn.onclick = () => {
+      const goingToPause = !(pausedEcg && pausedConduction);
+      if (goingToPause) {
+        // pause both: capture paused timestamps
+        ecgPausedAtMs = millis() - ecgTimeOffsetMs;
+        conductionPausedAtMs = millis() - conductionTimeOffsetMs;
+        pausedEcg = true; pausedConduction = true;
+      } else {
+        // resume both: restore offsets so timeline continues
+        pausedEcg = false; pausedConduction = false;
+        ecgTimeOffsetMs = millis() - ecgPausedAtMs;
+        conductionTimeOffsetMs = millis() - conductionPausedAtMs;
+      }
+      // update labels for individual buttons
+      try { ecgPauseBtn.textContent = pausedEcg ? 'Resume ECG' : 'Pause ECG'; } catch (e) {}
+      try { conductionPauseBtn.textContent = pausedConduction ? 'Resume Conduction' : 'Pause Conduction'; } catch (e) {}
+      pauseBothBtn.textContent = (pausedEcg && pausedConduction) ? 'Resume Both' : 'Pause Both';
+    };
+    msRow.appendChild(pauseBothBtn);
+
+    // expose for draw() updates
+    globalPanel._ecgMsCounter = msCounter;
+    globalPanel._ecgGameMsCounter = gameMsCounter;
+    globalPanel._ecgPauseBtn = ecgPauseBtn;
+    globalPanel._conductionPauseBtn = conductionPauseBtn;
+    // debug display for P placement
+    const pDebug = document.createElement('div'); pDebug.style.fontSize = '12px'; pDebug.style.marginLeft = '8px'; pDebug.textContent = '';
+    globalPanel._pDebug = pDebug;
+    msRow.appendChild(pDebug);
+    globalControlPanel = globalPanel;
+    globalPanel.appendChild(msRow);
+  } catch (e) { /* ignore UI creation errors */ }
 
   document.body.appendChild(globalPanel);
-  // Small always-visible Time Dilation control (helps when global panel is hidden)
-  try {
-    let tdControl = document.getElementById('timeDilationControl');
-    if (!tdControl) {
-      tdControl = document.createElement('div');
-      tdControl.id = 'timeDilationControl';
-      tdControl.style.position = 'fixed';
-      tdControl.style.left = '10px';
-      tdControl.style.top = '60px';
-      tdControl.style.zIndex = 10005;
-      tdControl.style.padding = '6px 8px';
-      tdControl.style.background = 'rgba(255,255,255,0.98)';
-      tdControl.style.border = '1px solid rgba(0,0,0,0.12)';
-      tdControl.style.borderRadius = '6px';
-      tdControl.style.fontFamily = 'Helvetica, Arial, sans-serif';
-      tdControl.style.fontSize = '13px';
-
-      const lab = document.createElement('div'); lab.textContent = 'Time dilation'; lab.style.fontSize = '12px'; lab.style.marginBottom = '4px'; tdControl.appendChild(lab);
-      const row = document.createElement('div'); row.style.display = 'flex'; row.style.alignItems = 'center'; row.style.gap = '8px';
-      const input = document.createElement('input'); input.type = 'range'; input.min = '0.2'; input.max = '10.0'; input.step = '0.05'; input.value = String(timeDilation); input.style.width = '160px';
-      const val = document.createElement('div'); val.textContent = String(timeDilation.toFixed ? timeDilation.toFixed(2) : String(timeDilation)); val.style.width = '48px'; val.style.textAlign = 'right';
-      input.oninput = (e) => { timeDilation = Number(e.target.value) || 1.0; val.textContent = timeDilation.toFixed(2); saveTimeDilation(); refreshConductionPanel(); };
-      row.appendChild(input); row.appendChild(val); tdControl.appendChild(row);
-      document.body.appendChild(tdControl);
-    } else {
-      // sync existing control value
-      try { const input = tdControl.querySelector('input'); const val = tdControl.querySelector('div:nth-child(2) div'); if (input) input.value = String(timeDilation); if (val) val.textContent = timeDilation.toFixed(2); } catch (e) {}
-    }
-  } catch (e) { /* ignore */ }
+  // (Time Dilation control moved into the Global panel; inline control removed)
   // create conduction debug box (placed inside the global control panel)
   try {
     conductionDebugDiv = document.createElement('div');
@@ -1406,14 +1554,20 @@ function draw() {
         // Use the same time reference as ECG rendering
         const beatPeriod = 60.0 / heartRate;
         const duration = beatPeriod * 1000 * timeDilation;
-        const now = millis();
-        // t_rel range: -0.2s to +0.6s
-        // Shift waveform 150ms (0.15s) to the left
-        const tRelStart = -0.2 - 0.15;
-        const tRelEnd = 0.6 - 0.15;
-        const tRelRange = tRelEnd - tRelStart;
+        const nowMs = pausedEcg ? ecgPausedAtMs : (millis() - ecgTimeOffsetMs);
+        // t_rel range: -0.2s to +0.6s (we keep this range constant)
+        // base shift previously used: 150ms left
+        const baseShift = -0.15; // seconds
+        // compute the canonical start and range (independent of user shift)
+        const canonicalStart = -0.2 + baseShift;
+        const canonicalEnd = 0.6 - 0.15;
+        const canonicalRange = canonicalEnd - canonicalStart;
+        // apply user-configurable horizontal shift without changing the range
+        const tRelStart = canonicalStart + (typeof ecgWaveShift === 'number' ? ecgWaveShift : 0);
+        const tRelRange = canonicalRange;
+        const tRelEnd = tRelStart + tRelRange;
         // Calculate time within current beat, mapped to t_rel range
-        const beatFrac = (now / duration) % 1.0;
+        const beatFrac = (nowMs / duration) % 1.0;
         const beatTime = tRelStart + beatFrac * tRelRange;
         for (let i = 0; i <= sampleCount; i++) {
           const t_rel = (i / sampleCount) * tRelRange + tRelStart;
@@ -1452,6 +1606,80 @@ function draw() {
           }
         }
         ecgG.push();
+        // Overlay: draw expected start/end intervals for conduction items bound to ECG events
+        try {
+          // Map event keys to point indices when available
+          const eventIndexForKey = (key) => {
+            if (!key) return null;
+            switch (key) {
+              case 'P_start': return foundPStart ? pStartIdx : null;
+              case 'P_end': return foundPStart ? Math.min(points.length-1, pStartIdx + Math.round((pDuration||0)*sampleCount/tRelRange)) : null;
+              case 'Q_start': return (window._foundQStart ? window._qStartIdx : null);
+              case 'R_start': return (window._foundRStart ? window._rStartIdx : null);
+              case 'S_start': return (window._foundSStart ? window._sStartIdx : null);
+              case 'T_start': return (window._foundTStart ? window._tStartIdx : null);
+              default: return null;
+            }
+          };
+          // Collect overlay rectangles first so we can assign non-overlapping vertical tiers
+          const overlays = [];
+          for (let it of conductionItems) {
+            if (!it) continue;
+            if ((it.startMode || 'after_previous') !== 'on_ecg_event') continue;
+            const ev = it.ecgEvent;
+            if (!ev) continue;
+            const startIdx = eventIndexForKey(ev);
+            if (typeof startIdx !== 'number' || !points[startIdx]) continue;
+            const startT = points[startIdx].t_rel;
+            // Use non-dilated duration for overlay length so it doesn't change
+            // when `timeDilation` is adjusted by the user.
+            const durMs = computeItemEffectiveDurationMs(it, false) || 0;
+            const durSec = durMs / 1000.0;
+            const endT = startT + durSec;
+            const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+            const startX = clamp(Math.round(padLeft + ((startT - tRelStart) / tRelRange) * w), padLeft, padLeft + w);
+            const endX = clamp(Math.round(padLeft + ((endT - tRelStart) / tRelRange) * w), padLeft, padLeft + w);
+            if (endX <= startX) continue;
+            overlays.push({ startX, endX, color: it.color || '#ff0000', label: it.name || it.id || '(item)' });
+          }
+
+          if (overlays.length > 0) {
+            // sort by startX so stacking is deterministic
+            overlays.sort((a,b) => a.startX - b.startX || (a.endX - b.endX));
+            // determine number of tiers based on available height and desired tier height
+            const maxTiers = Math.max(1, Math.min(6, Math.floor(h / 20)));
+            const tierHeight = Math.max(12, Math.min(28, Math.floor(h / Math.max(1, maxTiers)) - 4));
+            const gap = 6; // minimal horizontal gap to allow placing overlays on same tier
+            const lastEnd = [];
+            overlays.forEach(o => {
+              let tier = 0;
+              while (tier < lastEnd.length && !(o.startX > lastEnd[tier] + gap)) tier++;
+              if (tier >= lastEnd.length) lastEnd.push(o.endX); else lastEnd[tier] = Math.max(lastEnd[tier], o.endX);
+              o.tier = tier;
+            });
+
+            // draw overlays with tiered vertical positions
+            for (let o of overlays) {
+              try {
+                const rgb = hexToRgb(o.color || '#ff0000');
+                const y = padTop + o.tier * (tierHeight + 4);
+                const hrect = Math.min(tierHeight, Math.max(12, Math.floor(h - (y - padTop) - 4)));
+                ecgG.noStroke();
+                ecgG.fill(rgb.r, rgb.g, rgb.b, 48);
+                ecgG.rect(o.startX, y, Math.max(2, o.endX - o.startX), hrect);
+                ecgG.stroke(rgb.r, rgb.g, rgb.b);
+                ecgG.strokeWeight(1);
+                ecgG.line(o.startX, y, o.startX, y + hrect);
+                ecgG.line(o.endX, y, o.endX, y + hrect);
+                // label
+                ecgG.noStroke(); ecgG.fill(0); ecgG.textSize(12);
+                const tx = Math.max(o.startX + 4, Math.min(o.endX - 40, o.startX + 4));
+                ecgG.text(o.label, tx, y + Math.min(14, Math.max(12, Math.round(hrect/2))));
+              } catch (e) { /* ignore drawing errors */ }
+            }
+          }
+        } catch (e) { /* overlay errors shouldn't break draw */ }
+
         ecgG.stroke(0, 120, 0);
         ecgG.strokeWeight(3);
         ecgG.noFill();
@@ -1517,6 +1745,10 @@ function draw() {
               const x = points[idx].x;
               if (window._lastIndicatorX < x && indicatorX >= x) {
                 logWaveCross(label, x);
+                // record P start effective timestamp for ms counter
+                if (label === 'P') {
+                  try { lastPStartMs = Math.max(0, nowMs); } catch (e) {}
+                }
                 eventCrossings.push(eventKey);
               }
             }
@@ -1581,6 +1813,43 @@ function draw() {
 
         // blit to right half
         image(ecgG, halfW, 0);
+        // Update MS counter and pause button labels if global panel exists
+        try {
+          if (globalControlPanel && globalControlPanel._ecgMsCounter) {
+            const effectiveEcgNow = pausedEcg ? ecgPausedAtMs : (millis() - ecgTimeOffsetMs);
+            const msSinceP = (lastPStartMs > 0) ? Math.max(0, Math.round(effectiveEcgNow - lastPStartMs)) : '-';
+            globalControlPanel._ecgMsCounter.textContent = 'ms since P: ' + String(msSinceP);
+            // also show 'game' ms (as if no time dilation): divide by timeDilation
+            try {
+              if (globalControlPanel._ecgGameMsCounter) {
+                if (msSinceP === '-' || !isFinite(Number(timeDilation)) || Number(timeDilation) === 0) {
+                  globalControlPanel._ecgGameMsCounter.textContent = 'game ms since P: -';
+                } else {
+                  const gameMs = Math.max(0, Math.round(Number(msSinceP) / Number(timeDilation)));
+                  globalControlPanel._ecgGameMsCounter.textContent = 'game ms since P: ' + String(gameMs);
+                }
+              }
+            } catch (e) {}
+          }
+          // update P debug readout
+          try {
+            if (globalControlPanel && globalControlPanel._pDebug) {
+              const pS = (__debug_pStart !== null) ? Math.round(__debug_pStart * 1000) + ' ms' : '-';
+              const pC = (__debug_pCenter !== null) ? Math.round(__debug_pCenter * 1000) + ' ms' : '-';
+              const pE = (__debug_pEnd !== null) ? Math.round(__debug_pEnd * 1000) + ' ms' : '-';
+              const pD = (__debug_pDur !== null) ? Math.round(__debug_pDur * 1000) + ' ms' : '-';
+              const prText = (typeof prDur === 'number') ? (Math.round(prDur*1000) + ' ms PR') : '';
+              const pdText = (typeof pDuration === 'number') ? (Math.round(pDuration*1000) + ' ms Pdur') : '';
+              globalControlPanel._pDebug.textContent = prText + ' ' + pdText + ' | P start: ' + pS + ' center: ' + pC + ' end: ' + pE + ' dur: ' + pD;
+            }
+          } catch (e) {}
+          if (globalControlPanel && globalControlPanel._ecgPauseBtn) {
+            globalControlPanel._ecgPauseBtn.textContent = pausedEcg ? 'Resume ECG' : 'Pause ECG';
+          }
+          if (globalControlPanel && globalControlPanel._conductionPauseBtn) {
+            globalControlPanel._conductionPauseBtn.textContent = pausedConduction ? 'Resume Conduction' : 'Pause Conduction';
+          }
+        } catch (e) {}
       }
     } else {
       // 12-lead grid layout: arrange 12 lead boxes
@@ -1712,7 +1981,8 @@ function drawLead(x, y, w, h, label, leadIndex) {
     // accumulate beats by integer pixel shifts to avoid subpixel phase jitter
     const acc = new Array(w + 1).fill(0);
     for (let bt of beatTimes) {
-      const deltaSec = now - bt;
+      // include user horizontal shift so accumulated beats are translated
+      const deltaSec = now - bt + (typeof ecgWaveShift === 'number' ? ecgWaveShift : 0);
       const shift = Math.round(deltaSec * pixelsPerSecond); // integer pixel shift
       // k = ix + shift maps to template index; template index range is [0, templateLen-1]
       for (let ix = 0; ix <= w; ix++) {
@@ -1825,7 +2095,7 @@ function drawConductionOverlay(ix, iy, iw, ih) {
   noFill();
   strokeWeight(2);
   const imgW = iw, imgH = ih; const imgX = ix, imgY = iy;
-  const now = millis();
+  // Use effective conduction time (respecting pause offset) when needed
 
   for (let i = 0; i < conductionItems.length; i++) {
     const it = conductionItems[i]; if (!it) continue;
@@ -1859,7 +2129,7 @@ function drawConductionOverlay(ix, iy, iw, ih) {
   // step-based scheduler so items only play when manually triggered and
   // can overlap independently.
   try {
-    const nowMs = millis();
+    const nowMs = pausedConduction ? conductionPausedAtMs : (millis() - conductionTimeOffsetMs);
     for (let ix = 0; ix < conductionItems.length; ix++) {
       const it = conductionItems[ix]; if (!it) continue;
       const itStart = it.playbackStartTime || 0;
@@ -1916,9 +2186,16 @@ function drawConductionOverlay(ix, iy, iw, ih) {
         strokeWeight(0); noStroke();
         if (it.points.length >= 2 && (it.mode || 'sequential') !== 'concurrent') {
           const normPts = it.points.map(p => ({ x: p.x * imgW + imgX, y: p.y * imgH + imgY }));
+          // Density scales with timeDilation: maximum density when timeDilation==1
           const trailMs = Math.min(1200, Math.max(120, perItemEffectiveDur * 0.8));
-          const sampleMs = 40;
-          const samples = Math.max(5, Math.ceil(trailMs / sampleMs));
+          // Use user-controlled density only; do not scale with timeDilation
+          let factor = (typeof conductionDensityScale === 'number' ? conductionDensityScale : 1.0);
+          // clamp to a reasonable range (slider already provides 0.2..5.0)
+          factor = Math.max(0, factor);
+          const minSampleMs = 8; const maxSampleMs = 60;
+          const sampleMs = Math.max(1, Math.round(maxSampleMs - factor * (maxSampleMs - minSampleMs)));
+          const minSamples = Math.max(3, Math.round(8 * factor));
+          const samples = Math.max(minSamples, Math.ceil(trailMs / sampleMs));
           const rgb = hexToRgb(it.color || '#ff0000');
           for (let s = 0; s < samples; s++) {
             const dt = s * (trailMs / samples);
@@ -1937,7 +2214,13 @@ function drawConductionOverlay(ix, iy, iw, ih) {
         } else if (it.points.length === 1) {
           const p = it.points[0]; const x = imgX + p.x * imgW; const y = imgY + p.y * imgH;
           const trailMs = Math.min(800, Math.max(80, perItemEffectiveDur * 0.6));
-          const sampleMs = 50; const samples = Math.max(3, Math.ceil(trailMs / sampleMs));
+          // Use user-controlled density only; do not scale with timeDilation
+          let factor2 = (typeof conductionDensityScale === 'number' ? conductionDensityScale : 1.0);
+          factor2 = Math.max(0, factor2);
+          const minSampleMs2 = 8; const maxSampleMs2 = 60;
+          const sampleMs = Math.max(1, Math.round(maxSampleMs2 - factor2 * (maxSampleMs2 - minSampleMs2)));
+          const minSamples2 = Math.max(2, Math.round(6 * factor2));
+          const samples = Math.max(minSamples2, Math.ceil(trailMs / sampleMs));
           const rgb = hexToRgb(it.color || '#ff0000');
           for (let s = 0; s < samples; s++) {
             const dt = s * (trailMs / samples); const sampleElapsed = Math.max(0, perItemElapsed - dt);
@@ -2285,11 +2568,9 @@ function singleBeatSignal(t, effTWaveScale, effSTOffset, leadMults) {
   const tEnd = 0.55;
 
   // Minimum gaps (seconds)
-  const minPQGap = 0.04; // gap between end of P and start of Q
-  const minTPGap = 0.06; // gap between end of T and start of next P
-
-  // Determine beatPeriod from current heartRate (global)
-  const beatPeriod = 60.0 / heartRate;
+  // Relaxed to give user more direct control via PR and P-duration sliders
+  const minPQGap = 0.005; // gap between end of P and start of Q
+  const minTPGap = 0.02; // gap between end of T and start of next P
 
   // Adjust P window end so P and Q are separated by at least minPQGap
   let pStart = pStartDefault;
@@ -2299,10 +2580,11 @@ function singleBeatSignal(t, effTWaveScale, effSTOffset, leadMults) {
     pEnd = pStart + 0.01;
   }
 
-  // Ensure there's a gap between current beat's T end and the NEXT beat's P start.
-  // Next beat's P start would be at (beatPeriod + pStart). We want:
-  // (beatPeriod + pStart) - tEnd >= minTPGap  =>  pStart >= tEnd - beatPeriod + minTPGap
-  const neededPStart = tEnd - beatPeriod + minTPGap;
+  // Previously this constraint used the beat period (HR) to enforce a gap
+  // between T end and the next beat's P start. We remove HR dependence
+  // here and instead use a fixed early bound so PR and P-duration
+  // sliders control placement directly.
+  const neededPStart = -1.0;
   if (pStart < neededPStart) {
     // shift P start later to create the required gap
     pStart = neededPStart;
@@ -2330,67 +2612,46 @@ function singleBeatSignal(t, effTWaveScale, effSTOffset, leadMults) {
   // P component: use user-controlled P duration while still respecting minimal gaps.
   let desiredPdur = pDuration; // seconds (user-controlled)
 
-  // Compute constraints for P center so P window stays between neededPStart and qStart - minPQGap
-  let minCenter = neededPStart + desiredPdur / 2.0;
-  let maxCenter = qStart - minPQGap - desiredPdur / 2.0;
-
-  // If constraints conflict (very high HR), shrink desiredPdur to fit available space
-  if (minCenter > maxCenter) {
-    const available = (qStart - minPQGap) - neededPStart;
-    if (available <= 0.0) {
-      // no room, fallback to a very narrow P centered between bounds
-      desiredPdur = 0.01;
-      minCenter = neededPStart + desiredPdur / 2.0;
-      maxCenter = qStart - minPQGap - desiredPdur / 2.0;
-    } else {
-      // shrink to 90% of available
-      desiredPdur = Math.max(0.01, available * 0.9);
-      minCenter = neededPStart + desiredPdur / 2.0;
-      maxCenter = qStart - minPQGap - desiredPdur / 2.0;
-    }
-  }
-
-  // pick a P center based on preferred PR duration, constrained to available space
-  const prevCenter = (pStart + pEnd) / 2.0;
-  const pCenterPref = qStart - prDur; // preferred P center located prDur before Q onset
-  let pCenter = constrain(pCenterPref, minCenter, maxCenter);
-  // if preferred center is wildly out-of-bounds (e.g., very high HR), fall back near previous
-  if (pCenter < minCenter || pCenter > maxCenter) pCenter = constrain(prevCenter, minCenter, maxCenter);
-
-  // set p window to desired duration around center
+  // Preferred P center derived from PR interval (user control)
+  const pCenterPref = qStart - prDur;
+  // Start with center-based windows
+  let pCenter = pCenterPref;
   pStart = pCenter - desiredPdur / 2.0;
   pEnd = pCenter + desiredPdur / 2.0;
 
-  // Enforce that P always ends before Q start minus minPQGap.
+  // Enforce that P ends before Q start minus minPQGap by shifting left if needed
   const latestPEnd = qStart - minPQGap;
   if (pEnd > latestPEnd) {
-    // shift left so pEnd == latestPEnd
     const shift = pEnd - latestPEnd;
-    pCenter -= shift;
     pStart -= shift;
     pEnd = latestPEnd;
+    pCenter -= shift;
   }
 
-  // Try to keep P start after neededPStart (to maintain T->P gap), but
-  // never allow P to end after latestPEnd. If both can't be satisfied
-  // (common at high HR), prioritize keeping P before Q by clamping to latestPEnd
+  // Ensure there's a gap between current beat's T end and the NEXT beat's P start.
+  // If pStart is too early, try shifting right; if that would push pEnd past latestPEnd,
+  // shrink the duration to fit between neededPStart and latestPEnd.
   if (pStart < neededPStart) {
-    // available space between neededPStart and latestPEnd
-    const available = latestPEnd - neededPStart;
-    if (available >= desiredPdur) {
-      // there is room: place P starting at neededPStart
-      pStart = neededPStart;
-      pEnd = pStart + desiredPdur;
-      pCenter = (pStart + pEnd) / 2.0;
-    } else {
-      // not enough room to satisfy both; prioritize P before Q
-      // set pEnd to latestPEnd and shrink duration to available (min 0.01s)
+    const shiftRight = neededPStart - pStart;
+    pStart += shiftRight;
+    pEnd += shiftRight;
+    pCenter += shiftRight;
+    if (pEnd > latestPEnd) {
+      // not enough room: shrink to available space
+      const available = Math.max(0.0, latestPEnd - neededPStart);
       const newDur = Math.max(0.01, available);
-      pEnd = latestPEnd;
-      pStart = pEnd - newDur;
+      pStart = neededPStart;
+      pEnd = pStart + newDur;
       pCenter = (pStart + pEnd) / 2.0;
       desiredPdur = newDur;
     }
+  }
+
+  // Guard minimum width
+  if (pEnd <= pStart + 0.001) {
+    pEnd = pStart + 0.001;
+    desiredPdur = pEnd - pStart;
+    pCenter = (pStart + pEnd) / 2.0;
   }
 
   // ensure visible sigma (duration/4)
@@ -2410,6 +2671,14 @@ function singleBeatSignal(t, effTWaveScale, effSTOffset, leadMults) {
     pBase = pSign * pBase;
   }
   let p = pBase * gP;
+
+  // populate debug exports so UI can display computed placement
+  try {
+    __debug_pStart = pStart;
+    __debug_pCenter = pCenter;
+    __debug_pEnd = pEnd;
+    __debug_pDur = desiredPdur;
+  } catch (e) {}
 
   // Q component: small negative before R, scaled by qWaveScale and per-lead Q multiplier
   // Use the qCenter/qStart/qEnd computed earlier and per-component durations
@@ -2565,7 +2834,8 @@ function drawSingleLeadTo(g, hr) {
   // accumulate integer-shifted beats
   const acc = new Array(W + 1).fill(0);
   for (let bt of beatTimes) {
-    const deltaSec = now - bt;
+    // include user horizontal shift so the single-lead buffer is translated
+    const deltaSec = now - bt + (typeof ecgWaveShift === 'number' ? ecgWaveShift : 0);
     const shift = Math.round(deltaSec * pixelsPerSecond);
     for (let ix = 0; ix <= W; ix++) {
       const k = ix + shift;
