@@ -210,6 +210,19 @@ function _getAllPresets() {
   } catch (e) { return {}; }
 }
 
+// Populate the preset select dropdown from localStorage (global helper)
+function refreshPresetSelectGlobal() {
+  try {
+    const sel = document.getElementById('presetSelect');
+    if (!sel) return;
+    sel.innerHTML = '';
+    const all = _getAllPresets();
+    const keys = Object.keys(all || {}).sort((a,b) => (all[b].savedAt||'').localeCompare(all[a].savedAt||''));
+    const empty = document.createElement('option'); empty.value = ''; empty.text = '-- presets --'; sel.appendChild(empty);
+    keys.forEach(k => { const o = document.createElement('option'); o.value = k; o.text = k + (all[k].savedAt ? ('  (' + new Date(all[k].savedAt).toLocaleString() + ')') : ''); sel.appendChild(o); });
+  } catch (e) { /* ignore */ }
+}
+
 function _saveAllPresets(obj) {
   try { localStorage.setItem(PRESETS_KEY, JSON.stringify(obj)); return true; } catch (e) { console.warn('Failed to save presets', e); return false; }
 }
@@ -743,12 +756,12 @@ function createConductionPanel() {
   savePresetBtn.onclick = () => {
     const n = presetNameInput.value && String(presetNameInput.value).trim();
     if (!n) { alert('Enter a preset name'); return; }
-    if (saveNamedPreset(n)) { alert('Preset saved: ' + n); refreshPresetSelect(); presetNameInput.value = ''; }
+    if (saveNamedPreset(n)) { alert('Preset saved: ' + n); refreshPresetSelectGlobal(); presetNameInput.value = ''; }
     else alert('Failed to save preset');
   };
   const presetSelect = document.createElement('select'); presetSelect.style.width = '220px'; presetSelect.id = 'presetSelect';
   const loadPresetBtn = document.createElement('button'); loadPresetBtn.textContent = 'Load Preset'; loadPresetBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset'); return; } if (confirm('Load preset "' + v + '"? This will overwrite current settings.')) { if (loadNamedPreset(v)) { alert('Loaded preset: ' + v); } else { alert('Failed to load preset: ' + v); } } };
-  const delPresetBtn = document.createElement('button'); delPresetBtn.textContent = 'Delete Preset'; delPresetBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset to delete'); return; } if (!confirm('Delete preset "' + v + '"?')) return; if (deleteNamedPreset(v)) { alert('Deleted: ' + v); refreshPresetSelect(); } else { alert('Failed to delete: ' + v); } };
+  const delPresetBtn = document.createElement('button'); delPresetBtn.textContent = 'Delete Preset'; delPresetBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset to delete'); return; } if (!confirm('Delete preset "' + v + '"?')) return; if (deleteNamedPreset(v)) { alert('Deleted: ' + v); refreshPresetSelectGlobal(); } else { alert('Failed to delete: ' + v); } };
   presetsRow.appendChild(presetNameInput); presetsRow.appendChild(savePresetBtn); presetsRow.appendChild(presetSelect); presetsRow.appendChild(loadPresetBtn); presetsRow.appendChild(delPresetBtn);
   conductionPanelDiv.appendChild(presetsRow);
 
@@ -763,7 +776,7 @@ function createConductionPanel() {
     } catch (e) { /* ignore */ }
   }
   // populate presets initially
-  try { refreshPresetSelect(); } catch (e) {}
+  try { refreshPresetSelectGlobal(); } catch (e) {}
 
   // placeholder for list
   const listHolder = document.createElement('div'); listHolder.className = 'cond-list'; conductionPanelDiv.appendChild(listHolder);
