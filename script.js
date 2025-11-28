@@ -509,7 +509,7 @@ function createConductionPanel() {
   if (!toggleBtn) {
     toggleBtn = document.createElement('button');
     toggleBtn.id = 'toggleConstructorBtn';
-    toggleBtn.textContent = 'Show Constructor';
+    toggleBtn.textContent = 'Hide Constructor';
     toggleBtn.style.position = 'fixed';
     toggleBtn.style.right = '10px';
     toggleBtn.style.top = '90px';
@@ -581,6 +581,12 @@ function createConductionPanel() {
 
   // constructor point-editing removed in simplified UI
 
+  // Show constructor panel by default and append to body; panel will host
+  // the ECG waveform controls (moved later) so it opens automatically
+  conductionPanelDiv.style.display = '';
+  // set a sane default size for the constructor window
+  conductionPanelDiv.style.width = '640px';
+  conductionPanelDiv.style.maxWidth = '90%';
   document.body.appendChild(conductionPanelDiv);
   refreshConductionPanel();
 }
@@ -1222,7 +1228,23 @@ function setup() {
     globalPanel.appendChild(msRow);
   } catch (e) { /* ignore UI creation errors */ }
 
-  document.body.appendChild(globalPanel);
+  // Prefer to host the global ECG waveform controls inside the conduction
+  // constructor panel so all related settings live together. If the
+  // constructor panel exists, append into it; otherwise fall back to body.
+  try {
+    if (conductionPanelDiv) {
+      // Adjust positioning for embedding inside the panel
+      globalPanel.style.position = '';
+      globalPanel.style.left = '';
+      globalPanel.style.top = '';
+      globalPanel.style.margin = '8px';
+      // Ensure the panel is visible (open) so users see the controls
+      conductionPanelDiv.style.display = '';
+      conductionPanelDiv.appendChild(globalPanel);
+    } else {
+      document.body.appendChild(globalPanel);
+    }
+  } catch (e) { document.body.appendChild(globalPanel); }
   // (Time Dilation control moved into the Global panel; inline control removed)
   // create conduction debug box (placed inside the global control panel)
   try {
