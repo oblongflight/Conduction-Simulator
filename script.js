@@ -213,13 +213,24 @@ function _getAllPresets() {
 // Populate the preset select dropdown from localStorage (global helper)
 function refreshPresetSelectGlobal() {
   try {
-    const sel = document.getElementById('presetSelect');
-    if (!sel) return;
-    sel.innerHTML = '';
     const all = _getAllPresets();
     const keys = Object.keys(all || {}).sort((a,b) => (all[b].savedAt||'').localeCompare(all[a].savedAt||''));
-    const empty = document.createElement('option'); empty.value = ''; empty.text = '-- presets --'; sel.appendChild(empty);
-    keys.forEach(k => { const o = document.createElement('option'); o.value = k; o.text = k + (all[k].savedAt ? ('  (' + new Date(all[k].savedAt).toLocaleString() + ')') : ''); sel.appendChild(o); });
+    const docs = [document];
+    try {
+      if (conductionWindow && conductionWindow.document) docs.push(conductionWindow.document);
+    } catch (e) {}
+    try {
+      if (conductionPanelDiv && conductionPanelDiv.ownerDocument && docs.indexOf(conductionPanelDiv.ownerDocument) === -1) docs.push(conductionPanelDiv.ownerDocument);
+    } catch (e) {}
+    docs.forEach(doc => {
+      try {
+        const sel = doc.getElementById('presetSelect');
+        if (!sel) return;
+        sel.innerHTML = '';
+        const empty = doc.createElement('option'); empty.value = ''; empty.text = '-- presets --'; sel.appendChild(empty);
+        keys.forEach(k => { const o = doc.createElement('option'); o.value = k; o.text = k + (all[k].savedAt ? ('  (' + new Date(all[k].savedAt).toLocaleString() + ')') : ''); sel.appendChild(o); });
+      } catch (e) { /* ignore per-doc failures */ }
+    });
   } catch (e) { /* ignore */ }
 }
 
@@ -957,7 +968,7 @@ function openConductionWindow() {
       w.document.body.appendChild(dockBtn);
         // regenerate the panel contents now that it lives in the popup so
         // inputs are recreated with the current attributes/handlers (10ms step/min)
-        try { refreshConductionPanel(); } catch (e) { /* ignore */ }
+        try { refreshConductionPanel(); refreshPresetSelectGlobal(); } catch (e) { /* ignore */ }
     } catch (e) {
       console.warn('Failed to populate conduction popout window', e);
       // fallback: if moving fails, close the window reference
@@ -986,7 +997,7 @@ function dockConductionPanel() {
         conductionPanelDiv.style.zIndex = conductionPanelOriginalStyles.zIndex;
         conductionPanelDiv.style.padding = conductionPanelOriginalStyles.padding;
       }
-      refreshConductionPanel();
+      refreshConductionPanel(); refreshPresetSelectGlobal();
       if (conductionWindow && !conductionWindow.closed) { try { conductionWindow.close(); } catch (e) {} }
       conductionWindow = null;
       return;
