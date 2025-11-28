@@ -1886,11 +1886,17 @@ function draw() {
             if (!ev) continue;
             const startIdx = eventIndexForKey(ev);
             if (typeof startIdx !== 'number' || !points[startIdx]) continue;
-            const startT = points[startIdx].t_rel;
-            // Use non-dilated duration for overlay length so it doesn't change
-            // when `timeDilation` is adjusted by the user.
+            const startT_base = points[startIdx].t_rel;
+            // Overlays reflect ECG-feature timing and should not be affected by
+            // the playback `timeDilation`. Compute durations and offsets in
+            // raw (non-dilated) milliseconds so they remain tied to the ECG.
             const durMs = computeItemEffectiveDurationMs(it, false) || 0;
             const durSec = durMs / 1000.0;
+            // Apply per-item start offset (ms) without dilation so overlays show
+            // the real ECG-relative offset.
+            const offsetMs = Number(it.startOffsetMs) || 0;
+            const offsetSec = offsetMs / 1000.0;
+            const startT = startT_base + offsetSec;
             const endT = startT + durSec;
             const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
             const startX = clamp(Math.round(padLeft + ((startT - tRelStart) / tRelRange) * w), padLeft, padLeft + w);
