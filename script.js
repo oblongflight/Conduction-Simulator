@@ -36,6 +36,9 @@ let conductionPanelDiv = null;
 let conductionPanelOriginalStyles = null;
 let conductionDebugWindow = null;
 let conductionDebugWinDiv = null;
+// Default popout size for the conduction + ECG waveform editor
+let conductionPopoutWidth = 900;
+let conductionPopoutHeight = 760;
 let selectedConductionIndex = -1;
 let conductionExplicitSteps = [];
 let conductionStepDurations = {};
@@ -715,7 +718,8 @@ function openConductionWindow() {
       };
     }
 
-    const w = window.open('', 'ConductionPanel', 'width=520,height=760,left=80,top=80');
+    const features = 'width=' + (conductionPopoutWidth || 900) + ',height=' + (conductionPopoutHeight || 760) + ',left=80,top=80';
+    const w = window.open('', 'ConductionPanel', features);
     if (!w) { alert('Popup blocked: please allow popups for this site to open the Conduction panel.'); return; }
     conductionWindow = w;
     // write a minimal document shell so appearance is decent
@@ -1486,6 +1490,16 @@ function openConductionDebugWindow() {
   try { loadConductionExplicitSteps(); } catch (e) { /* ignore */ }
   try { loadEcgTriggering(); } catch (e) { /* ignore */ }
   try { createConductionPanel(); } catch (e) { console.warn('Failed to create conduction panel', e); }
+
+  // Attempt to open the conduction + waveform editor in its own window
+  // automatically. Use a short timeout so page load isn't blocked; if
+  // the browser blocks popups this will fail gracefully and the panel
+  // remains embedded inline.
+  try {
+    setTimeout(() => {
+      try { openConductionWindow(); } catch (e) { /* popup may be blocked; ignore */ }
+    }, 250);
+  } catch (e) {}
 
   // Listen for changes to ECG waveform constructor sliders and persist
   const persistWaveform = () => { saveEcgWaveformSettings(); };
