@@ -230,7 +230,6 @@ function saveNamedPreset(name) {
       waveform: wave,
       conductionItems: JSON.parse(JSON.stringify(conductionItems || [])),
       leadParams: JSON.parse(JSON.stringify(leadParams || [])),
-      timeDilation: timeDilation,
       ecgTriggeringEnabled: !!ecgTriggeringEnabled
     };
     const all = _getAllPresets();
@@ -296,7 +295,8 @@ function loadNamedPreset(name) {
       }
       saveLeadParams();
     }
-    if (typeof p.timeDilation === 'number') { timeDilation = p.timeDilation; saveTimeDilation(); }
+    // Do NOT restore timeDilation from presets: keep current playback speed
+    // unchanged unless the user explicitly adjusts the Time Dilation slider.
     ecgTriggeringEnabled = !!p.ecgTriggeringEnabled;
     // persist waveform to localStorage and update UI/controls
     saveEcgWaveformSettings();
