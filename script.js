@@ -37,8 +37,8 @@ let conductionPanelOriginalStyles = null;
 let conductionDebugWindow = null;
 let conductionDebugWinDiv = null;
 // Default popout size for the conduction + ECG waveform editor
-let conductionPopoutWidth = 900;
-let conductionPopoutHeight = 760;
+let conductionPopoutWidth = 1200;
+let conductionPopoutHeight = 820;
 let selectedConductionIndex = -1;
 let conductionExplicitSteps = [];
 let conductionStepDurations = {};
@@ -106,6 +106,7 @@ let conductionEditMode = false;
 
 // Persistence for waveform settings
 const ECG_WAVEFORM_KEY = 'ecg.waveform.v1';
+const PRESETS_KEY = 'ecg.presets.v1';
 
 function saveEcgWaveformSettings() {
   try {
@@ -141,6 +142,28 @@ function saveEcgWaveformSettings() {
   } catch (e) { console.warn('saveEcgWaveformSettings error', e); }
 }
 
+// Visual helper: briefly highlight the conduction panel so users can locate it
+function highlightConductionPanel(durationMs = 4000) {
+  try {
+    if (!conductionPanelDiv) return;
+    const prevOutline = conductionPanelDiv.style.outline || '';
+    const prevBox = conductionPanelDiv.style.boxShadow || '';
+    conductionPanelDiv.style.outline = '4px solid rgba(255,165,0,0.95)';
+    conductionPanelDiv.style.boxShadow = '0 0 12px 4px rgba(255,165,0,0.25)';
+    // also highlight the embedded global panel if present
+    try {
+      const gp = conductionPanelDiv.querySelector && conductionPanelDiv.querySelector('div');
+      if (gp && gp === globalControlPanel) {
+        globalControlPanel.style.boxShadow = '0 0 8px 3px rgba(255,165,0,0.18)';
+      }
+    } catch (e) {}
+    setTimeout(() => {
+      try { conductionPanelDiv.style.outline = prevOutline; conductionPanelDiv.style.boxShadow = prevBox; } catch (e) {}
+      try { if (globalControlPanel) globalControlPanel.style.boxShadow = ''; } catch (e) {}
+    }, durationMs);
+  } catch (e) { /* ignore highlight failures */ }
+}
+
 function loadEcgWaveformSettings() {
   try {
     const raw = localStorage.getItem(ECG_WAVEFORM_KEY);
@@ -174,6 +197,100 @@ function loadEcgWaveformSettings() {
     if (typeof p.gT === 'number') gT = p.gT;
     if (typeof p.prDur === 'number') prDur = p.prDur;
   } catch (e) { console.warn('loadEcgWaveformSettings error', e); }
+}
+
+// Preset management: save/load named presets combining waveform + conduction state
+function _getAllPresets() {
+  try {
+    const raw = localStorage.getItem(PRESETS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed;
+  } catch (e) { return {}; }
+}
+
+function _saveAllPresets(obj) {
+  try { localStorage.setItem(PRESETS_KEY, JSON.stringify(obj)); return true; } catch (e) { console.warn('Failed to save presets', e); return false; }
+}
+
+function saveNamedPreset(name) {
+  if (!name || !String(name).trim()) { alert('Please provide a preset name'); return false; }
+  try {
+    const key = String(name).trim();
+    const wave = {
+      atheroPercent, thrombusPercent, METs, heartRate, amplitude, timeWindow,
+      tWaveScale, qWaveScale, stOffset, tDuration, qtIntervalMs,
+      pDuration, pAmp, qrsWidth, qDur, rDur, sDur, pBiphasic,
+      gP, gQ, gR, gS, gT, prDur, ecgWaveShift, overlayUsesDilation
+    };
+    const preset = {
+      name: key,
+      savedAt: (new Date()).toISOString(),
+      waveform: wave,
+      conductionItems: JSON.parse(JSON.stringify(conductionItems || [])),
+      leadParams: JSON.parse(JSON.stringify(leadParams || [])),
+      timeDilation: timeDilation,
+      ecgTriggeringEnabled: !!ecgTriggeringEnabled
+    };
+    const all = _getAllPresets();
+    all[key] = preset;
+    const ok = _saveAllPresets(all);
+    if (!ok) {
+      console.warn('localStorage save failed for preset; offering download fallback');
+      // fallback: offer the preset as a downloadable JSON file
+      try {
+        downloadJSON(preset, 'preset_' + key.replace(/\s+/g,'_') + '.json');
+        alert('localStorage save failed; preset downloaded as file instead.');
+      } catch (e) { alert('Failed to save preset to localStorage and failed to download fallback file. See console for details.'); }
+      return false;
+    }
+    return true;
+  } catch (e) { console.warn('saveNamedPreset error', e); return false; }
+}
+
+function loadNamedPreset(name) {
+  try {
+    const all = _getAllPresets();
+    if (!all || !all[name]) { alert('Preset not found: ' + name); return false; }
+    const p = all[name];
+    // restore waveform values
+    if (p.waveform) {
+      Object.keys(p.waveform).forEach(k => { try { window[k] = p.waveform[k]; } catch (e) {} });
+    }
+    // restore conduction items and lead params
+    if (Array.isArray(p.conductionItems)) {
+      conductionItems = JSON.parse(JSON.stringify(p.conductionItems));
+      saveConductionItems();
+    }
+    if (Array.isArray(p.leadParams)) {
+      for (let i = 0; i < Math.min(12, p.leadParams.length); i++) {
+        try { leadParams[i] = Object.assign({}, leadParams[i] || {}, p.leadParams[i]); } catch (e) {}
+      }
+      saveLeadParams();
+    }
+    if (typeof p.timeDilation === 'number') { timeDilation = p.timeDilation; saveTimeDilation(); }
+    ecgTriggeringEnabled = !!p.ecgTriggeringEnabled;
+    // persist waveform to localStorage and update UI/controls
+    saveEcgWaveformSettings();
+    refreshConductionPanel();
+    // update slider elements if present
+    const mapIds = { qrsWidth: 'qrsInput', qDur: 'qdurInput', rDur: 'rdurInput', sDur: 'sdurInput', pDuration: 'pdurInput', heartRate: 'hrInput', tDuration: 'tdurInput', prDur: 'prInput', qtIntervalMs: 'qtInput' };
+    Object.keys(mapIds).forEach(k => {
+      try { const el = document.getElementById(mapIds[k]); if (el) el.value = String(window[k]); } catch (e) {}
+    });
+    return true;
+  } catch (e) { console.warn('loadNamedPreset error', e); return false; }
+}
+
+function deleteNamedPreset(name) {
+  try {
+    const all = _getAllPresets();
+    if (!all || !all[name]) return false;
+    delete all[name];
+    _saveAllPresets(all);
+    return true;
+  } catch (e) { console.warn('deleteNamedPreset error', e); return false; }
 }
 
 // Export current conduction data (items, explicit steps, step durations) as JSON file
@@ -272,7 +389,9 @@ function handleImportedConduction(parsed) {
         sustainSource: it.sustainSource || null,
         rampDownSource: it.rampDownSource || null,
         startMode: it.startMode || 'after_previous',
-        ecgEvent: it.ecgEvent || ''
+        ecgEvent: it.ecgEvent || '',
+        startOffsetMs: Number(it.startOffsetMs) || 0,
+        playbackStartTime: 0
       };
     });
     conductionItems = conductionItems.concat(toAppend);
@@ -322,6 +441,7 @@ function loadConductionItems() {
         rampDownSource: it.rampDownSource || null,
         startMode: it.startMode || 'after_previous',
         ecgEvent: it.ecgEvent || '',
+        startOffsetMs: Number(it.startOffsetMs) || 0,
         playbackStartTime: 0
       };
     });
@@ -364,6 +484,7 @@ function createConductionItem(type) {
     rampDownSource: null,
     startMode: 'after_previous',
     ecgEvent: '',
+    startOffsetMs: 0,
     playbackStartTime: 0
   };
   conductionItems.push(newItem);
@@ -435,6 +556,13 @@ function refreshConductionPanel() {
       durInput.onchange = () => { it.durationMs = Math.max(10, Number(durInput.value) || 10); saveConductionItems(); };
       if (!it.durationSource) middle.appendChild(durInput);
 
+      // per-item start offset (ms)
+      const offsetIn = document.createElement('input'); offsetIn.type = 'number'; offsetIn.min = '-60000'; offsetIn.step = '10'; offsetIn.style.width = '90px'; offsetIn.value = Number(it.startOffsetMs || 0);
+      offsetIn.title = 'Start offset in milliseconds (can be negative)';
+      offsetIn.onchange = () => { it.startOffsetMs = Number(offsetIn.value) || 0; saveConductionItems(); };
+      const offsetLab = document.createElement('div'); offsetLab.textContent = 'offset ms'; offsetLab.style.fontSize = '11px'; offsetLab.style.marginLeft = '6px';
+      middle.appendChild(offsetLab); middle.appendChild(offsetIn);
+
       // shape-specific ramp fields
       if (it.type === 'shape') {
         const rampRow = document.createElement('div'); rampRow.style.display='flex'; rampRow.style.alignItems='center'; rampRow.style.gap='6px';
@@ -472,9 +600,11 @@ function refreshConductionPanel() {
       const del = document.createElement('button'); del.textContent = 'Delete'; del.onclick = () => { if (!confirm('Delete "' + (it.name||'item') + '"?')) return; conductionItems.splice(idx,1); saveConductionItems(); refreshConductionPanel(); };
       // playing indicator
       const playDot = document.createElement('div'); playDot.style.width='10px'; playDot.style.height='10px'; playDot.style.borderRadius='50%'; playDot.style.marginLeft='6px';
-      const start = it.playbackStartTime || 0; const nowMs = (pausedConduction ? conductionPausedAtMs : (millis() - conductionTimeOffsetMs)); let effDur = Number(it.durationMs || 1200);
-      if (it.durationSource) effDur = Math.max(10, (getEcgFeatureMs(it.durationSource) || 0));
-      const playing = (start > 0 && (nowMs - start) >= 0 && (nowMs - start) < effDur);
+      const baseStart = Number(it.playbackStartTime) || 0; const offsetMs = Number(it.startOffsetMs) || 0; const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
+      const scheduledStart = baseStart + offsetMs * dilation;
+      const nowMs = (pausedConduction ? conductionPausedAtMs : (millis() - conductionTimeOffsetMs));
+      const effDur = computeItemEffectiveDurationMs(it, true) || 0;
+      const playing = (scheduledStart > 0 && (nowMs - scheduledStart) >= 0 && (nowMs - scheduledStart) < effDur);
       playDot.style.background = playing ? 'limegreen' : 'transparent'; playDot.style.border = '1px solid ' + (playing ? 'green' : '#ccc');
 
       right.appendChild(up); right.appendChild(down); right.appendChild(del); right.appendChild(playDot);
@@ -578,6 +708,35 @@ function createConductionPanel() {
 
   btnRow.appendChild(expBtn); btnRow.appendChild(impBtn); btnRow.appendChild(pasteImpBtn);
   conductionPanelDiv.appendChild(btnRow);
+
+  // Presets UI: save/load named disease states (waveform + conduction)
+  const presetsRow = document.createElement('div'); presetsRow.style.display = 'flex'; presetsRow.style.alignItems = 'center'; presetsRow.style.gap = '8px'; presetsRow.style.marginTop = '8px';
+  const presetNameInput = document.createElement('input'); presetNameInput.type = 'text'; presetNameInput.placeholder = 'Preset name (e.g. "MI lateral")'; presetNameInput.style.flex = '1';
+  const savePresetBtn = document.createElement('button'); savePresetBtn.textContent = 'Save Preset';
+  savePresetBtn.onclick = () => {
+    const n = presetNameInput.value && String(presetNameInput.value).trim();
+    if (!n) { alert('Enter a preset name'); return; }
+    if (saveNamedPreset(n)) { alert('Preset saved: ' + n); refreshPresetSelect(); presetNameInput.value = ''; }
+    else alert('Failed to save preset');
+  };
+  const presetSelect = document.createElement('select'); presetSelect.style.width = '220px'; presetSelect.id = 'presetSelect';
+  const loadPresetBtn = document.createElement('button'); loadPresetBtn.textContent = 'Load Preset'; loadPresetBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset'); return; } if (confirm('Load preset "' + v + '"? This will overwrite current settings.')) { if (loadNamedPreset(v)) { alert('Loaded preset: ' + v); } else { alert('Failed to load preset: ' + v); } } };
+  const delPresetBtn = document.createElement('button'); delPresetBtn.textContent = 'Delete Preset'; delPresetBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset to delete'); return; } if (!confirm('Delete preset "' + v + '"?')) return; if (deleteNamedPreset(v)) { alert('Deleted: ' + v); refreshPresetSelect(); } else { alert('Failed to delete: ' + v); } };
+  presetsRow.appendChild(presetNameInput); presetsRow.appendChild(savePresetBtn); presetsRow.appendChild(presetSelect); presetsRow.appendChild(loadPresetBtn); presetsRow.appendChild(delPresetBtn);
+  conductionPanelDiv.appendChild(presetsRow);
+
+  function refreshPresetSelect() {
+    try {
+      const sel = document.getElementById('presetSelect'); if (!sel) return;
+      sel.innerHTML = '';
+      const all = _getAllPresets();
+      const keys = Object.keys(all || {}).sort((a,b) => (all[b].savedAt||'').localeCompare(all[a].savedAt||''));
+      const empty = document.createElement('option'); empty.value = ''; empty.text = '-- presets --'; sel.appendChild(empty);
+      keys.forEach(k => { const o = document.createElement('option'); o.value = k; o.text = k + (all[k].savedAt ? ('  (' + new Date(all[k].savedAt).toLocaleString() + ')') : ''); sel.appendChild(o); });
+    } catch (e) { /* ignore */ }
+  }
+  // populate presets initially
+  try { refreshPresetSelect(); } catch (e) {}
 
   // placeholder for list
   const listHolder = document.createElement('div'); listHolder.className = 'cond-list'; conductionPanelDiv.appendChild(listHolder);
@@ -730,6 +889,17 @@ function openConductionWindow() {
       style.textContent = `body{font-family:Helvetica,Arial,sans-serif;margin:8px;background:#fff;color:#111}`;
       w.document.head.appendChild(style);
       // move the existing panel into the new window
+      // If the global waveform control panel exists and isn't already
+      // a child of the conduction panel, move it into the conduction
+      // panel so it travels with the popout window as the user requested.
+      try {
+        if (typeof globalControlPanel !== 'undefined' && globalControlPanel && globalControlPanel.parentNode !== conductionPanelDiv) {
+          try { if (globalControlPanel.parentNode) globalControlPanel.parentNode.removeChild(globalControlPanel); } catch (e) {}
+          conductionPanelDiv.appendChild(globalControlPanel);
+          // clear inline fixed positioning so it flows inside the panel
+          try { globalControlPanel.style.position = ''; globalControlPanel.style.left = ''; globalControlPanel.style.top = ''; globalControlPanel.style.margin = '8px'; } catch (e) {}
+        }
+      } catch (e) {}
       w.document.body.appendChild(conductionPanelDiv);
       // adjust positioning to flow in the new document
       conductionPanelDiv.style.position = '';
@@ -1011,7 +1181,6 @@ function setup() {
   // Global small control panel for QRS width (top-left)
   const globalPanel = document.createElement('div');
   globalPanel.style.position = 'fixed';
-  globalPanel.style.left = '10px';
   globalPanel.style.top = '10px';
   globalPanel.style.zIndex = 10002;
   globalPanel.style.padding = '6px 8px';
@@ -1261,17 +1430,37 @@ function setup() {
     conductionDebugDiv.style.maxWidth = '360px';
     conductionDebugDiv.style.whiteSpace = 'normal';
     conductionDebugDiv.textContent = 'Conduction debug: awaiting playback...';
-    // position fixed so it's not occluded or scrolled away; anchor below globalPanel
+    // If the conduction constructor panel exists, host the debug box inside it
+    // so it doesn't stick to the left of the main window. Otherwise fall back
+    // to a fixed-position body overlay (legacy behavior).
     try {
       const rect = globalPanel.getBoundingClientRect();
-      conductionDebugDiv.style.position = 'fixed';
-      conductionDebugDiv.style.left = String(Math.max(6, Math.round(rect.left))) + 'px';
-      conductionDebugDiv.style.top = String(Math.max(6, Math.round(rect.bottom + 8))) + 'px';
-      conductionDebugDiv.style.zIndex = 10004;
+      if (conductionPanelDiv) {
+        conductionDebugDiv.style.position = '';
+        conductionDebugDiv.style.margin = '8px';
+        conductionDebugDiv.style.maxWidth = '100%';
+        conductionDebugDiv.style.zIndex = '';
+        conductionPanelDiv.appendChild(conductionDebugDiv);
+      } else {
+        conductionDebugDiv.style.position = 'fixed';
+        conductionDebugDiv.style.left = String(Math.max(6, Math.round(rect.left))) + 'px';
+        conductionDebugDiv.style.top = String(Math.max(6, Math.round(rect.bottom + 8))) + 'px';
+        conductionDebugDiv.style.zIndex = 10004;
+        document.body.appendChild(conductionDebugDiv);
+      }
     } catch (e) {
-      conductionDebugDiv.style.position = 'fixed'; conductionDebugDiv.style.left = '10px'; conductionDebugDiv.style.top = '220px'; conductionDebugDiv.style.zIndex = 10004;
+      if (conductionPanelDiv) {
+        conductionDebugDiv.style.position = '';
+        conductionDebugDiv.style.margin = '8px';
+        conductionPanelDiv.appendChild(conductionDebugDiv);
+      } else {
+        conductionDebugDiv.style.position = 'fixed';
+        conductionDebugDiv.style.left = '10px';
+        conductionDebugDiv.style.top = '220px';
+        conductionDebugDiv.style.zIndex = 10004;
+        document.body.appendChild(conductionDebugDiv);
+      }
     }
-    document.body.appendChild(conductionDebugDiv);
   } catch (e) { conductionDebugDiv = null; }
 
   // Open control panel in a new window
@@ -1490,6 +1679,8 @@ function openConductionDebugWindow() {
   try { loadConductionExplicitSteps(); } catch (e) { /* ignore */ }
   try { loadEcgTriggering(); } catch (e) { /* ignore */ }
   try { createConductionPanel(); } catch (e) { console.warn('Failed to create conduction panel', e); }
+  // briefly highlight the conduction panel so the user can locate it
+  try { setTimeout(() => { highlightConductionPanel(4000); }, 150); } catch (e) {}
 
   // Attempt to open the conduction + waveform editor in its own window
   // automatically. Use a short timeout so page load isn't blocked; if
@@ -2197,11 +2388,13 @@ function drawConductionOverlay(ix, iy, iw, ih) {
     const nowMs = pausedConduction ? conductionPausedAtMs : (millis() - conductionTimeOffsetMs);
     for (let ix = 0; ix < conductionItems.length; ix++) {
       const it = conductionItems[ix]; if (!it) continue;
-      const itStart = it.playbackStartTime || 0;
-      const perItemElapsed = nowMs - itStart;
-      if (!itStart || perItemElapsed < 0) continue; // not started
-
+      const baseStart = Number(it.playbackStartTime) || 0;
+      const offsetMs = Number(it.startOffsetMs) || 0;
       const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
+      const scheduledStart = baseStart + offsetMs * dilation;
+      const perItemElapsed = nowMs - scheduledStart;
+      if (scheduledStart <= 0 || perItemElapsed < 0) continue; // not started or scheduled in future
+
       let perItemEffectiveDur = 0;
       if (it.durationSource) {
         perItemEffectiveDur = Math.max(10, (getEcgFeatureMs(it.durationSource) || 0)) * dilation;
@@ -2314,11 +2507,13 @@ function drawConductionOverlay(ix, iy, iw, ih) {
           for (let i = 0; i < conductionItems.length; i++) {
             const it = conductionItems[i];
             if (!it) continue;
-            const start = it.playbackStartTime || 0;
-            const elapsed = Math.round(nowMs - start);
+            const baseStart = Number(it.playbackStartTime) || 0;
+            const offset = Number(it.startOffsetMs) || 0;
+            const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
+            const scheduledStart = baseStart + offset * dilation;
+            const elapsed = Math.round(nowMs - scheduledStart);
             // compute per-item effective duration (ms)
             let effDur = 0;
-            const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
             if (it.durationSource) effDur = Math.max(10, (getEcgFeatureMs(it.durationSource) || 0)) * dilation;
             else if (it.type === 'shape') {
               const up = (it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Number(it.rampUpMs) || 0) * dilation;
@@ -2326,8 +2521,8 @@ function drawConductionOverlay(ix, iy, iw, ih) {
               const down = (it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Number(it.rampDownMs) || 0) * dilation;
               effDur = Math.max(10, up + sus + down);
             } else effDur = Math.max(10, Number(it.durationMs) || 1200) * dilation;
-            const playing = (start > 0 && elapsed >= 0 && elapsed < effDur);
-            lines.push({ name: it.name || ('Item ' + i), playing, start, elapsed, effDur });
+            const playing = (scheduledStart > 0 && elapsed >= 0 && elapsed < effDur);
+            lines.push({ name: it.name || ('Item ' + i), playing, scheduledStart, elapsed, effDur, offset });
             if (lines.length >= 12) break;
           }
           push();
