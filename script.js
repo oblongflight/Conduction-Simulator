@@ -1297,9 +1297,9 @@ function setup() {
   }
 
   addAmpRow('P', -3.0, 3.0, 0.01, gP, (v) => { gP = v; });
-  addAmpRow('Q', 0.0, 5.0, 0.01, gQ, (v) => { gQ = v; });
-  addAmpRow('R', 0.0, 5.0, 0.01, gR, (v) => { gR = v; });
-  addAmpRow('S', 0.0, 5.0, 0.01, gS, (v) => { gS = v; });
+  addAmpRow('Q', -5.0, 5.0, 0.01, gQ, (v) => { gQ = v; });
+  addAmpRow('R', -5.0, 5.0, 0.01, gR, (v) => { gR = v; });
+  addAmpRow('S', -5.0, 5.0, 0.01, gS, (v) => { gS = v; });
   addAmpRow('T', -5.0, 5.0, 0.01, gT, (v) => { gT = v; });
 
   // PR interval (seconds) and QT interval (ms) controls
@@ -1685,9 +1685,9 @@ function openConductionDebugWindow() {
 
   // P, Q, R, S, T multipliers (allow negative P/T to model inversions)
   addSmallRange(cd, 'P', -2.0, 2.0, 0.01, leadParams[i].p, (v) => leadParams[i].p = v);
-  addSmallRange(cd, 'Q', 0.0, 3.0, 0.01, leadParams[i].q, (v) => leadParams[i].q = v);
-  addSmallRange(cd, 'R', 0.0, 3.0, 0.01, leadParams[i].r, (v) => leadParams[i].r = v);
-  addSmallRange(cd, 'S', 0.0, 3.0, 0.01, leadParams[i].s, (v) => leadParams[i].s = v);
+  addSmallRange(cd, 'Q', -3.0, 3.0, 0.01, leadParams[i].q, (v) => leadParams[i].q = v);
+  addSmallRange(cd, 'R', -3.0, 3.0, 0.01, leadParams[i].r, (v) => leadParams[i].r = v);
+  addSmallRange(cd, 'S', -3.0, 3.0, 0.01, leadParams[i].s, (v) => leadParams[i].s = v);
   // Allow negative T multiplier so aVR inversion can be represented
   addSmallRange(cd, 'T', -3.0, 3.0, 0.01, leadParams[i].t, (v) => leadParams[i].t = v);
 
