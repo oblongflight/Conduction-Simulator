@@ -256,7 +256,34 @@ function loadNamedPreset(name) {
     const p = all[name];
     // restore waveform values
     if (p.waveform) {
-      Object.keys(p.waveform).forEach(k => { try { window[k] = p.waveform[k]; } catch (e) {} });
+      try {
+        if (typeof p.waveform.atheroPercent === 'number') atheroPercent = p.waveform.atheroPercent;
+        if (typeof p.waveform.thrombusPercent === 'number') thrombusPercent = p.waveform.thrombusPercent;
+        if (typeof p.waveform.METs === 'number') METs = p.waveform.METs;
+        if (typeof p.waveform.heartRate === 'number') heartRate = p.waveform.heartRate;
+        if (typeof p.waveform.amplitude === 'number') amplitude = p.waveform.amplitude;
+        if (typeof p.waveform.timeWindow === 'number') timeWindow = p.waveform.timeWindow;
+        if (typeof p.waveform.tWaveScale === 'number') tWaveScale = p.waveform.tWaveScale;
+        if (typeof p.waveform.qWaveScale === 'number') qWaveScale = p.waveform.qWaveScale;
+        if (typeof p.waveform.stOffset === 'number') stOffset = p.waveform.stOffset;
+        if (typeof p.waveform.tDuration === 'number') tDuration = p.waveform.tDuration;
+        if (typeof p.waveform.qtIntervalMs === 'number') qtIntervalMs = p.waveform.qtIntervalMs;
+        if (typeof p.waveform.pDuration === 'number') pDuration = p.waveform.pDuration;
+        if (typeof p.waveform.pAmp === 'number') pAmp = p.waveform.pAmp;
+        if (typeof p.waveform.qrsWidth === 'number') qrsWidth = p.waveform.qrsWidth;
+        if (typeof p.waveform.qDur === 'number') qDur = p.waveform.qDur;
+        if (typeof p.waveform.rDur === 'number') rDur = p.waveform.rDur;
+        if (typeof p.waveform.sDur === 'number') sDur = p.waveform.sDur;
+        if (typeof p.waveform.pBiphasic === 'boolean') pBiphasic = p.waveform.pBiphasic;
+        if (typeof p.waveform.gP === 'number') gP = p.waveform.gP;
+        if (typeof p.waveform.gQ === 'number') gQ = p.waveform.gQ;
+        if (typeof p.waveform.gR === 'number') gR = p.waveform.gR;
+        if (typeof p.waveform.gS === 'number') gS = p.waveform.gS;
+        if (typeof p.waveform.gT === 'number') gT = p.waveform.gT;
+        if (typeof p.waveform.prDur === 'number') prDur = p.waveform.prDur;
+        if (typeof p.waveform.ecgWaveShift === 'number') ecgWaveShift = p.waveform.ecgWaveShift;
+        if (typeof p.waveform.overlayUsesDilation === 'boolean') overlayUsesDilation = p.waveform.overlayUsesDilation;
+      } catch (e) { console.warn('apply waveform from preset failed', e); }
     }
     // restore conduction items and lead params
     if (Array.isArray(p.conductionItems)) {
