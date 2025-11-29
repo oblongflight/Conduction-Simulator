@@ -297,6 +297,8 @@ let presetSequenceDelayMs = 2000; // default delay between presets
 let presetSequenceWaitingForEcgEnd = false;
 // last observed beat fraction (0..1) used to detect wrap-around (end of window)
 let lastEcgBeatFrac = 0;
+// Snapshot preview cache; only regenerate when sequence changes
+let seqPreviewNeedsUpdate = true;
 // Display full sequence on right half instead of a single ECG (up to MAX_SEQUENCE_DISPLAY)
 let showSequenceOnRight = false;
 const MAX_SEQUENCE_DISPLAY = 5;
@@ -318,6 +320,8 @@ function refreshPresetSequenceUI() {
     });
     // highlight current
     Array.from(seqHolder.children).forEach((c,i)=>{ c.style.background = (i===presetSequenceIndex && presetSequencePlaying) ? 'rgba(200,255,200,0.6)' : ''; });
+    // mark previews stale so they will be regenerated
+    seqPreviewNeedsUpdate = true;
   } catch (e) {}
 }
 
@@ -326,6 +330,8 @@ function startPresetSequence() {
   if (presetSequencePlaying) return;
   presetSequencePlaying = true;
   presetSequenceIndex = Math.max(0, Math.min(presetSequenceIndex, presetSequence.length-1));
+  // ensure static previews are captured now so they remain unchanged during playback
+  try { updateSeqPreviews(); } catch (e) {}
   playCurrentAndScheduleNext();
   refreshPresetSequenceUI();
 }
@@ -932,7 +938,7 @@ function createConductionPanel() {
   seqControls.appendChild(addSeqBtn); seqControls.appendChild(playSeqBtn); seqControls.appendChild(stopSeqBtn); seqControls.appendChild(loopLab); seqControls.appendChild(loopChk); seqControls.appendChild(delayLab); seqControls.appendChild(delayIn);
   // Toggle: show entire sequence on the right half (up to 5 waveforms)
   const showSeqChk = document.createElement('input'); showSeqChk.type = 'checkbox'; showSeqChk.id = 'showSequenceOnRightChk'; showSeqChk.style.marginLeft = '8px';
-  showSeqChk.onchange = (e) => { showSequenceOnRight = !!e.target.checked; };
+  showSeqChk.onchange = (e) => { showSequenceOnRight = !!e.target.checked; seqPreviewNeedsUpdate = true; };
   const showSeqLab = document.createElement('div'); showSeqLab.textContent = 'Show sequence on right'; showSeqLab.style.marginLeft = '4px'; showSeqLab.style.marginRight = '6px';
   seqControls.appendChild(showSeqLab); seqControls.appendChild(showSeqChk);
   // Sequence save/load controls (name, save, select, load, delete)
@@ -2906,6 +2912,36 @@ function mapIschemiaToEff(pct) {
   return { effT, effST };
 }
 
+// Compute an ischemia percentage (0..100) from athero %, METs and thrombus %
+function computeIschemia(athero, mets, thrombus) {
+  const a = constrain(athero, 0, 100);
+  const t = constrain(thrombus, 0, 100);
+  if (a < 20 && t < 20) return 0;
+  const aFactor = a <= 20 ? 0 : (a - 20) / 80.0;
+  const tFactor = t / 100.0;
+  const thrombusBias = 1.5;
+  const combinedVuln = constrain((aFactor + thrombusBias * tFactor) / (1.0 + thrombusBias), 0, 1);
+  const aFrac = a / 100.0;
+  const tFrac = t / 100.0;
+  const combinedFrac = Math.min(1.0, aFrac + thrombusBias * tFrac * (1.0 - aFrac));
+  const metFactor = constrain((mets - 2) / (10 - 2), 0, 1);
+  const vulnAmplification = 3.0;
+  const metAmplifier = 1.0 + vulnAmplification * combinedVuln;
+  const baseIschemia = constrain(combinedVuln * metFactor * metAmplifier * 100.0, 0, 100);
+  const aFracLocal = a / 100.0;
+  const thrombusAtheroSynergy = 2.0;
+  const thrombusMultiplier = 1.0 + thrombusAtheroSynergy * aFracLocal;
+  const thrombusIschemia = constrain(tFactor * thrombusBias * thrombusMultiplier * 100.0, 0, 100);
+  let effectiveIschemia = Math.max(baseIschemia, thrombusIschemia);
+  const capLevel = 85.0;
+  if (combinedFrac > 0.99) {
+    const f = constrain((combinedFrac - 0.99) / 0.01, 0, 1);
+    const start = Math.min(effectiveIschemia, capLevel);
+    return lerp(start, 100.0, f);
+  }
+  return Math.min(effectiveIschemia, capLevel);
+}
+
 // Main ECG renderer
 function drawECG(hr) {
   let now = millis() / 1000.0;
@@ -3456,8 +3492,9 @@ function drawStaticSingleLeadTo(g, hr) {
       const frac = ix / W;
       const t_rel = tRelStart + frac * tRelRange;
       // Use current waveform globals (possibly overridden via applyWaveformTemporarily)
-      const eff = mapIschemiaToEff(atheroPercent);
-      const v = singleBeatSignal(t_rel, eff.effT, stOffset, {p:1,q:1,r:1,s:1,t:1});
+      const derived = computeIschemia(atheroPercent, METs, thrombusPercent);
+      const eff = mapIschemiaToEff(derived);
+      const v = singleBeatSignal(t_rel, eff.effT, eff.effST, {p:1,q:1,r:1,s:1,t:1});
       const x = padLeft + ix;
       const y = centerY - v * amp;
       const xa = Math.round(x * (window._ecg_dpr || 1)) / (window._ecg_dpr || 1);
@@ -3482,7 +3519,7 @@ function drawSequenceOnRight(ix, iy, iw, ih) {
     const n = Math.min(MAX_SEQUENCE_DISPLAY, Math.max(1, presetSequence.length));
     const colW = Math.floor(iw / n) || iw;
     const allPresets = _getAllPresets();
-    // Ensure preview buffers exist and are the right size
+    // ensure preview buffers exist and are the right size
     for (let i = 0; i < n; i++) {
       const needW = colW;
       const needH = ih;
@@ -3492,24 +3529,33 @@ function drawSequenceOnRight(ix, iy, iw, ih) {
         try { if (typeof seqPreviewBuffers[i].pixelDensity === 'function') seqPreviewBuffers[i].pixelDensity(window._ecg_dpr || 1); } catch (e) {}
       }
     }
-    // For each column, draw the preset's ECG into its buffer and blit
+
+    // regenerate snapshots only when needed (capture static copies)
+    if (seqPreviewNeedsUpdate) {
+      for (let i = 0; i < n; i++) {
+        const name = presetSequence[i];
+        const presetObj = (allPresets && allPresets[name]) ? allPresets[name] : null;
+        const waveform = presetObj && presetObj.waveform ? presetObj.waveform : null;
+        const buf = seqPreviewBuffers[i];
+        if (!buf) continue;
+        // Draw a STATIC single-beat snapshot using the preset waveform (no moving indicator)
+        applyWaveformTemporarily(waveform, () => { try { drawStaticSingleLeadTo(buf, (waveform && waveform.heartRate) ? waveform.heartRate : heartRate); } catch (e) { console.warn('drawStaticSingleLeadTo preview error', e); } });
+      }
+      seqPreviewNeedsUpdate = false;
+    }
+
+    // blit each static snapshot and draw the moving indicator line per-column
     for (let i = 0; i < n; i++) {
       const name = presetSequence[i];
-      const presetObj = (allPresets && allPresets[name]) ? allPresets[name] : null;
-      const waveform = presetObj && presetObj.waveform ? presetObj.waveform : null;
       const buf = seqPreviewBuffers[i];
       if (!buf) continue;
-      // Draw a STATIC single-beat snapshot using the preset waveform (no moving indicator)
-      applyWaveformTemporarily(waveform, () => { try { drawStaticSingleLeadTo(buf, (waveform && waveform.heartRate) ? waveform.heartRate : heartRate); } catch (e) { console.warn('drawStaticSingleLeadTo preview error', e); } });
-      // Blit into main canvas at proper x offset
       image(buf, ix + i * colW, iy);
-      // separator line
-      stroke(180); strokeWeight(1); line(ix + (i+1)*colW, iy + 6, ix + (i+1)*colW, iy + ih - 6);
-      // label the preset name
+      // label the preset name (kept subtle)
       noStroke(); fill(0); textSize(12); textAlign(LEFT, TOP);
       const label = name || ('Preset ' + (i+1));
       text(label, ix + i * colW + 6, iy + 6);
     }
+    
   } catch (e) { console.warn('drawSequenceOnRight error', e); }
 }
 
