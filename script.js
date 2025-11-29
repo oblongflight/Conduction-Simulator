@@ -109,6 +109,7 @@ const ECG_WAVEFORM_KEY = 'ecg.waveform.v1';
 const PRESETS_KEY = 'ecg.presets.v1';
 // Sequence presets (named saved sequences of preset names)
 const SEQUENCE_PRESETS_KEY = 'ecg.sequencePresets.v1';
+const ACTIVE_SEQUENCE_KEY = 'ecg.activeSequence.v1';
 
 function saveEcgWaveformSettings() {
   try {
@@ -252,9 +253,11 @@ function loadNamedSequence(name) {
     presetSequenceIndex = 0;
     presetSequenceLoop = !!p.loop;
     refreshPresetSequenceUI();
+    try { saveActiveSequence(); } catch (e) {}
     return true;
   } catch (e) { console.warn('loadNamedSequence error', e); return false; }
 }
+
 
 function deleteNamedSequence(name) {
   try {
@@ -263,8 +266,40 @@ function deleteNamedSequence(name) {
     delete all[name];
     _saveAllSequencePresets(all);
     try { refreshSequenceSelectGlobal(); } catch (e) {}
+    // if the deleted sequence matches the active in-memory sequence name,
+    // do not automatically clear the active sequence which may have been
+    // created from the same named presets; but if you want to clear active
+    // when a named sequence is removed, uncomment the next line.
+    // clearActiveSequence();
     return true;
   } catch (e) { console.warn('deleteNamedSequence error', e); return false; }
+}
+
+// Persist the active (in-memory) sequence so it can be restored on reload
+function saveActiveSequence() {
+  try {
+    const payload = { sequence: Array.isArray(presetSequence) ? presetSequence.slice() : [], index: Number(presetSequenceIndex) || 0, loop: !!presetSequenceLoop };
+    localStorage.setItem(ACTIVE_SEQUENCE_KEY, JSON.stringify(payload));
+    return true;
+  } catch (e) { console.warn('saveActiveSequence error', e); return false; }
+}
+
+function loadActiveSequence() {
+  try {
+    const raw = localStorage.getItem(ACTIVE_SEQUENCE_KEY);
+    if (!raw) return false;
+    const p = JSON.parse(raw);
+    if (!p || typeof p !== 'object') return false;
+    if (Array.isArray(p.sequence)) presetSequence = p.sequence.slice();
+    presetSequenceIndex = typeof p.index === 'number' ? p.index : 0;
+    presetSequenceLoop = !!p.loop;
+    seqPreviewNeedsUpdate = true;
+    return true;
+  } catch (e) { console.warn('loadActiveSequence error', e); return false; }
+}
+
+function clearActiveSequence() {
+  try { localStorage.removeItem(ACTIVE_SEQUENCE_KEY); return true; } catch (e) { return false; }
 }
 
 function refreshSequenceSelectGlobal() {
@@ -322,6 +357,8 @@ function refreshPresetSequenceUI() {
     Array.from(seqHolder.children).forEach((c,i)=>{ c.style.background = (i===presetSequenceIndex && presetSequencePlaying) ? 'rgba(200,255,200,0.6)' : ''; });
     // mark previews stale so they will be regenerated
     seqPreviewNeedsUpdate = true;
+    // persist current active sequence
+    try { saveActiveSequence(); } catch (e) {}
   } catch (e) {}
 }
 
@@ -1916,6 +1953,15 @@ function openConductionDebugWindow() {
   try { createConductionPanel(); } catch (e) { console.warn('Failed to create conduction panel', e); }
   // briefly highlight the conduction panel so the user can locate it
   try { setTimeout(() => { highlightConductionPanel(4000); }, 150); } catch (e) {}
+  // load any previously active sequence so saved sequences persist across reloads
+  try {
+    // restore the active in-memory sequence (if present) and mark previews stale
+    loadActiveSequence();
+    // refresh UI selects so saved sequences/presets appear in the dropdowns
+    try { refreshPresetSelectGlobal(); } catch (e) {}
+    try { refreshSequenceSelectGlobal(); } catch (e) {}
+    try { refreshPresetSequenceUI(); } catch (e) {}
+  } catch (e) { /* ignore restore failures */ }
 
   // Attempt to open the conduction + waveform editor in its own window
   // automatically. Use a short timeout so page load isn't blocked; if
