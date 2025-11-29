@@ -305,7 +305,9 @@ function refreshPresetSequenceUI() {
     seqHolder.innerHTML = '';
     presetSequence.forEach((name, idx) => {
       const row = document.createElement('div'); row.style.display='flex'; row.style.alignItems='center'; row.style.gap='6px';
-      const lbl = document.createElement('div'); lbl.textContent = String(idx+1) + '. ' + name; lbl.style.flex='1';
+        const lbl = document.createElement('div'); lbl.textContent = String(idx + 1) + '. ' + name; lbl.style.flex = '1';
+        // ensure sequence preview initial state
+        try { refreshSequencePreview(); } catch (e) {}
       const up = document.createElement('button'); up.textContent='↑'; up.onclick = () => { if (idx<=0) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx-1,0,a); refreshPresetSequenceUI(); };
       const down = document.createElement('button'); down.textContent='↓'; down.onclick = () => { if (idx>=presetSequence.length-1) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx+1,0,a); refreshPresetSequenceUI(); };
       const del = document.createElement('button'); del.textContent='Delete'; del.onclick = () => { presetSequence.splice(idx,1); refreshPresetSequenceUI(); };
@@ -315,6 +317,88 @@ function refreshPresetSequenceUI() {
     // highlight current
     Array.from(seqHolder.children).forEach((c,i)=>{ c.style.background = (i===presetSequenceIndex && presetSequencePlaying) ? 'rgba(200,255,200,0.6)' : ''; });
   } catch (e) {}
+}
+
+// Generate preview image for a preset waveform name. Returns data URL string or null.
+function generatePreviewImageForPresetName(name, w = 220, h = 120) {
+  try {
+    const all = _getAllPresets();
+    if (!all || !all[name] || !all[name].waveform) return null;
+    const wf = all[name].waveform;
+    // Save globals we will override
+    const saved = {
+      atheroPercent, thrombusPercent, METs, heartRate, amplitude, timeWindow,
+      tWaveScale, qWaveScale, stOffset, tDuration, qtIntervalMs,
+      pDuration, pAmp, qrsWidth, qDur, rDur, sDur, pBiphasic,
+      gP, gQ, gR, gS, gT, prDur, ecgWaveShift, overlayUsesDilation
+    };
+    // Apply waveform values where present
+    try { if (typeof wf.atheroPercent === 'number') atheroPercent = wf.atheroPercent; } catch (e) {}
+    try { if (typeof wf.thrombusPercent === 'number') thrombusPercent = wf.thrombusPercent; } catch (e) {}
+    try { if (typeof wf.METs === 'number') METs = wf.METs; } catch (e) {}
+    try { if (typeof wf.heartRate === 'number') heartRate = wf.heartRate; } catch (e) {}
+    try { if (typeof wf.amplitude === 'number') amplitude = wf.amplitude; } catch (e) {}
+    try { if (typeof wf.timeWindow === 'number') timeWindow = wf.timeWindow; } catch (e) {}
+    try { if (typeof wf.tWaveScale === 'number') tWaveScale = wf.tWaveScale; } catch (e) {}
+    try { if (typeof wf.qWaveScale === 'number') qWaveScale = wf.qWaveScale; } catch (e) {}
+    try { if (typeof wf.stOffset === 'number') stOffset = wf.stOffset; } catch (e) {}
+    try { if (typeof wf.tDuration === 'number') tDuration = wf.tDuration; } catch (e) {}
+    try { if (typeof wf.qtIntervalMs === 'number') qtIntervalMs = wf.qtIntervalMs; } catch (e) {}
+    try { if (typeof wf.pDuration === 'number') pDuration = wf.pDuration; } catch (e) {}
+    try { if (typeof wf.pAmp === 'number') pAmp = wf.pAmp; } catch (e) {}
+    try { if (typeof wf.qrsWidth === 'number') qrsWidth = wf.qrsWidth; } catch (e) {}
+    try { if (typeof wf.qDur === 'number') qDur = wf.qDur; } catch (e) {}
+    try { if (typeof wf.rDur === 'number') rDur = wf.rDur; } catch (e) {}
+    try { if (typeof wf.sDur === 'number') sDur = wf.sDur; } catch (e) {}
+    try { if (typeof wf.pBiphasic === 'boolean') pBiphasic = wf.pBiphasic; } catch (e) {}
+    try { if (typeof wf.gP === 'number') gP = wf.gP; } catch (e) {}
+    try { if (typeof wf.gQ === 'number') gQ = wf.gQ; } catch (e) {}
+    try { if (typeof wf.gR === 'number') gR = wf.gR; } catch (e) {}
+    try { if (typeof wf.gS === 'number') gS = wf.gS; } catch (e) {}
+    try { if (typeof wf.gT === 'number') gT = wf.gT; } catch (e) {}
+    try { if (typeof wf.prDur === 'number') prDur = wf.prDur; } catch (e) {}
+    try { if (typeof wf.ecgWaveShift === 'number') ecgWaveShift = wf.ecgWaveShift; } catch (e) {}
+    try { if (typeof wf.overlayUsesDilation === 'boolean') overlayUsesDilation = wf.overlayUsesDilation; } catch (e) {}
+
+    // Create an offscreen p5 graphics buffer and draw a single-lead snapshot
+    const g = createGraphics(w, h);
+    try { if (typeof g.pixelDensity === 'function') g.pixelDensity(window._ecg_dpr || 1); } catch (e) {}
+    // drawSingleLeadTo expects a heart rate param; prefer waveform HR or global
+    try { drawSingleLeadTo(g, wf.heartRate || heartRate); } catch (e) { console.warn('preview draw failed', e); }
+    // extract data URL
+    let dataUrl = null;
+    try { dataUrl = g.canvas.toDataURL('image/png'); } catch (e) { console.warn('toDataURL failed', e); dataUrl = null; }
+    try { g.remove(); } catch (e) {}
+
+    // restore globals
+    try { atheroPercent = saved.atheroPercent; thrombusPercent = saved.thrombusPercent; METs = saved.METs; heartRate = saved.heartRate; amplitude = saved.amplitude; timeWindow = saved.timeWindow; } catch (e) {}
+    try { tWaveScale = saved.tWaveScale; qWaveScale = saved.qWaveScale; stOffset = saved.stOffset; tDuration = saved.tDuration; qtIntervalMs = saved.qtIntervalMs; } catch (e) {}
+    try { pDuration = saved.pDuration; pAmp = saved.pAmp; qrsWidth = saved.qrsWidth; qDur = saved.qDur; rDur = saved.rDur; sDur = saved.sDur; } catch (e) {}
+    try { pBiphasic = saved.pBiphasic; gP = saved.gP; gQ = saved.gQ; gR = saved.gR; gS = saved.gS; gT = saved.gT; prDur = saved.prDur; ecgWaveShift = saved.ecgWaveShift; overlayUsesDilation = saved.overlayUsesDilation; } catch (e) {}
+
+    return dataUrl;
+  } catch (e) { console.warn('generatePreviewImageForPresetName error', e); return null; }
+}
+
+// Refresh the sequence preview area: render up to 5 previews for the current sequence
+function refreshSequencePreview() {
+  try {
+    const holder = document.getElementById('sequencePreviewHolder'); if (!holder) return;
+    const chk = document.getElementById('sequencePreviewChk'); if (!chk || !chk.checked) { holder.innerHTML = ''; return; }
+    holder.innerHTML = '';
+    const max = 5;
+    for (let i = 0; i < Math.min(max, presetSequence.length); i++) {
+      const name = presetSequence[i];
+      const img = document.createElement('img'); img.style.width = '220px'; img.style.height = '120px'; img.style.objectFit = 'contain'; img.alt = name || '';
+      holder.appendChild(img);
+      // generate preview synchronously
+      try {
+        const url = generatePreviewImageForPresetName(name, 220, 120);
+        if (url) img.src = url; else { img.style.background = '#eee'; img.title = 'Preview unavailable for ' + name; }
+      } catch (e) { img.style.background = '#eee'; img.title = 'Preview generation error'; }
+      const lbl = document.createElement('div'); lbl.textContent = name || ''; lbl.style.fontSize = '12px'; lbl.style.textAlign = 'center'; lbl.style.width = '220px'; holder.appendChild(lbl);
+    }
+  } catch (e) { console.warn('refreshSequencePreview error', e); }
 }
 
 function startPresetSequence() {
@@ -940,6 +1024,16 @@ function createConductionPanel() {
 
   const seqHolder = document.createElement('div'); seqHolder.id = 'presetSequenceHolder'; seqHolder.style.display='flex'; seqHolder.style.flexDirection='column'; seqHolder.style.gap='4px'; seqHolder.style.maxHeight='160px'; seqHolder.style.overflow='auto'; seqHolder.style.border = '1px solid rgba(0,0,0,0.06)'; seqHolder.style.padding = '6px';
   seqRow.appendChild(seqControls); seqRow.appendChild(seqSaveRow); seqRow.appendChild(seqHolder);
+  // Sequence preview controls
+  const previewToggleRow = document.createElement('div'); previewToggleRow.style.display='flex'; previewToggleRow.style.alignItems='center'; previewToggleRow.style.gap='8px'; previewToggleRow.style.marginTop='8px';
+  const previewChk = document.createElement('input'); previewChk.type = 'checkbox'; previewChk.id = 'sequencePreviewChk';
+  const previewLab = document.createElement('div'); previewLab.textContent = 'Show Sequence Preview (max 5)'; previewLab.style.fontSize = '13px';
+  previewToggleRow.appendChild(previewChk); previewToggleRow.appendChild(previewLab);
+  seqRow.appendChild(previewToggleRow);
+  const previewHolder = document.createElement('div'); previewHolder.id = 'sequencePreviewHolder'; previewHolder.style.display = 'flex'; previewHolder.style.flexDirection = 'row'; previewHolder.style.gap = '8px'; previewHolder.style.marginTop = '6px'; previewHolder.style.alignItems = 'flex-start'; previewHolder.style.maxWidth = '100%'; previewHolder.style.overflowX = 'auto';
+  seqRow.appendChild(previewHolder);
+  // wire preview toggle
+  previewChk.onchange = () => { try { refreshSequencePreview(); } catch (e) { console.warn('preview toggle error', e); } };
   conductionPanelDiv.appendChild(seqRow);
   // ensure sequence UI initial state
   try { refreshPresetSequenceUI(); } catch (e) {}
