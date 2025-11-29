@@ -107,6 +107,8 @@ let conductionEditMode = false;
 // Persistence for waveform settings
 const ECG_WAVEFORM_KEY = 'ecg.waveform.v1';
 const PRESETS_KEY = 'ecg.presets.v1';
+// Sequence presets (named saved sequences of preset names)
+const SEQUENCE_PRESETS_KEY = 'ecg.sequencePresets.v1';
 
 function saveEcgWaveformSettings() {
   try {
@@ -208,6 +210,79 @@ function _getAllPresets() {
     if (!parsed || typeof parsed !== 'object') return {};
     return parsed;
   } catch (e) { return {}; }
+}
+
+// Sequence preset helpers: store named arrays of preset keys (the sequence)
+function _getAllSequencePresets() {
+  try {
+    const raw = localStorage.getItem(SEQUENCE_PRESETS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed;
+  } catch (e) { return {}; }
+}
+
+function _saveAllSequencePresets(obj) {
+  try { localStorage.setItem(SEQUENCE_PRESETS_KEY, JSON.stringify(obj)); return true; } catch (e) { console.warn('Failed to save sequence presets', e); return false; }
+}
+
+function saveNamedSequence(name) {
+  if (!name || !String(name).trim()) { alert('Please provide a sequence name'); return false; }
+  try {
+    const key = String(name).trim();
+    const presetList = Array.isArray(presetSequence) ? presetSequence.slice() : [];
+    const obj = { name: key, savedAt: (new Date()).toISOString(), sequence: presetList, loop: !!presetSequenceLoop };
+    const all = _getAllSequencePresets();
+    all[key] = obj;
+    const ok = _saveAllSequencePresets(all);
+    if (!ok) { alert('Failed to save sequence to localStorage'); return false; }
+    try { refreshSequenceSelectGlobal(); } catch (e) {}
+    return true;
+  } catch (e) { console.warn('saveNamedSequence error', e); return false; }
+}
+
+function loadNamedSequence(name) {
+  try {
+    const all = _getAllSequencePresets();
+    if (!all || !all[name]) { alert('Sequence not found: ' + name); return false; }
+    const p = all[name];
+    if (!Array.isArray(p.sequence)) { alert('Sequence malformed'); return false; }
+    presetSequence = p.sequence.slice();
+    presetSequenceIndex = 0;
+    presetSequenceLoop = !!p.loop;
+    refreshPresetSequenceUI();
+    return true;
+  } catch (e) { console.warn('loadNamedSequence error', e); return false; }
+}
+
+function deleteNamedSequence(name) {
+  try {
+    const all = _getAllSequencePresets();
+    if (!all || !all[name]) return false;
+    delete all[name];
+    _saveAllSequencePresets(all);
+    try { refreshSequenceSelectGlobal(); } catch (e) {}
+    return true;
+  } catch (e) { console.warn('deleteNamedSequence error', e); return false; }
+}
+
+function refreshSequenceSelectGlobal() {
+  try {
+    const all = _getAllSequencePresets();
+    const keys = Object.keys(all || {}).sort((a,b) => (all[b].savedAt||'').localeCompare(all[a].savedAt||''));
+    const docs = [document];
+    try { if (conductionWindow && conductionWindow.document) docs.push(conductionWindow.document); } catch (e) {}
+    try { if (conductionPanelDiv && conductionPanelDiv.ownerDocument && docs.indexOf(conductionPanelDiv.ownerDocument) === -1) docs.push(conductionPanelDiv.ownerDocument); } catch (e) {}
+    docs.forEach(doc => {
+      try {
+        const sel = doc.getElementById('sequenceSelect'); if (!sel) return;
+        sel.innerHTML = '';
+        const empty = doc.createElement('option'); empty.value = ''; empty.text = '-- sequences --'; sel.appendChild(empty);
+        keys.forEach(k => { const o = doc.createElement('option'); o.value = k; o.text = k + (all[k].savedAt ? ('  (' + new Date(all[k].savedAt).toLocaleString() + ')') : ''); sel.appendChild(o); });
+      } catch (e) {}
+    });
+  } catch (e) { /* ignore */ }
 }
 
 // Preset sequence runner state
@@ -851,8 +926,20 @@ function createConductionPanel() {
   const delayIn = document.createElement('input'); delayIn.type = 'number'; delayIn.min = '200'; delayIn.step = '100'; delayIn.value = String(presetSequenceDelayMs); delayIn.style.width='100px'; delayIn.onchange = () => { presetSequenceDelayMs = Math.max(200, Number(delayIn.value) || 2000); };
   const delayLab = document.createElement('div'); delayLab.textContent = 'Delay ms'; delayLab.style.marginLeft = '6px';
   seqControls.appendChild(addSeqBtn); seqControls.appendChild(playSeqBtn); seqControls.appendChild(stopSeqBtn); seqControls.appendChild(loopLab); seqControls.appendChild(loopChk); seqControls.appendChild(delayLab); seqControls.appendChild(delayIn);
+  // Sequence save/load controls (name, save, select, load, delete)
+  const seqSaveRow = document.createElement('div'); seqSaveRow.style.display='flex'; seqSaveRow.style.alignItems='center'; seqSaveRow.style.gap='6px';
+  const sequenceNameInput = document.createElement('input'); sequenceNameInput.type = 'text'; sequenceNameInput.placeholder = 'Sequence name (e.g. "A-B-C")'; sequenceNameInput.style.flex = '1'; sequenceNameInput.id = 'sequenceNameInput';
+  const saveSeqBtn = document.createElement('button'); saveSeqBtn.textContent = 'Save Sequence'; saveSeqBtn.onclick = () => {
+    const n = sequenceNameInput.value && String(sequenceNameInput.value).trim(); if (!n) { alert('Enter a sequence name'); return; }
+    if (saveNamedSequence(n)) { alert('Sequence saved: ' + n); sequenceNameInput.value = ''; } else { alert('Failed to save sequence'); }
+  };
+  const seqSelect = document.createElement('select'); seqSelect.style.width = '220px'; seqSelect.id = 'sequenceSelect';
+  const loadSeqBtn = document.createElement('button'); loadSeqBtn.textContent = 'Load Sequence'; loadSeqBtn.onclick = () => { const v = seqSelect.value; if (!v) { alert('Select a sequence to load'); return; } if (confirm('Load sequence "' + v + '"? This will replace the current sequence.')) { if (loadNamedSequence(v)) { alert('Loaded sequence: ' + v); refreshPresetSequenceUI(); } else alert('Failed to load sequence'); } };
+  const delSeqBtn = document.createElement('button'); delSeqBtn.textContent = 'Delete Sequence'; delSeqBtn.onclick = () => { const v = seqSelect.value; if (!v) { alert('Select a sequence to delete'); return; } if (!confirm('Delete sequence "' + v + '"?')) return; if (deleteNamedSequence(v)) { alert('Deleted: ' + v); refreshSequenceSelectGlobal(); } else { alert('Failed to delete: ' + v); } };
+  seqSaveRow.appendChild(sequenceNameInput); seqSaveRow.appendChild(saveSeqBtn); seqSaveRow.appendChild(seqSelect); seqSaveRow.appendChild(loadSeqBtn); seqSaveRow.appendChild(delSeqBtn);
+
   const seqHolder = document.createElement('div'); seqHolder.id = 'presetSequenceHolder'; seqHolder.style.display='flex'; seqHolder.style.flexDirection='column'; seqHolder.style.gap='4px'; seqHolder.style.maxHeight='160px'; seqHolder.style.overflow='auto'; seqHolder.style.border = '1px solid rgba(0,0,0,0.06)'; seqHolder.style.padding = '6px';
-  seqRow.appendChild(seqControls); seqRow.appendChild(seqHolder);
+  seqRow.appendChild(seqControls); seqRow.appendChild(seqSaveRow); seqRow.appendChild(seqHolder);
   conductionPanelDiv.appendChild(seqRow);
   // ensure sequence UI initial state
   try { refreshPresetSequenceUI(); } catch (e) {}
@@ -869,6 +956,7 @@ function createConductionPanel() {
   }
   // populate presets initially
   try { refreshPresetSelectGlobal(); } catch (e) {}
+  try { refreshSequenceSelectGlobal(); } catch (e) {}
 
   // placeholder for list
   const listHolder = document.createElement('div'); listHolder.className = 'cond-list'; conductionPanelDiv.appendChild(listHolder);
