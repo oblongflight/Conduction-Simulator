@@ -948,8 +948,9 @@ function createConductionPanel() {
 
   // Presets UI: save/load named disease states (waveform + conduction)
   const presetsRow = document.createElement('div'); presetsRow.style.display = 'flex'; presetsRow.style.alignItems = 'center'; presetsRow.style.gap = '8px'; presetsRow.style.marginTop = '8px';
-  const presetNameInput = document.createElement('input'); presetNameInput.type = 'text'; presetNameInput.placeholder = 'Preset name (e.g. "MI lateral")'; presetNameInput.style.flex = '1';
+  const presetNameInput = document.createElement('input'); presetNameInput.type = 'text'; presetNameInput.placeholder = 'Preset name (e.g. "MI lateral")'; presetNameInput.style.flex = '1'; presetNameInput.id = 'presetNameInput';
   const savePresetBtn = document.createElement('button'); savePresetBtn.textContent = 'Save Preset';
+  savePresetBtn.id = 'savePresetBtn';
   savePresetBtn.onclick = () => {
     const n = presetNameInput.value && String(presetNameInput.value).trim();
     if (!n) { alert('Enter a preset name'); return; }
@@ -958,7 +959,9 @@ function createConductionPanel() {
   };
   const presetSelect = document.createElement('select'); presetSelect.style.width = '220px'; presetSelect.id = 'presetSelect';
   const loadPresetBtn = document.createElement('button'); loadPresetBtn.textContent = 'Load Preset'; loadPresetBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset'); return; } if (confirm('Load preset "' + v + '"? This will overwrite current settings.')) { if (loadNamedPreset(v)) { alert('Loaded preset: ' + v); } else { alert('Failed to load preset: ' + v); } } };
+  loadPresetBtn.id = 'loadPresetBtn';
   const delPresetBtn = document.createElement('button'); delPresetBtn.textContent = 'Delete Preset'; delPresetBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset to delete'); return; } if (!confirm('Delete preset "' + v + '"?')) return; if (deleteNamedPreset(v)) { alert('Deleted: ' + v); refreshPresetSelectGlobal(); } else { alert('Failed to delete: ' + v); } };
+  delPresetBtn.id = 'delPresetBtn';
   presetsRow.appendChild(presetNameInput); presetsRow.appendChild(savePresetBtn); presetsRow.appendChild(presetSelect); presetsRow.appendChild(loadPresetBtn); presetsRow.appendChild(delPresetBtn);
   conductionPanelDiv.appendChild(presetsRow);
 
@@ -966,8 +969,11 @@ function createConductionPanel() {
   const seqRow = document.createElement('div'); seqRow.style.display='flex'; seqRow.style.flexDirection='column'; seqRow.style.gap='6px'; seqRow.style.marginTop='8px';
   const seqControls = document.createElement('div'); seqControls.style.display='flex'; seqControls.style.alignItems='center'; seqControls.style.gap='6px';
   const addSeqBtn = document.createElement('button'); addSeqBtn.textContent = 'Add to Sequence'; addSeqBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset to add'); return; } presetSequence.push(v); refreshPresetSequenceUI(); };
+  addSeqBtn.id = 'addSeqBtn';
   const playSeqBtn = document.createElement('button'); playSeqBtn.textContent = 'Play Sequence'; playSeqBtn.onclick = () => { if (!presetSequencePlaying) startPresetSequence(); else stopPresetSequence(); playSeqBtn.textContent = presetSequencePlaying ? 'Pause Sequence' : 'Play Sequence'; };
+  playSeqBtn.id = 'playSeqBtn';
   const stopSeqBtn = document.createElement('button'); stopSeqBtn.textContent = 'Stop'; stopSeqBtn.onclick = () => { stopPresetSequence(); playSeqBtn.textContent = 'Play Sequence'; };
+  stopSeqBtn.id = 'stopSeqBtn';
   const loopChk = document.createElement('input'); loopChk.type = 'checkbox'; loopChk.onchange = (e) => { presetSequenceLoop = !!e.target.checked; };
   const loopLab = document.createElement('div'); loopLab.textContent = 'Loop'; loopLab.style.marginRight = '6px';
   const delayIn = document.createElement('input'); delayIn.type = 'number'; delayIn.min = '200'; delayIn.step = '100'; delayIn.value = String(presetSequenceDelayMs); delayIn.style.width='100px'; delayIn.onchange = () => { presetSequenceDelayMs = Math.max(200, Number(delayIn.value) || 2000); };
@@ -985,9 +991,12 @@ function createConductionPanel() {
     const n = sequenceNameInput.value && String(sequenceNameInput.value).trim(); if (!n) { alert('Enter a sequence name'); return; }
     if (saveNamedSequence(n)) { alert('Sequence saved: ' + n); sequenceNameInput.value = ''; } else { alert('Failed to save sequence'); }
   };
+  saveSeqBtn.id = 'saveSeqBtn';
   const seqSelect = document.createElement('select'); seqSelect.style.width = '220px'; seqSelect.id = 'sequenceSelect';
   const loadSeqBtn = document.createElement('button'); loadSeqBtn.textContent = 'Load Sequence'; loadSeqBtn.onclick = () => { const v = seqSelect.value; if (!v) { alert('Select a sequence to load'); return; } if (confirm('Load sequence "' + v + '"? This will replace the current sequence.')) { if (loadNamedSequence(v)) { alert('Loaded sequence: ' + v); refreshPresetSequenceUI(); } else alert('Failed to load sequence'); } };
+  loadSeqBtn.id = 'loadSeqBtn';
   const delSeqBtn = document.createElement('button'); delSeqBtn.textContent = 'Delete Sequence'; delSeqBtn.onclick = () => { const v = seqSelect.value; if (!v) { alert('Select a sequence to delete'); return; } if (!confirm('Delete sequence "' + v + '"?')) return; if (deleteNamedSequence(v)) { alert('Deleted: ' + v); refreshSequenceSelectGlobal(); } else { alert('Failed to delete: ' + v); } };
+  delSeqBtn.id = 'delSeqBtn';
   seqSaveRow.appendChild(sequenceNameInput); seqSaveRow.appendChild(saveSeqBtn); seqSaveRow.appendChild(seqSelect); seqSaveRow.appendChild(loadSeqBtn); seqSaveRow.appendChild(delSeqBtn);
 
   const seqHolder = document.createElement('div'); seqHolder.id = 'presetSequenceHolder'; seqHolder.style.display='flex'; seqHolder.style.flexDirection='column'; seqHolder.style.gap='4px'; seqHolder.style.maxHeight='160px'; seqHolder.style.overflow='auto'; seqHolder.style.border = '1px solid rgba(0,0,0,0.06)'; seqHolder.style.padding = '6px';
@@ -1189,7 +1198,62 @@ function openConductionWindow() {
       w.document.body.appendChild(dockBtn);
         // regenerate the panel contents now that it lives in the popup so
         // inputs are recreated with the current attributes/handlers (10ms step/min)
-        try { refreshConductionPanel(); refreshPresetSelectGlobal(); } catch (e) { /* ignore */ }
+        try { refreshConductionPanel(); refreshPresetSelectGlobal(); refreshSequenceSelectGlobal(); } catch (e) { /* ignore */ }
+        // Rebind popup handlers to call back into the main window functions so
+        // actions performed inside the popout affect the primary sketch.
+        try {
+          const main = window;
+          const localRoot = conductionPanelDiv; // now owned by popup document
+          const sel = (s) => { try { return localRoot.querySelector(s); } catch (e) { return null; } };
+          const wrapAlert = (msg) => { try { w.alert(msg); } catch (e) { /* ignore */ } };
+          const wrapConfirm = (msg) => { try { return w.confirm(msg); } catch (e) { return false; } };
+
+          const loadBtn = sel('#loadPresetBtn');
+          if (loadBtn) {
+            loadBtn.onclick = function() {
+              const ps = sel('#presetSelect'); const v = ps ? ps.value : '';
+              if (!v) { wrapAlert('Select a preset'); return; }
+              if (wrapConfirm('Load preset "' + v + '"? This will overwrite current settings.')) {
+                try { main.loadNamedPreset(v); } catch (e) { console.warn('popup->main loadNamedPreset failed', e); }
+                wrapAlert('Loaded preset: ' + v);
+                try { main.refreshConductionPanel(); main.refreshPresetSelectGlobal(); } catch (e) {}
+              }
+            };
+          }
+
+          const saveBtn = sel('#savePresetBtn');
+          if (saveBtn) {
+            saveBtn.onclick = function() {
+              const inEl = sel('#presetNameInput'); const name = inEl ? String(inEl.value || '').trim() : '';
+              if (!name) { wrapAlert('Enter a preset name'); return; }
+              try { if (main.saveNamedPreset(name)) { wrapAlert('Preset saved: ' + name); main.refreshPresetSelectGlobal(); if (inEl) inEl.value = ''; } else { wrapAlert('Failed to save preset'); } } catch (e) { console.warn('popup->main saveNamedPreset failed', e); }
+            };
+          }
+
+          const delBtn = sel('#delPresetBtn');
+          if (delBtn) {
+            delBtn.onclick = function() {
+              const ps = sel('#presetSelect'); const v = ps ? ps.value : '';
+              if (!v) { wrapAlert('Select a preset to delete'); return; }
+              if (!wrapConfirm('Delete preset "' + v + '"?')) return;
+              try { if (main.deleteNamedPreset(v)) { wrapAlert('Deleted: ' + v); main.refreshPresetSelectGlobal(); } else { wrapAlert('Failed to delete: ' + v); } } catch (e) { console.warn('popup->main deleteNamedPreset failed', e); }
+            };
+          }
+
+          // Sequence controls
+          const addSeq = sel('#addSeqBtn'); if (addSeq) addSeq.onclick = function() { const ps = sel('#presetSelect'); const v = ps ? ps.value : ''; if (!v) { wrapAlert('Select a preset to add'); return; } try { main.presetSequence.push(v); main.refreshPresetSequenceUI(); } catch (e) { console.warn('popup->main addSeq failed', e); } };
+          const playBtn = sel('#playSeqBtn'); if (playBtn) playBtn.onclick = function() { try { if (!main.presetSequencePlaying) main.startPresetSequence(); else main.stopPresetSequence(); playBtn.textContent = main.presetSequencePlaying ? 'Pause Sequence' : 'Play Sequence'; } catch (e) { console.warn('popup->main play/stop failed', e); } };
+          const stopBtn = sel('#stopSeqBtn'); if (stopBtn) stopBtn.onclick = function() { try { main.stopPresetSequence(); const pb = sel('#playSeqBtn'); if (pb) pb.textContent = 'Play Sequence'; } catch (e) { console.warn('popup->main stopSeq failed', e); } };
+
+          const saveSeq = sel('#saveSeqBtn'); if (saveSeq) saveSeq.onclick = function() { const inEl = sel('#sequenceNameInput'); const name = inEl ? String(inEl.value || '').trim() : ''; if (!name) { wrapAlert('Enter a sequence name'); return; } try { if (main.saveNamedSequence(name)) { wrapAlert('Sequence saved: ' + name); if (inEl) inEl.value = ''; } else { wrapAlert('Failed to save sequence'); } main.refreshSequenceSelectGlobal(); } catch (e) { console.warn('popup->main saveNamedSequence failed', e); } };
+
+          const loadSeq = sel('#loadSeqBtn'); if (loadSeq) loadSeq.onclick = function() { const ssel = sel('#sequenceSelect'); const v = ssel ? ssel.value : ''; if (!v) { wrapAlert('Select a sequence to load'); return; } if (wrapConfirm('Load sequence "' + v + '"? This will replace the current sequence.')) { try { main.loadNamedSequence(v); main.refreshPresetSequenceUI(); wrapAlert('Loaded sequence: ' + v); } catch (e) { console.warn('popup->main loadNamedSequence failed', e); } } };
+
+          const delSeq = sel('#delSeqBtn'); if (delSeq) delSeq.onclick = function() { const ssel = sel('#sequenceSelect'); const v = ssel ? ssel.value : ''; if (!v) { wrapAlert('Select a sequence to delete'); return; } if (!wrapConfirm('Delete sequence "' + v + '"?')) return; try { if (main.deleteNamedSequence(v)) { wrapAlert('Deleted: ' + v); main.refreshSequenceSelectGlobal(); } else { wrapAlert('Failed to delete: ' + v); } } catch (e) { console.warn('popup->main deleteNamedSequence failed', e); } };
+
+          // checkbox toggle to show sequence on right: sync to main state
+          const showChk = sel('#showSequenceOnRightChk'); if (showChk) showChk.onchange = function(e) { try { main.showSequenceOnRight = !!e.target.checked; main.seqPreviewNeedsUpdate = true; } catch (er) { console.warn('popup->main showSequenceOnRight failed', er); } };
+        } catch (e) { console.warn('Failed to bind popup handlers', e); }
     } catch (e) {
       console.warn('Failed to populate conduction popout window', e);
       // fallback: if moving fails, close the window reference
