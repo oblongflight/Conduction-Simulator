@@ -297,6 +297,10 @@ let presetSequenceDelayMs = 2000; // default delay between presets
 let presetSequenceWaitingForEcgEnd = false;
 // last observed beat fraction (0..1) used to detect wrap-around (end of window)
 let lastEcgBeatFrac = 0;
+// Display full sequence on right half instead of a single ECG (up to MAX_SEQUENCE_DISPLAY)
+let showSequenceOnRight = false;
+const MAX_SEQUENCE_DISPLAY = 5;
+let seqPreviewBuffers = [];
 
 function refreshPresetSequenceUI() {
   try {
@@ -305,9 +309,7 @@ function refreshPresetSequenceUI() {
     seqHolder.innerHTML = '';
     presetSequence.forEach((name, idx) => {
       const row = document.createElement('div'); row.style.display='flex'; row.style.alignItems='center'; row.style.gap='6px';
-        const lbl = document.createElement('div'); lbl.textContent = String(idx + 1) + '. ' + name; lbl.style.flex = '1';
-        // ensure sequence preview initial state
-        try { refreshSequencePreview(); } catch (e) {}
+      const lbl = document.createElement('div'); lbl.textContent = String(idx+1) + '. ' + name; lbl.style.flex='1';
       const up = document.createElement('button'); up.textContent='↑'; up.onclick = () => { if (idx<=0) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx-1,0,a); refreshPresetSequenceUI(); };
       const down = document.createElement('button'); down.textContent='↓'; down.onclick = () => { if (idx>=presetSequence.length-1) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx+1,0,a); refreshPresetSequenceUI(); };
       const del = document.createElement('button'); del.textContent='Delete'; del.onclick = () => { presetSequence.splice(idx,1); refreshPresetSequenceUI(); };
@@ -317,88 +319,6 @@ function refreshPresetSequenceUI() {
     // highlight current
     Array.from(seqHolder.children).forEach((c,i)=>{ c.style.background = (i===presetSequenceIndex && presetSequencePlaying) ? 'rgba(200,255,200,0.6)' : ''; });
   } catch (e) {}
-}
-
-// Generate preview image for a preset waveform name. Returns data URL string or null.
-function generatePreviewImageForPresetName(name, w = 220, h = 120) {
-  try {
-    const all = _getAllPresets();
-    if (!all || !all[name] || !all[name].waveform) return null;
-    const wf = all[name].waveform;
-    // Save globals we will override
-    const saved = {
-      atheroPercent, thrombusPercent, METs, heartRate, amplitude, timeWindow,
-      tWaveScale, qWaveScale, stOffset, tDuration, qtIntervalMs,
-      pDuration, pAmp, qrsWidth, qDur, rDur, sDur, pBiphasic,
-      gP, gQ, gR, gS, gT, prDur, ecgWaveShift, overlayUsesDilation
-    };
-    // Apply waveform values where present
-    try { if (typeof wf.atheroPercent === 'number') atheroPercent = wf.atheroPercent; } catch (e) {}
-    try { if (typeof wf.thrombusPercent === 'number') thrombusPercent = wf.thrombusPercent; } catch (e) {}
-    try { if (typeof wf.METs === 'number') METs = wf.METs; } catch (e) {}
-    try { if (typeof wf.heartRate === 'number') heartRate = wf.heartRate; } catch (e) {}
-    try { if (typeof wf.amplitude === 'number') amplitude = wf.amplitude; } catch (e) {}
-    try { if (typeof wf.timeWindow === 'number') timeWindow = wf.timeWindow; } catch (e) {}
-    try { if (typeof wf.tWaveScale === 'number') tWaveScale = wf.tWaveScale; } catch (e) {}
-    try { if (typeof wf.qWaveScale === 'number') qWaveScale = wf.qWaveScale; } catch (e) {}
-    try { if (typeof wf.stOffset === 'number') stOffset = wf.stOffset; } catch (e) {}
-    try { if (typeof wf.tDuration === 'number') tDuration = wf.tDuration; } catch (e) {}
-    try { if (typeof wf.qtIntervalMs === 'number') qtIntervalMs = wf.qtIntervalMs; } catch (e) {}
-    try { if (typeof wf.pDuration === 'number') pDuration = wf.pDuration; } catch (e) {}
-    try { if (typeof wf.pAmp === 'number') pAmp = wf.pAmp; } catch (e) {}
-    try { if (typeof wf.qrsWidth === 'number') qrsWidth = wf.qrsWidth; } catch (e) {}
-    try { if (typeof wf.qDur === 'number') qDur = wf.qDur; } catch (e) {}
-    try { if (typeof wf.rDur === 'number') rDur = wf.rDur; } catch (e) {}
-    try { if (typeof wf.sDur === 'number') sDur = wf.sDur; } catch (e) {}
-    try { if (typeof wf.pBiphasic === 'boolean') pBiphasic = wf.pBiphasic; } catch (e) {}
-    try { if (typeof wf.gP === 'number') gP = wf.gP; } catch (e) {}
-    try { if (typeof wf.gQ === 'number') gQ = wf.gQ; } catch (e) {}
-    try { if (typeof wf.gR === 'number') gR = wf.gR; } catch (e) {}
-    try { if (typeof wf.gS === 'number') gS = wf.gS; } catch (e) {}
-    try { if (typeof wf.gT === 'number') gT = wf.gT; } catch (e) {}
-    try { if (typeof wf.prDur === 'number') prDur = wf.prDur; } catch (e) {}
-    try { if (typeof wf.ecgWaveShift === 'number') ecgWaveShift = wf.ecgWaveShift; } catch (e) {}
-    try { if (typeof wf.overlayUsesDilation === 'boolean') overlayUsesDilation = wf.overlayUsesDilation; } catch (e) {}
-
-    // Create an offscreen p5 graphics buffer and draw a single-lead snapshot
-    const g = createGraphics(w, h);
-    try { if (typeof g.pixelDensity === 'function') g.pixelDensity(window._ecg_dpr || 1); } catch (e) {}
-    // drawSingleLeadTo expects a heart rate param; prefer waveform HR or global
-    try { drawSingleLeadTo(g, wf.heartRate || heartRate); } catch (e) { console.warn('preview draw failed', e); }
-    // extract data URL
-    let dataUrl = null;
-    try { dataUrl = g.canvas.toDataURL('image/png'); } catch (e) { console.warn('toDataURL failed', e); dataUrl = null; }
-    try { g.remove(); } catch (e) {}
-
-    // restore globals
-    try { atheroPercent = saved.atheroPercent; thrombusPercent = saved.thrombusPercent; METs = saved.METs; heartRate = saved.heartRate; amplitude = saved.amplitude; timeWindow = saved.timeWindow; } catch (e) {}
-    try { tWaveScale = saved.tWaveScale; qWaveScale = saved.qWaveScale; stOffset = saved.stOffset; tDuration = saved.tDuration; qtIntervalMs = saved.qtIntervalMs; } catch (e) {}
-    try { pDuration = saved.pDuration; pAmp = saved.pAmp; qrsWidth = saved.qrsWidth; qDur = saved.qDur; rDur = saved.rDur; sDur = saved.sDur; } catch (e) {}
-    try { pBiphasic = saved.pBiphasic; gP = saved.gP; gQ = saved.gQ; gR = saved.gR; gS = saved.gS; gT = saved.gT; prDur = saved.prDur; ecgWaveShift = saved.ecgWaveShift; overlayUsesDilation = saved.overlayUsesDilation; } catch (e) {}
-
-    return dataUrl;
-  } catch (e) { console.warn('generatePreviewImageForPresetName error', e); return null; }
-}
-
-// Refresh the sequence preview area: render up to 5 previews for the current sequence
-function refreshSequencePreview() {
-  try {
-    const holder = document.getElementById('sequencePreviewHolder'); if (!holder) return;
-    const chk = document.getElementById('sequencePreviewChk'); if (!chk || !chk.checked) { holder.innerHTML = ''; return; }
-    holder.innerHTML = '';
-    const max = 5;
-    for (let i = 0; i < Math.min(max, presetSequence.length); i++) {
-      const name = presetSequence[i];
-      const img = document.createElement('img'); img.style.width = '220px'; img.style.height = '120px'; img.style.objectFit = 'contain'; img.alt = name || '';
-      holder.appendChild(img);
-      // generate preview synchronously
-      try {
-        const url = generatePreviewImageForPresetName(name, 220, 120);
-        if (url) img.src = url; else { img.style.background = '#eee'; img.title = 'Preview unavailable for ' + name; }
-      } catch (e) { img.style.background = '#eee'; img.title = 'Preview generation error'; }
-      const lbl = document.createElement('div'); lbl.textContent = name || ''; lbl.style.fontSize = '12px'; lbl.style.textAlign = 'center'; lbl.style.width = '220px'; holder.appendChild(lbl);
-    }
-  } catch (e) { console.warn('refreshSequencePreview error', e); }
 }
 
 function startPresetSequence() {
@@ -1010,6 +930,11 @@ function createConductionPanel() {
   const delayIn = document.createElement('input'); delayIn.type = 'number'; delayIn.min = '200'; delayIn.step = '100'; delayIn.value = String(presetSequenceDelayMs); delayIn.style.width='100px'; delayIn.onchange = () => { presetSequenceDelayMs = Math.max(200, Number(delayIn.value) || 2000); };
   const delayLab = document.createElement('div'); delayLab.textContent = 'Delay ms'; delayLab.style.marginLeft = '6px';
   seqControls.appendChild(addSeqBtn); seqControls.appendChild(playSeqBtn); seqControls.appendChild(stopSeqBtn); seqControls.appendChild(loopLab); seqControls.appendChild(loopChk); seqControls.appendChild(delayLab); seqControls.appendChild(delayIn);
+  // Toggle: show entire sequence on the right half (up to 5 waveforms)
+  const showSeqChk = document.createElement('input'); showSeqChk.type = 'checkbox'; showSeqChk.id = 'showSequenceOnRightChk'; showSeqChk.style.marginLeft = '8px';
+  showSeqChk.onchange = (e) => { showSequenceOnRight = !!e.target.checked; };
+  const showSeqLab = document.createElement('div'); showSeqLab.textContent = 'Show sequence on right'; showSeqLab.style.marginLeft = '4px'; showSeqLab.style.marginRight = '6px';
+  seqControls.appendChild(showSeqLab); seqControls.appendChild(showSeqChk);
   // Sequence save/load controls (name, save, select, load, delete)
   const seqSaveRow = document.createElement('div'); seqSaveRow.style.display='flex'; seqSaveRow.style.alignItems='center'; seqSaveRow.style.gap='6px';
   const sequenceNameInput = document.createElement('input'); sequenceNameInput.type = 'text'; sequenceNameInput.placeholder = 'Sequence name (e.g. "A-B-C")'; sequenceNameInput.style.flex = '1'; sequenceNameInput.id = 'sequenceNameInput';
@@ -1024,16 +949,6 @@ function createConductionPanel() {
 
   const seqHolder = document.createElement('div'); seqHolder.id = 'presetSequenceHolder'; seqHolder.style.display='flex'; seqHolder.style.flexDirection='column'; seqHolder.style.gap='4px'; seqHolder.style.maxHeight='160px'; seqHolder.style.overflow='auto'; seqHolder.style.border = '1px solid rgba(0,0,0,0.06)'; seqHolder.style.padding = '6px';
   seqRow.appendChild(seqControls); seqRow.appendChild(seqSaveRow); seqRow.appendChild(seqHolder);
-  // Sequence preview controls
-  const previewToggleRow = document.createElement('div'); previewToggleRow.style.display='flex'; previewToggleRow.style.alignItems='center'; previewToggleRow.style.gap='8px'; previewToggleRow.style.marginTop='8px';
-  const previewChk = document.createElement('input'); previewChk.type = 'checkbox'; previewChk.id = 'sequencePreviewChk';
-  const previewLab = document.createElement('div'); previewLab.textContent = 'Show Sequence Preview (max 5)'; previewLab.style.fontSize = '13px';
-  previewToggleRow.appendChild(previewChk); previewToggleRow.appendChild(previewLab);
-  seqRow.appendChild(previewToggleRow);
-  const previewHolder = document.createElement('div'); previewHolder.id = 'sequencePreviewHolder'; previewHolder.style.display = 'flex'; previewHolder.style.flexDirection = 'row'; previewHolder.style.gap = '8px'; previewHolder.style.marginTop = '6px'; previewHolder.style.alignItems = 'flex-start'; previewHolder.style.maxWidth = '100%'; previewHolder.style.overflowX = 'auto';
-  seqRow.appendChild(previewHolder);
-  // wire preview toggle
-  previewChk.onchange = () => { try { refreshSequencePreview(); } catch (e) { console.warn('preview toggle error', e); } };
   conductionPanelDiv.appendChild(seqRow);
   // ensure sequence UI initial state
   try { refreshPresetSequenceUI(); } catch (e) {}
@@ -2066,6 +1981,8 @@ function windowResized() {
   ecgG = createGraphics(Math.floor(windowWidth / 2), windowHeight);
   try { if (typeof ecgG.pixelDensity === 'function') ecgG.pixelDensity(window._ecg_dpr || 1); } catch (e) {}
   try { if (ecgG.drawingContext && 'imageSmoothingEnabled' in ecgG.drawingContext) ecgG.drawingContext.imageSmoothingEnabled = false; } catch (e) {}
+  // clear any sequence preview buffers so they'll be recreated with new sizes
+  try { if (Array.isArray(seqPreviewBuffers)) { seqPreviewBuffers.forEach(b => { try { if (b && b.remove) b.remove(); } catch (e) {} }); } seqPreviewBuffers = []; } catch (e) {}
 }
 
 function draw() {
@@ -2408,8 +2325,12 @@ function draw() {
           }
         }
 
-        // blit to right half
-        image(ecgG, halfW, 0);
+        // blit to right half (either the single ECG buffer or the full-sequence view)
+        if (showSequenceOnRight && Array.isArray(presetSequence) && presetSequence.length > 0) {
+          try { drawSequenceOnRight(halfW, 0, halfW, height); } catch (e) { console.warn('sequence blit error', e); image(ecgG, halfW, 0); }
+        } else {
+          image(ecgG, halfW, 0);
+        }
         // Update MS counter and pause button labels if global panel exists
         try {
           if (globalControlPanel && globalControlPanel._ecgMsCounter) {
@@ -3486,6 +3407,62 @@ function drawSingleLeadTo(g, hr) {
   g.pop();
 
   g.pop();
+}
+
+// Temporarily override global waveform variables with the provided waveform
+// object, execute `fn`, then restore previous globals. Useful for drawing
+// sequence entries without permanently changing the app state.
+function applyWaveformTemporarily(waveform, fn) {
+  if (!waveform || typeof fn !== 'function') return fn && fn();
+  const keys = ['atheroPercent','thrombusPercent','METs','heartRate','amplitude','timeWindow','tWaveScale','qWaveScale','stOffset','tDuration','qtIntervalMs','pDuration','pAmp','qrsWidth','qDur','rDur','sDur','pBiphasic','gP','gQ','gR','gS','gT','prDur','ecgWaveShift','overlayUsesDilation'];
+  const old = {};
+  try {
+    keys.forEach(k => { if (typeof window[k] !== 'undefined') old[k] = window[k]; window[k] = (typeof waveform[k] !== 'undefined') ? waveform[k] : window[k]; });
+    return fn();
+  } catch (e) { console.warn('applyWaveformTemporarily error', e); }
+  finally {
+    try { keys.forEach(k => { if (k in old) window[k] = old[k]; else delete window[k]; }); } catch (e) {}
+  }
+}
+
+// Draw up to MAX_SEQUENCE_DISPLAY full ECG waveforms side-by-side into the
+// right-half area defined by (ix,iy,iw,ih). Uses presetSequence array to
+// determine which presets to draw and falls back to current waveform when
+// a preset is missing.
+function drawSequenceOnRight(ix, iy, iw, ih) {
+  try {
+    const n = Math.min(MAX_SEQUENCE_DISPLAY, Math.max(1, presetSequence.length));
+    const colW = Math.floor(iw / n) || iw;
+    const allPresets = _getAllPresets();
+    // Ensure preview buffers exist and are the right size
+    for (let i = 0; i < n; i++) {
+      const needW = colW;
+      const needH = ih;
+      if (!seqPreviewBuffers[i] || seqPreviewBuffers[i].width !== needW || seqPreviewBuffers[i].height !== needH) {
+        try { if (seqPreviewBuffers[i] && seqPreviewBuffers[i].remove) seqPreviewBuffers[i].remove(); } catch (e) {}
+        seqPreviewBuffers[i] = createGraphics(needW, needH);
+        try { if (typeof seqPreviewBuffers[i].pixelDensity === 'function') seqPreviewBuffers[i].pixelDensity(window._ecg_dpr || 1); } catch (e) {}
+      }
+    }
+    // For each column, draw the preset's ECG into its buffer and blit
+    for (let i = 0; i < n; i++) {
+      const name = presetSequence[i];
+      const presetObj = (allPresets && allPresets[name]) ? allPresets[name] : null;
+      const waveform = presetObj && presetObj.waveform ? presetObj.waveform : null;
+      const buf = seqPreviewBuffers[i];
+      if (!buf) continue;
+      // Draw using waveform override to avoid mutating global state
+      applyWaveformTemporarily(waveform, () => { try { drawSingleLeadTo(buf, (waveform && waveform.heartRate) ? waveform.heartRate : heartRate); } catch (e) { console.warn('drawSingleLeadTo preview error', e); } });
+      // Blit into main canvas at proper x offset
+      image(buf, ix + i * colW, iy);
+      // separator line
+      stroke(180); strokeWeight(1); line(ix + (i+1)*colW, iy + 6, ix + (i+1)*colW, iy + ih - 6);
+      // label the preset name
+      noStroke(); fill(0); textSize(12); textAlign(LEFT, TOP);
+      const label = name || ('Preset ' + (i+1));
+      text(label, ix + i * colW + 6, iy + 6);
+    }
+  } catch (e) { console.warn('drawSequenceOnRight error', e); }
 }
 
 // Draw the transverse vessel inside the small DOM canvas
