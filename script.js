@@ -210,6 +210,68 @@ function _getAllPresets() {
   } catch (e) { return {}; }
 }
 
+// Preset sequence runner state
+let presetSequence = [];
+let presetSequenceIndex = 0;
+let presetSequenceTimer = null;
+let presetSequencePlaying = false;
+let presetSequenceLoop = false;
+let presetSequenceDelayMs = 2000; // default delay between presets
+
+function refreshPresetSequenceUI() {
+  try {
+    const seqHolder = document.getElementById('presetSequenceHolder');
+    if (!seqHolder) return;
+    seqHolder.innerHTML = '';
+    presetSequence.forEach((name, idx) => {
+      const row = document.createElement('div'); row.style.display='flex'; row.style.alignItems='center'; row.style.gap='6px';
+      const lbl = document.createElement('div'); lbl.textContent = String(idx+1) + '. ' + name; lbl.style.flex='1';
+      const up = document.createElement('button'); up.textContent='↑'; up.onclick = () => { if (idx<=0) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx-1,0,a); refreshPresetSequenceUI(); };
+      const down = document.createElement('button'); down.textContent='↓'; down.onclick = () => { if (idx>=presetSequence.length-1) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx+1,0,a); refreshPresetSequenceUI(); };
+      const del = document.createElement('button'); del.textContent='Delete'; del.onclick = () => { presetSequence.splice(idx,1); refreshPresetSequenceUI(); };
+      row.appendChild(lbl); row.appendChild(up); row.appendChild(down); row.appendChild(del);
+      seqHolder.appendChild(row);
+    });
+    // highlight current
+    Array.from(seqHolder.children).forEach((c,i)=>{ c.style.background = (i===presetSequenceIndex && presetSequencePlaying) ? 'rgba(200,255,200,0.6)' : ''; });
+  } catch (e) {}
+}
+
+function startPresetSequence() {
+  if (!presetSequence || presetSequence.length === 0) { alert('Sequence is empty'); return; }
+  if (presetSequencePlaying) return;
+  presetSequencePlaying = true;
+  presetSequenceIndex = Math.max(0, Math.min(presetSequenceIndex, presetSequence.length-1));
+  playCurrentAndScheduleNext();
+  refreshPresetSequenceUI();
+}
+
+function stopPresetSequence() {
+  presetSequencePlaying = false;
+  if (presetSequenceTimer) { clearTimeout(presetSequenceTimer); presetSequenceTimer = null; }
+  refreshPresetSequenceUI();
+}
+
+function playCurrentAndScheduleNext() {
+  try {
+    if (!presetSequencePlaying) return;
+    const name = presetSequence[presetSequenceIndex];
+    if (!name) { stopPresetSequence(); return; }
+    // load without confirmation
+    loadNamedPreset(name);
+    // schedule next
+    presetSequenceTimer = setTimeout(() => {
+      presetSequenceIndex++;
+      if (presetSequenceIndex >= presetSequence.length) {
+        if (presetSequenceLoop) presetSequenceIndex = 0; else { stopPresetSequence(); return; }
+      }
+      playCurrentAndScheduleNext();
+    }, Math.max(200, Number(presetSequenceDelayMs) || 2000));
+    refreshPresetSequenceUI();
+  } catch (e) { console.warn('play sequence error', e); stopPresetSequence(); }
+}
+
+
 // Populate the preset select dropdown from localStorage (global helper)
 function refreshPresetSelectGlobal() {
   try {
@@ -775,6 +837,23 @@ function createConductionPanel() {
   const delPresetBtn = document.createElement('button'); delPresetBtn.textContent = 'Delete Preset'; delPresetBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset to delete'); return; } if (!confirm('Delete preset "' + v + '"?')) return; if (deleteNamedPreset(v)) { alert('Deleted: ' + v); refreshPresetSelectGlobal(); } else { alert('Failed to delete: ' + v); } };
   presetsRow.appendChild(presetNameInput); presetsRow.appendChild(savePresetBtn); presetsRow.appendChild(presetSelect); presetsRow.appendChild(loadPresetBtn); presetsRow.appendChild(delPresetBtn);
   conductionPanelDiv.appendChild(presetsRow);
+
+  // Sequence runner UI
+  const seqRow = document.createElement('div'); seqRow.style.display='flex'; seqRow.style.flexDirection='column'; seqRow.style.gap='6px'; seqRow.style.marginTop='8px';
+  const seqControls = document.createElement('div'); seqControls.style.display='flex'; seqControls.style.alignItems='center'; seqControls.style.gap='6px';
+  const addSeqBtn = document.createElement('button'); addSeqBtn.textContent = 'Add to Sequence'; addSeqBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset to add'); return; } presetSequence.push(v); refreshPresetSequenceUI(); };
+  const playSeqBtn = document.createElement('button'); playSeqBtn.textContent = 'Play Sequence'; playSeqBtn.onclick = () => { if (!presetSequencePlaying) startPresetSequence(); else stopPresetSequence(); playSeqBtn.textContent = presetSequencePlaying ? 'Pause Sequence' : 'Play Sequence'; };
+  const stopSeqBtn = document.createElement('button'); stopSeqBtn.textContent = 'Stop'; stopSeqBtn.onclick = () => { stopPresetSequence(); playSeqBtn.textContent = 'Play Sequence'; };
+  const loopChk = document.createElement('input'); loopChk.type = 'checkbox'; loopChk.onchange = (e) => { presetSequenceLoop = !!e.target.checked; };
+  const loopLab = document.createElement('div'); loopLab.textContent = 'Loop'; loopLab.style.marginRight = '6px';
+  const delayIn = document.createElement('input'); delayIn.type = 'number'; delayIn.min = '200'; delayIn.step = '100'; delayIn.value = String(presetSequenceDelayMs); delayIn.style.width='100px'; delayIn.onchange = () => { presetSequenceDelayMs = Math.max(200, Number(delayIn.value) || 2000); };
+  const delayLab = document.createElement('div'); delayLab.textContent = 'Delay ms'; delayLab.style.marginLeft = '6px';
+  seqControls.appendChild(addSeqBtn); seqControls.appendChild(playSeqBtn); seqControls.appendChild(stopSeqBtn); seqControls.appendChild(loopLab); seqControls.appendChild(loopChk); seqControls.appendChild(delayLab); seqControls.appendChild(delayIn);
+  const seqHolder = document.createElement('div'); seqHolder.id = 'presetSequenceHolder'; seqHolder.style.display='flex'; seqHolder.style.flexDirection='column'; seqHolder.style.gap='4px'; seqHolder.style.maxHeight='160px'; seqHolder.style.overflow='auto'; seqHolder.style.border = '1px solid rgba(0,0,0,0.06)'; seqHolder.style.padding = '6px';
+  seqRow.appendChild(seqControls); seqRow.appendChild(seqHolder);
+  conductionPanelDiv.appendChild(seqRow);
+  // ensure sequence UI initial state
+  try { refreshPresetSequenceUI(); } catch (e) {}
 
   function refreshPresetSelect() {
     try {
