@@ -217,6 +217,11 @@ let presetSequenceTimer = null;
 let presetSequencePlaying = false;
 let presetSequenceLoop = false;
 let presetSequenceDelayMs = 2000; // default delay between presets
+// If true, sequence runner waits for the ECG position indicator to reach
+// the end of the window before advancing to the next preset.
+let presetSequenceWaitingForEcgEnd = false;
+// last observed beat fraction (0..1) used to detect wrap-around (end of window)
+let lastEcgBeatFrac = 0;
 
 function refreshPresetSequenceUI() {
   try {
@@ -259,14 +264,11 @@ function playCurrentAndScheduleNext() {
     if (!name) { stopPresetSequence(); return; }
     // load without confirmation
     loadNamedPreset(name);
-    // schedule next
-    presetSequenceTimer = setTimeout(() => {
-      presetSequenceIndex++;
-      if (presetSequenceIndex >= presetSequence.length) {
-        if (presetSequenceLoop) presetSequenceIndex = 0; else { stopPresetSequence(); return; }
-      }
-      playCurrentAndScheduleNext();
-    }, Math.max(200, Number(presetSequenceDelayMs) || 2000));
+    // Instead of using a fixed delay, wait until the ECG position indicator
+    // reaches the end of the visible window (detected in draw()). Set a
+    // waiting flag so draw() knows to advance the sequence on beat wrap.
+    try { if (presetSequenceTimer) { clearTimeout(presetSequenceTimer); presetSequenceTimer = null; } } catch (e) {}
+    presetSequenceWaitingForEcgEnd = true;
     refreshPresetSequenceUI();
   } catch (e) { console.warn('play sequence error', e); stopPresetSequence(); }
 }
@@ -1955,6 +1957,27 @@ function draw() {
         // Calculate time within current beat, mapped to t_rel range
         const beatFrac = (nowMs / duration) % 1.0;
         const beatTime = tRelStart + beatFrac * tRelRange;
+        // Sequence runner: if waiting for ECG end, detect beat wrap (end of
+        // visible window) by observing when the beat fraction wraps from near
+        // 1 back to 0. When detected, advance the sequence immediately.
+        try {
+          const currentBeatFrac = Number(beatFrac) || 0;
+          if (presetSequenceWaitingForEcgEnd && presetSequencePlaying) {
+            if (currentBeatFrac < lastEcgBeatFrac) {
+              // Wrapped: advance to next preset
+              presetSequenceWaitingForEcgEnd = false;
+              presetSequenceIndex++;
+              if (presetSequenceIndex >= presetSequence.length) {
+                if (presetSequenceLoop) presetSequenceIndex = 0; else { stopPresetSequence(); }
+              }
+              if (presetSequencePlaying) {
+                // Load next preset and continue waiting for next wrap
+                playCurrentAndScheduleNext();
+              }
+            }
+          }
+          lastEcgBeatFrac = currentBeatFrac;
+        } catch (e) { /* ignore sequence timing errors */ }
         for (let i = 0; i <= sampleCount; i++) {
           const t_rel = (i / sampleCount) * tRelRange + tRelStart;
           const v = singleBeatSignal(t_rel, tWaveScale, stOffset, {p:1,q:1,r:1,s:1,t:1});
