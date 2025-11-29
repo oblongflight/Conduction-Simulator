@@ -3425,6 +3425,54 @@ function applyWaveformTemporarily(waveform, fn) {
   }
 }
 
+// Draw a single static beat (no moving indicator) into graphics buffer `g`.
+// This samples a single canonical beat across the width and renders it.
+function drawStaticSingleLeadTo(g, hr) {
+  try {
+    g.push();
+    g.clear();
+    // grid
+    g.noFill(); g.stroke(230); g.strokeWeight(1);
+    const step = 20;
+    for (let x = 0; x <= g.width; x += step) g.line(x, 0, x, g.height);
+    for (let y = 0; y <= g.height; y += step) g.line(0, y, g.width, y);
+
+    const padLeft = 6, padRight = 6, padTop = 22, padBottom = 8;
+    const W = Math.max(2, g.width - padLeft - padRight);
+    const H = Math.max(8, g.height - padTop - padBottom);
+    const centerY = padTop + H * 0.5;
+    const amp = H * 0.09;
+
+    // canonical sampling window used elsewhere
+    const baseShift = -0.15;
+    const canonicalStart = -0.2 + baseShift;
+    const canonicalEnd = 0.6 - 0.15;
+    const tRelStart = canonicalStart + (typeof ecgWaveShift === 'number' ? ecgWaveShift : 0);
+    const tRelRange = canonicalEnd - canonicalStart;
+
+    g.stroke(20, 80, 20); g.strokeWeight(1);
+    let prevX = null, prevY = null;
+    for (let ix = 0; ix <= W; ix++) {
+      const frac = ix / W;
+      const t_rel = tRelStart + frac * tRelRange;
+      // Use current waveform globals (possibly overridden via applyWaveformTemporarily)
+      const eff = mapIschemiaToEff(atheroPercent);
+      const v = singleBeatSignal(t_rel, eff.effT, stOffset, {p:1,q:1,r:1,s:1,t:1});
+      const x = padLeft + ix;
+      const y = centerY - v * amp;
+      const xa = Math.round(x * (window._ecg_dpr || 1)) / (window._ecg_dpr || 1);
+      const ya = Math.round(y * (window._ecg_dpr || 1)) / (window._ecg_dpr || 1);
+      if (prevX !== null) g.line(prevX, prevY, xa, ya);
+      prevX = xa; prevY = ya;
+    }
+
+    // HUD label
+    g.noStroke(); g.fill(0); g.textSize(12); g.textAlign(LEFT, TOP);
+    g.text('HR: ' + Math.round(hr) + ' bpm', 8, 6);
+    g.pop();
+  } catch (e) { console.warn('drawStaticSingleLeadTo error', e); }
+}
+
 // Draw up to MAX_SEQUENCE_DISPLAY full ECG waveforms side-by-side into the
 // right-half area defined by (ix,iy,iw,ih). Uses presetSequence array to
 // determine which presets to draw and falls back to current waveform when
@@ -3451,8 +3499,8 @@ function drawSequenceOnRight(ix, iy, iw, ih) {
       const waveform = presetObj && presetObj.waveform ? presetObj.waveform : null;
       const buf = seqPreviewBuffers[i];
       if (!buf) continue;
-      // Draw using waveform override to avoid mutating global state
-      applyWaveformTemporarily(waveform, () => { try { drawSingleLeadTo(buf, (waveform && waveform.heartRate) ? waveform.heartRate : heartRate); } catch (e) { console.warn('drawSingleLeadTo preview error', e); } });
+      // Draw a STATIC single-beat snapshot using the preset waveform (no moving indicator)
+      applyWaveformTemporarily(waveform, () => { try { drawStaticSingleLeadTo(buf, (waveform && waveform.heartRate) ? waveform.heartRate : heartRate); } catch (e) { console.warn('drawStaticSingleLeadTo preview error', e); } });
       // Blit into main canvas at proper x offset
       image(buf, ix + i * colW, iy);
       // separator line
