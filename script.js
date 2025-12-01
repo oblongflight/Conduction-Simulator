@@ -518,6 +518,36 @@ let presetSequenceIndex = 0;
 let presetSequenceTimer = null;
 let presetSequencePlaying = false;
 let presetSequenceLoop = false;
+
+// Conduction pacer (constant pulsing) state
+let conductionPacerTimer = null;
+let conductionPacerHz = 2; // default 2 Hz
+let conductionPacerRunning = false;
+let conductionPacerEventKey = 'P_start';
+
+function startConductionPacer(hz, eventKey) {
+  try {
+    if (conductionPacerTimer) clearInterval(conductionPacerTimer);
+    conductionPacerHz = Number(hz) || 2;
+    conductionPacerEventKey = eventKey || 'P_start';
+    const intervalMs = Math.round(1000 / conductionPacerHz);
+    conductionPacerTimer = setInterval(() => {
+      try { triggerEcgEvent(conductionPacerEventKey); } catch (e) { console.warn('pacer trigger failed', e); }
+    }, intervalMs);
+    conductionPacerRunning = true;
+    console.log('Conduction pacer started', conductionPacerHz, 'Hz, event', conductionPacerEventKey);
+    return true;
+  } catch (e) { console.warn('startConductionPacer error', e); return false; }
+}
+
+function stopConductionPacer() {
+  try {
+    if (conductionPacerTimer) { clearInterval(conductionPacerTimer); conductionPacerTimer = null; }
+    conductionPacerRunning = false;
+    console.log('Conduction pacer stopped');
+    return true;
+  } catch (e) { console.warn('stopConductionPacer error', e); return false; }
+}
 let presetSequenceDelayMs = 2000; // default delay between presets
 // If true, sequence runner waits for the ECG position indicator to reach
 // the end of the window before advancing to the next preset.
@@ -1166,6 +1196,28 @@ function createConductionPanel() {
     saveEcgTriggering();
   };
   btnRow.appendChild(ecgToggleBtn);
+  // Conduction pacer controls: allow constant pulsing at 2Hz or 5Hz for a chosen ECG event
+  const pacerEventSel = document.createElement('select'); pacerEventSel.id = 'pacerEventSel'; pacerEventSel.style.marginLeft = '8px';
+  evs.forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'Pacer event...' : v; pacerEventSel.appendChild(o); });
+  pacerEventSel.value = 'P_start';
+  const pacerRateSel = document.createElement('select'); pacerRateSel.id = 'pacerRateSel';
+  const r2 = document.createElement('option'); r2.value = '2'; r2.text = '2 Hz'; pacerRateSel.appendChild(r2);
+  const r5 = document.createElement('option'); r5.value = '5'; r5.text = '5 Hz'; pacerRateSel.appendChild(r5);
+  pacerRateSel.value = String(conductionPacerHz || '2');
+  const pacerBtn = document.createElement('button'); pacerBtn.id = 'pacerBtn'; pacerBtn.textContent = conductionPacerRunning ? 'Stop Pulse' : 'Start Pulse';
+  pacerBtn.title = 'Start/Stop constant pulsing at selected rate';
+  pacerBtn.onclick = () => {
+    try {
+      if (!conductionPacerRunning) {
+        startConductionPacer(Number(pacerRateSel.value) || 2, pacerEventSel.value || 'P_start');
+        pacerBtn.textContent = 'Stop Pulse';
+      } else {
+        stopConductionPacer();
+        pacerBtn.textContent = 'Start Pulse';
+      }
+    } catch (e) { console.warn('pacer control error', e); }
+  };
+  btnRow.appendChild(pacerEventSel); btnRow.appendChild(pacerRateSel); btnRow.appendChild(pacerBtn);
   // removed explicit step controls (we'll keep ordering via up/down in the list below)
 
   // Export / Import controls
@@ -1512,6 +1564,23 @@ function openConductionWindow() {
 
           // checkbox toggle to show sequence on right: sync to main state
           const showChk = sel('#showSequenceOnRightChk'); if (showChk) showChk.onchange = function(e) { try { main.showSequenceOnRight = !!e.target.checked; main.seqPreviewNeedsUpdate = true; } catch (er) { console.warn('popup->main showSequenceOnRight failed', er); } };
+          // Pacer controls in popup should call into main to start/stop the pacer
+          try {
+            const pacerBtn = sel('#pacerBtn'); const pacerRate = sel('#pacerRateSel'); const pacerEvent = sel('#pacerEventSel');
+            if (pacerBtn) {
+              pacerBtn.onclick = function() {
+                try {
+                  if (!main.conductionPacerRunning) {
+                    main.startConductionPacer(Number(pacerRate ? pacerRate.value : 2) || 2, pacerEvent ? pacerEvent.value : 'P_start');
+                    pacerBtn.textContent = 'Stop Pulse';
+                  } else {
+                    main.stopConductionPacer();
+                    pacerBtn.textContent = 'Start Pulse';
+                  }
+                } catch (e) { console.warn('popup->main pacer failed', e); }
+              };
+            }
+          } catch (e) { /* ignore pacer binding errors in popup */ }
         } catch (e) { console.warn('Failed to bind popup handlers', e); }
     } catch (e) {
       console.warn('Failed to populate conduction popout window', e);
@@ -1587,6 +1656,21 @@ function dockConductionPanel() {
             const seqHolderEl = document.getElementById('presetSequenceHolder');
             if (seqHolderEl) { seqHolderEl.style.boxShadow = '0 0 8px rgba(0,150,0,0.25)'; setTimeout(() => { try { seqHolderEl.style.boxShadow = ''; } catch (e) {} }, 300); }
           } catch (e) { console.warn('add to sequence (docked) failed', e); alert('Failed to add preset to sequence: ' + String(e)); }
+        };
+      }
+      // Reattach pacer controls for docked panel
+      const pacerBtnDock = sel('#pacerBtn'); const pacerRateDock = sel('#pacerRateSel'); const pacerEventDock = sel('#pacerEventSel');
+      if (pacerBtnDock) {
+        pacerBtnDock.onclick = function() {
+          try {
+            if (!conductionPacerRunning) {
+              startConductionPacer(Number(pacerRateDock ? pacerRateDock.value : 2) || 2, pacerEventDock ? pacerEventDock.value : 'P_start');
+              pacerBtnDock.textContent = 'Stop Pulse';
+            } else {
+              stopConductionPacer();
+              pacerBtnDock.textContent = 'Start Pulse';
+            }
+          } catch (e) { console.warn('pacer (docked) handler failed', e); }
         };
       }
     } catch (e) { console.warn('reattach dock handlers failed', e); }
