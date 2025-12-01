@@ -2,16 +2,204 @@
 let timeDilation = 1.0;
 const TIME_DILATION_KEY = 'ecg.timeDilation.v1';
 function saveTimeDilation() {
-  try { localStorage.setItem(TIME_DILATION_KEY, String(timeDilation)); } catch (e) {}
+  try { storageSetItem(TIME_DILATION_KEY, String(timeDilation)); } catch (e) {}
 }
 function loadTimeDilation() {
   try {
-    const raw = localStorage.getItem(TIME_DILATION_KEY);
+    const raw = storageGetItem(TIME_DILATION_KEY);
     if (raw !== null) {
       const v = parseFloat(raw);
       if (!Number.isNaN(v) && v > 0) timeDilation = v;
     }
   } catch (e) {}
+}
+
+// STORAGE ABSTRACTION: prefer a JSON file in the sketch folder (via
+// File System Access API) but fall back to localStorage. We keep an
+// in-memory cache `window._sketchDataCache` so reads are synchronous.
+// Exposed helpers:
+//  - storageSetItem(key, stringValue)
+//  - storageGetItem(key) -> string|null
+//  - promptOpenDataFile() / promptSaveAsDataFile() to let the user pick a file
+// Note: writing to a file requires a user gesture in the browser.
+window._sketchDataCache = window._sketchDataCache || {};
+window._sketchDataHandle = window._sketchDataHandle || null;
+
+function storageSetItem(key, valueStr) {
+  try {
+    // update cache
+    try { window._sketchDataCache = window._sketchDataCache || {}; window._sketchDataCache[key] = valueStr; } catch (e) {}
+    // If we have a writable file handle, write the whole cache asynchronously.
+    if (window._sketchDataHandle && window._sketchDataHandle.createWritable) {
+      (async () => {
+        try {
+          const writable = await window._sketchDataHandle.createWritable();
+          await writable.write(JSON.stringify(window._sketchDataCache || {}, null, 2));
+          await writable.close();
+        } catch (e) { console.warn('write to sketch data file failed', e); }
+      })();
+    } else {
+      // fallback: write the single item to localStorage so data remains available
+      try { localStorage.setItem(key, valueStr); } catch (e) {}
+    }
+  } catch (e) { console.warn('storageSetItem error', e); }
+}
+
+function storageGetItem(key) {
+  try {
+    if (window._sketchDataCache && (key in window._sketchDataCache)) return window._sketchDataCache[key];
+    try { return localStorage.getItem(key); } catch (e) { return null; }
+  } catch (e) { return null; }
+}
+
+function storageRemoveItem(key) {
+  try {
+    try { if (window._sketchDataCache && (key in window._sketchDataCache)) { delete window._sketchDataCache[key]; } } catch (e) {}
+    if (window._sketchDataHandle && window._sketchDataHandle.createWritable) {
+      (async () => {
+        try {
+          const writable = await window._sketchDataHandle.createWritable();
+          await writable.write(JSON.stringify(window._sketchDataCache || {}, null, 2));
+          await writable.close();
+        } catch (e) { console.warn('write during remove failed', e); }
+      })();
+    } else {
+      try { localStorage.removeItem(key); } catch (e) {}
+    }
+  } catch (e) { console.warn('storageRemoveItem error', e); }
+}
+
+async function _loadFromFileHandle(handle) {
+  try {
+    window._sketchDataHandle = handle;
+    const file = await handle.getFile();
+    const txt = await file.text();
+    const parsed = JSON.parse(txt || '{}');
+    // normalize to string values like localStorage
+    window._sketchDataCache = window._sketchDataCache || {};
+    Object.keys(parsed).forEach(k => { try { window._sketchDataCache[k] = typeof parsed[k] === 'string' ? parsed[k] : JSON.stringify(parsed[k]); } catch (e) {} });
+    return true;
+  } catch (e) { console.warn('loadFromFileHandle failed', e); return false; }
+}
+
+function promptOpenDataFile() {
+  if (!window.showOpenFilePicker) { alert('Open-file not supported in this browser.'); return; }
+  (async () => {
+    try {
+      const [handle] = await window.showOpenFilePicker({ types: [{ description: 'Sketch data', accept: { 'application/json': ['.json'] } }], multiple: false });
+      const ok = await _loadFromFileHandle(handle);
+      if (ok) alert('Sketch data loaded from file.');
+    } catch (e) { console.warn('open data file canceled/failed', e); }
+  })();
+}
+
+function promptSaveAsDataFile() {
+  if (!window.showSaveFilePicker) { alert('Save-as not supported in this browser. A download will be triggered instead.');
+    // fallback: trigger download of current cache
+    const blob = new Blob([JSON.stringify(window._sketchDataCache || {}, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'sketch-data.json'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); return; }
+  (async () => {
+    try {
+      const handle = await window.showSaveFilePicker({ suggestedName: 'sketch-data.json', types: [{ description: 'Sketch data', accept: { 'application/json': ['.json'] } }] });
+      window._sketchDataHandle = handle;
+      const writable = await handle.createWritable();
+      await writable.write(JSON.stringify(window._sketchDataCache || {}, null, 2));
+      await writable.close();
+      alert('Sketch data saved to file.');
+    } catch (e) { console.warn('save-as canceled/failed', e); }
+  })();
+}
+
+// Small on-screen controls so users can pick/save the sketch data file.
+function _createDataFileControls() {
+  try {
+    // remove any previously injected highlight style so buttons don't pulse
+    try {
+      const existing = document.getElementById('ccs-highlight-style');
+      if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    } catch (e) {}
+
+    const div = document.createElement('div');
+    div.style.position = 'fixed'; div.style.left = '12px'; div.style.bottom = '12px'; div.style.zIndex = '9999'; div.style.background = 'rgba(255,255,255,0.9)'; div.style.border = '1px solid rgba(0,0,0,0.08)'; div.style.padding = '6px'; div.style.borderRadius = '6px'; div.style.fontSize = '12px'; div.style.boxShadow = '0 2px 8px rgba(0,0,0,0.08)';
+    const open = document.createElement('button'); open.textContent = 'Open data file'; open.style.marginRight = '6px'; open.onclick = promptOpenDataFile;
+    const save = document.createElement('button'); save.textContent = 'Save data file'; save.style.marginRight = '6px'; save.onclick = promptSaveAsDataFile;
+    const newShapeBtn = document.createElement('button'); newShapeBtn.textContent = 'New Shape'; newShapeBtn.style.marginRight = '6px'; newShapeBtn.onclick = () => { try { createConductionItem('shape'); refreshConductionPanel(); highlightConductionPanel(2000); } catch (e) { console.warn('create shape failed', e); } };
+    const newPathBtn = document.createElement('button'); newPathBtn.textContent = 'New Path'; newPathBtn.style.marginRight = '6px'; newPathBtn.onclick = () => { try { createConductionItem('path'); refreshConductionPanel(); highlightConductionPanel(2000); } catch (e) { console.warn('create path failed', e); } };
+    const importBtn = document.createElement('button'); importBtn.textContent = 'Import CCS'; importBtn.style.marginRight = '6px'; importBtn.onclick = () => { promptImportCcsComponents(); };
+    const status = document.createElement('span'); status.textContent = 'Data: local'; status.style.color = '#444';
+    div.appendChild(open); div.appendChild(save); div.appendChild(newShapeBtn); div.appendChild(newPathBtn); div.appendChild(importBtn); div.appendChild(status);
+    document.body.appendChild(div);
+    window._sketchDataStatusSpan = status;
+    // update status depending on whether a handle is present
+    setInterval(() => { try { if (window._sketchDataHandle) window._sketchDataStatusSpan.textContent = 'Data: file'; else window._sketchDataStatusSpan.textContent = 'Data: local'; } catch (e) {} }, 1000);
+    // set descriptive titles for accessibility only
+    try {
+      newShapeBtn.title = 'Create a new conduction Shape';
+      newPathBtn.title = 'Create a new conduction Path';
+      importBtn.title = 'Import shapes from ccs_components.json';
+    } catch (e) {}
+  } catch (e) { /* ignore UI creation failures */ }
+}
+
+setTimeout(() => { try { _createDataFileControls(); } catch (e) {} }, 1200);
+
+// Import CCS components JSON (from `ccs_components.json` in the sketch folder)
+async function importCcsComponents() {
+  try {
+    // Try fetching the file relative to the sketch root
+    const resp = await fetch('ccs_components.json');
+    if (!resp.ok) throw new Error('Fetch failed: ' + resp.status + ' ' + resp.statusText);
+    const parsed = await resp.json();
+    if (!parsed || typeof parsed !== 'object') { alert('CCS components file malformed'); return null; }
+    const comps = parsed.components || parsed.components || {};
+    const items = [];
+    let counter = 0;
+    Object.keys(comps).forEach((compName) => {
+      const comp = comps[compName] || {};
+      const color = comp.color || '#00aaee';
+      const shapes = Array.isArray(comp.shapes) ? comp.shapes : [];
+      shapes.forEach((shape, sidx) => {
+        const pts = Array.isArray(shape.points) ? shape.points.map(p => ({ x: Number(p.x) || 0, y: Number(p.y) || 0 })) : [];
+        const it = {
+          id: Date.now() + (counter++),
+          name: compName + (shapes.length > 1 ? (' #' + (sidx + 1)) : ''),
+          type: 'shape',
+          points: pts,
+          color: color,
+          fill: false,
+          closed: !!(shape.type === 'oval' || shape.closed),
+          mode: 'sequential',
+          durationMs: 1200,
+          step: conductionItems.length + items.length,
+          rampUpMs: 200,
+          sustainMs: 800,
+          rampDownMs: 200,
+          durationSource: null,
+          rampUpSource: null,
+          sustainSource: null,
+          rampDownSource: null,
+          startMode: 'after_previous',
+          ecgEvent: '',
+          startOffsetMs: 0,
+          playbackStartTime: 0
+        };
+        items.push(it);
+      });
+    });
+    return items;
+  } catch (e) { console.warn('importCcsComponents error', e); alert('Import failed: ' + String(e)); return null; }
+}
+
+function promptImportCcsComponents() {
+  (async () => {
+    try {
+      const items = await importCcsComponents();
+      if (!items) return;
+      // delegate to existing handler which will ask replace/merge
+      handleImportedConduction(items);
+    } catch (e) { console.warn('promptImportCcsComponents failed', e); }
+  })();
 }
 
 // Pause / time-offset helpers for ECG and Conduction animations
@@ -58,6 +246,8 @@ let timeWindow = 10.0; // seconds shown across the canvas
 let ecgWaveShift = 0.0;
 // Whether overlay bands reflect dilated playback durations
 let overlayUsesDilation = true;
+// Whether to show conduction overlay on the CCS/ECG (can be toggled)
+let showConductionOverlay = true;
 
 // Adjustable waveform parameters (controlled by sliders)
 let tWaveScale = 1.0; // multiplier for T wave amplitude (can be negative)
@@ -139,9 +329,10 @@ function saveEcgWaveformSettings() {
       gT: gT,
       prDur: prDur,
       ecgWaveShift: ecgWaveShift,
-      overlayUsesDilation: !!overlayUsesDilation
+      overlayUsesDilation: !!overlayUsesDilation,
+      showConductionOverlay: !!showConductionOverlay
     };
-    localStorage.setItem(ECG_WAVEFORM_KEY, JSON.stringify(payload));
+    storageSetItem(ECG_WAVEFORM_KEY, JSON.stringify(payload));
   } catch (e) { console.warn('saveEcgWaveformSettings error', e); }
 }
 
@@ -169,7 +360,7 @@ function highlightConductionPanel(durationMs = 4000) {
 
 function loadEcgWaveformSettings() {
   try {
-    const raw = localStorage.getItem(ECG_WAVEFORM_KEY);
+    const raw = storageGetItem(ECG_WAVEFORM_KEY);
     if (!raw) return;
     const p = JSON.parse(raw);
     if (!p || typeof p !== 'object') return;
@@ -188,6 +379,7 @@ function loadEcgWaveformSettings() {
     if (typeof p.pAmp === 'number') pAmp = p.pAmp;
     if (typeof p.ecgWaveShift === 'number') ecgWaveShift = p.ecgWaveShift;
       if (typeof p.overlayUsesDilation === 'boolean') overlayUsesDilation = p.overlayUsesDilation;
+      if (typeof p.showConductionOverlay === 'boolean') showConductionOverlay = p.showConductionOverlay;
     if (typeof p.qrsWidth === 'number') qrsWidth = p.qrsWidth;
     if (typeof p.qDur === 'number') qDur = p.qDur;
     if (typeof p.rDur === 'number') rDur = p.rDur;
@@ -205,7 +397,7 @@ function loadEcgWaveformSettings() {
 // Preset management: save/load named presets combining waveform + conduction state
 function _getAllPresets() {
   try {
-    const raw = localStorage.getItem(PRESETS_KEY);
+    const raw = storageGetItem(PRESETS_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return {};
@@ -216,7 +408,7 @@ function _getAllPresets() {
 // Sequence preset helpers: store named arrays of preset keys (the sequence)
 function _getAllSequencePresets() {
   try {
-    const raw = localStorage.getItem(SEQUENCE_PRESETS_KEY);
+    const raw = storageGetItem(SEQUENCE_PRESETS_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return {};
@@ -225,7 +417,7 @@ function _getAllSequencePresets() {
 }
 
 function _saveAllSequencePresets(obj) {
-  try { localStorage.setItem(SEQUENCE_PRESETS_KEY, JSON.stringify(obj)); return true; } catch (e) { console.warn('Failed to save sequence presets', e); return false; }
+  try { storageSetItem(SEQUENCE_PRESETS_KEY, JSON.stringify(obj)); return true; } catch (e) { console.warn('Failed to save sequence presets', e); return false; }
 }
 
 function saveNamedSequence(name) {
@@ -279,14 +471,14 @@ function deleteNamedSequence(name) {
 function saveActiveSequence() {
   try {
     const payload = { sequence: Array.isArray(presetSequence) ? presetSequence.slice() : [], index: Number(presetSequenceIndex) || 0, loop: !!presetSequenceLoop };
-    localStorage.setItem(ACTIVE_SEQUENCE_KEY, JSON.stringify(payload));
+    storageSetItem(ACTIVE_SEQUENCE_KEY, JSON.stringify(payload));
     return true;
   } catch (e) { console.warn('saveActiveSequence error', e); return false; }
 }
 
 function loadActiveSequence() {
   try {
-    const raw = localStorage.getItem(ACTIVE_SEQUENCE_KEY);
+    const raw = storageGetItem(ACTIVE_SEQUENCE_KEY);
     if (!raw) return false;
     const p = JSON.parse(raw);
     if (!p || typeof p !== 'object') return false;
@@ -299,7 +491,7 @@ function loadActiveSequence() {
 }
 
 function clearActiveSequence() {
-  try { localStorage.removeItem(ACTIVE_SEQUENCE_KEY); return true; } catch (e) { return false; }
+  try { storageRemoveItem(ACTIVE_SEQUENCE_KEY); return true; } catch (e) { return false; }
 }
 
 function refreshSequenceSelectGlobal() {
@@ -421,7 +613,7 @@ function refreshPresetSelectGlobal() {
 }
 
 function _saveAllPresets(obj) {
-  try { localStorage.setItem(PRESETS_KEY, JSON.stringify(obj)); return true; } catch (e) { console.warn('Failed to save presets', e); return false; }
+  try { storageSetItem(PRESETS_KEY, JSON.stringify(obj)); return true; } catch (e) { console.warn('Failed to save presets', e); return false; }
 }
 
 function saveNamedPreset(name) {
@@ -645,13 +837,13 @@ const ECG_TRIGGER_KEY = 'ecg.triggering.v1';
 let ecgTriggeringEnabled = false;
 function saveConductionItems() {
   try {
-    localStorage.setItem(CONDUCTION_ITEMS_KEY, JSON.stringify(conductionItems));
+    storageSetItem(CONDUCTION_ITEMS_KEY, JSON.stringify(conductionItems));
   } catch (e) { console.warn('saveConductionItems error', e); }
 }
 
 function loadConductionItems() {
   try {
-    const raw = localStorage.getItem(CONDUCTION_ITEMS_KEY);
+    const raw = storageGetItem(CONDUCTION_ITEMS_KEY);
     if (!raw) { conductionItems = conductionItems || []; return; }
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) { conductionItems = conductionItems || []; return; }
@@ -685,13 +877,49 @@ function loadConductionItems() {
   } catch (e) { console.warn('loadConductionItems error', e); conductionItems = conductionItems || []; }
 }
 
+// Per-item undo history: keep up to 5 previous snapshots for each item.
+function pushConductionHistory(idx) {
+  try {
+    if (typeof idx !== 'number' || idx < 0 || idx >= conductionItems.length) return;
+    const it = conductionItems[idx];
+    it.__history = it.__history || [];
+    // snapshot current state (exclude __history)
+    const snap = JSON.parse(JSON.stringify(it));
+    delete snap.__history;
+    it.__history.push(snap);
+    if (it.__history.length > 5) it.__history.shift();
+  } catch (e) { console.warn('pushConductionHistory error', e); }
+}
+
+function undoConductionEdit(idx) {
+  try {
+    if (typeof idx !== 'number' || idx < 0 || idx >= conductionItems.length) { alert('Select an item to undo'); return; }
+    const it = conductionItems[idx];
+    if (!it || !Array.isArray(it.__history) || it.__history.length === 0) { alert('Nothing to undo for this item'); return; }
+    const prev = it.__history.pop();
+    // preserve remaining history
+    const remaining = it.__history || [];
+    // restore snapshot (deep clone to avoid shared refs)
+    const restored = JSON.parse(JSON.stringify(prev));
+    restored.__history = remaining;
+    // ensure playbackStartTime reset
+    restored.playbackStartTime = 0;
+    conductionItems[idx] = restored;
+    saveConductionItems();
+    // keep selection on restored item
+    selectedConductionIndex = idx;
+    conductionEditMode = true;
+    refreshConductionPanel();
+  } catch (e) { console.warn('undoConductionEdit error', e); alert('Undo failed: ' + String(e)); }
+}
+
 // Persist / load ECG-triggering toggle
 function saveEcgTriggering() {
-  try { localStorage.setItem(ECG_TRIGGER_KEY, JSON.stringify({ enabled: !!ecgTriggeringEnabled })); } catch (e) { console.warn('saveEcgTriggering error', e); }
+  try { storageSetItem(ECG_TRIGGER_KEY, JSON.stringify({ enabled: !!ecgTriggeringEnabled })); } catch (e) { console.warn('saveEcgTriggering error', e); }
 }
 function loadEcgTriggering() {
   try {
-    const raw = localStorage.getItem(ECG_TRIGGER_KEY);
+    const raw = storageGetItem(ECG_TRIGGER_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
     ecgTriggeringEnabled = !!(parsed && parsed.enabled);
@@ -705,10 +933,11 @@ function createConductionItem(type) {
     id: Date.now() + Math.floor(Math.random() * 1000),
     name: (type === 'shape' ? 'Shape ' : 'Path ') + (idx + 1),
     type: type === 'shape' ? 'shape' : 'path',
-    points: type === 'shape' ? [{ x: 0.3, y: 0.4 }, { x: 0.5, y: 0.2 }, { x: 0.7, y: 0.6 }] : [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.8 }],
+    // start blank: no default points so user adds points explicitly
+    points: [],
     color: '#ff0000',
     fill: false,
-    closed: type === 'shape',
+    closed: false,
     mode: 'sequential',
     durationMs: 1200,
     step: conductionItems.length,
@@ -750,8 +979,9 @@ function refreshConductionPanel() {
       // left: name and color
       const left = document.createElement('div'); left.style.display = 'flex'; left.style.alignItems = 'center'; left.style.gap = '8px'; left.style.flex = '1';
       const nameInp = document.createElement('input'); nameInp.type = 'text'; nameInp.value = it.name || ('Item ' + (idx+1)); nameInp.style.flex = '1';
-      nameInp.onchange = () => { it.name = nameInp.value; saveConductionItems(); };
+      nameInp.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.name = nameInp.value; saveConductionItems(); };
       const color = document.createElement('input'); color.type = 'color'; color.value = it.color || '#ff0000'; color.onchange = () => { it.color = color.value; saveConductionItems(); };
+      color.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.color = color.value; saveConductionItems(); };
       left.appendChild(nameInp); left.appendChild(color);
 
       // middle: playback and editing controls
@@ -773,30 +1003,30 @@ function refreshConductionPanel() {
       // start mode selector
       const startSel = document.createElement('select');
       ['after_previous','on_ecg_event','manual'].forEach(opt => { const o = document.createElement('option'); o.value = opt; o.text = opt.replace('_',' '); if ((it.startMode||'after_previous')===opt) o.selected = true; startSel.appendChild(o); });
-      startSel.onchange = () => { it.startMode = startSel.value; saveConductionItems(); refreshConductionPanel(); };
+      startSel.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.startMode = startSel.value; saveConductionItems(); refreshConductionPanel(); };
       startSel.title = 'Start mode';
       middle.appendChild(startSel);
 
       // if start on ECG event, show event selector
       const evSel = document.createElement('select'); evSel.style.marginLeft = '4px';
       ['', 'P_start','P_end','Q_start','Q_end','R_start','R_end','S_start','S_end','T_start','T_end'].forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'event...' : v; if ((it.ecgEvent||'') === v) o.selected = true; evSel.appendChild(o); });
-      evSel.onchange = () => { it.ecgEvent = evSel.value; saveConductionItems(); };
+      evSel.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.ecgEvent = evSel.value; saveConductionItems(); };
       if ((it.startMode||'after_previous') === 'on_ecg_event') middle.appendChild(evSel);
 
       // duration source selector (manual or ECG feature)
       const durSel = document.createElement('select'); ecgOptions.forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'manual' : v; if ((it.durationSource||'') === v) o.selected = true; durSel.appendChild(o); });
-      durSel.onchange = () => { it.durationSource = durSel.value || null; saveConductionItems(); refreshConductionPanel(); };
+      durSel.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.durationSource = durSel.value || null; saveConductionItems(); refreshConductionPanel(); };
       middle.appendChild(durSel);
 
       // manual duration input (ms) shown when manual selected
       const durInput = document.createElement('input'); durInput.type = 'number'; durInput.min = '10'; durInput.step = '10'; durInput.style.width = '90px'; durInput.value = Number(it.durationMs || 1200);
-      durInput.onchange = () => { it.durationMs = Math.max(10, Number(durInput.value) || 10); saveConductionItems(); };
+      durInput.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.durationMs = Math.max(10, Number(durInput.value) || 10); saveConductionItems(); };
       if (!it.durationSource) middle.appendChild(durInput);
 
       // per-item start offset (ms)
       const offsetIn = document.createElement('input'); offsetIn.type = 'number'; offsetIn.min = '-60000'; offsetIn.step = '10'; offsetIn.style.width = '90px'; offsetIn.value = Number(it.startOffsetMs || 0);
       offsetIn.title = 'Start offset in milliseconds (can be negative)';
-      offsetIn.onchange = () => { it.startOffsetMs = Number(offsetIn.value) || 0; saveConductionItems(); };
+      offsetIn.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.startOffsetMs = Number(offsetIn.value) || 0; saveConductionItems(); };
       const offsetLab = document.createElement('div'); offsetLab.textContent = 'offset ms'; offsetLab.style.fontSize = '11px'; offsetLab.style.marginLeft = '6px';
       middle.appendChild(offsetLab); middle.appendChild(offsetIn);
 
@@ -807,7 +1037,7 @@ function refreshConductionPanel() {
         const makeSourceSelect = (prop) => {
           const sel = document.createElement('select');
           ecgOptions.forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'manual' : v; if ((it[prop]||'') === v) o.selected = true; sel.appendChild(o); });
-          sel.onchange = () => { it[prop] = sel.value || null; saveConductionItems(); refreshConductionPanel(); };
+          sel.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it[prop] = sel.value || null; saveConductionItems(); refreshConductionPanel(); };
           sel.title = prop;
           return sel;
         };
@@ -815,9 +1045,9 @@ function refreshConductionPanel() {
         const susSel = makeSourceSelect('sustainSource');
         const downSel = makeSourceSelect('rampDownSource');
 
-        const upIn = document.createElement('input'); upIn.type='number'; upIn.min='0'; upIn.step='50'; upIn.style.width='80px'; upIn.value = Number(it.rampUpMs || 200); upIn.onchange = () => { it.rampUpMs = Math.max(0, Number(upIn.value) || 0); saveConductionItems(); };
-        const susIn = document.createElement('input'); susIn.type='number'; susIn.min='0'; susIn.step='50'; susIn.style.width='80px'; susIn.value = Number(it.sustainMs || 800); susIn.onchange = () => { it.sustainMs = Math.max(0, Number(susIn.value) || 0); saveConductionItems(); };
-        const downIn = document.createElement('input'); downIn.type='number'; downIn.min='0'; downIn.step='50'; downIn.style.width='80px'; downIn.value = Number(it.rampDownMs || 200); downIn.onchange = () => { it.rampDownMs = Math.max(0, Number(downIn.value) || 0); saveConductionItems(); };
+        const upIn = document.createElement('input'); upIn.type='number'; upIn.min='0'; upIn.step='50'; upIn.style.width='80px'; upIn.value = Number(it.rampUpMs || 200); upIn.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.rampUpMs = Math.max(0, Number(upIn.value) || 0); saveConductionItems(); };
+        const susIn = document.createElement('input'); susIn.type='number'; susIn.min='0'; susIn.step='50'; susIn.style.width='80px'; susIn.value = Number(it.sustainMs || 800); susIn.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.sustainMs = Math.max(0, Number(susIn.value) || 0); saveConductionItems(); };
+        const downIn = document.createElement('input'); downIn.type='number'; downIn.min='0'; downIn.step='50'; downIn.style.width='80px'; downIn.value = Number(it.rampDownMs || 200); downIn.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.rampDownMs = Math.max(0, Number(downIn.value) || 0); saveConductionItems(); };
 
         const labUp = document.createElement('div'); labUp.textContent='Up'; labUp.style.fontSize='11px';
         const labSus = document.createElement('div'); labSus.textContent='Sustain'; labSus.style.fontSize='11px';
@@ -864,7 +1094,7 @@ function createConductionPanel() {
   conductionPanelDiv.style.position = 'fixed';
   conductionPanelDiv.style.right = '10px';
   conductionPanelDiv.style.top = '120px';
-  conductionPanelDiv.style.width = '900px';
+  conductionPanelDiv.style.width = '2000px';
   conductionPanelDiv.style.maxWidth = '80%';
   conductionPanelDiv.style.background = 'rgba(255,255,255,0.98)';
   conductionPanelDiv.style.border = '1px solid rgba(0,0,0,0.12)';
@@ -904,6 +1134,7 @@ function createConductionPanel() {
   const title = document.createElement('div'); title.textContent = 'Conduction Paths/Shapes'; title.style.fontWeight = '700'; title.style.marginBottom = '8px'; conductionPanelDiv.appendChild(title);
 
   const btnRow = document.createElement('div'); btnRow.style.display='flex'; btnRow.style.gap='6px'; btnRow.style.marginBottom='8px';
+  btnRow.style.flexWrap = 'wrap';
   const addPathBtn = document.createElement('button'); addPathBtn.textContent = 'Add Path'; addPathBtn.onclick = () => { createConductionItem('path'); };
   const addShapeBtn = document.createElement('button'); addShapeBtn.textContent = 'Add Shape'; addShapeBtn.onclick = () => { createConductionItem('shape'); };
   // Removed path/point constructor controls - simplified UI (soundboard style)
@@ -914,6 +1145,8 @@ function createConductionPanel() {
   evs.forEach(v => { const o = document.createElement('option'); o.value = v; o.text = v === '' ? 'Select event...' : v; testSel.appendChild(o); });
   const triggerBtn = document.createElement('button'); triggerBtn.textContent = 'Trigger ECG Event'; triggerBtn.onclick = () => { try { triggerEcgEvent(testSel.value); } catch (e) { console.warn('trigger error', e); } };
   btnRow.appendChild(testSel); btnRow.appendChild(triggerBtn);
+  const undoBtn = document.createElement('button'); undoBtn.textContent = 'Undo'; undoBtn.title = 'Undo last edit for selected item'; undoBtn.onclick = () => { if (selectedConductionIndex < 0) { alert('Select an item to undo'); return; } undoConductionEdit(selectedConductionIndex); };
+  btnRow.appendChild(undoBtn);
   // ECG-triggering toggle: when enabled, ECG crossings will auto-start bound items
   const ecgToggleBtn = document.createElement('button');
   ecgToggleBtn.textContent = ecgTriggeringEnabled ? 'Disable ECG Triggers' : 'Enable ECG Triggers';
@@ -937,7 +1170,7 @@ function createConductionPanel() {
   const impBtn = document.createElement('button'); impBtn.textContent = 'Import From File'; impBtn.title = 'Import conduction items from a JSON file'; impBtn.onclick = () => { importFileInput.click(); };
 
   // Paste area for JSON import
-  const pasteArea = document.createElement('textarea'); pasteArea.placeholder = 'Or paste JSON here to import'; pasteArea.style.width = '320px'; pasteArea.style.height = '56px'; pasteArea.style.marginLeft = '8px';
+  const pasteArea = document.createElement('textarea'); pasteArea.placeholder = 'Or paste JSON here to import'; pasteArea.style.width = '420px'; pasteArea.style.height = '56px'; pasteArea.style.marginLeft = '8px';
   const pasteImpBtn = document.createElement('button'); pasteImpBtn.textContent = 'Import Pasted JSON'; pasteImpBtn.onclick = () => {
     const txt = pasteArea.value && pasteArea.value.trim(); if (!txt) { alert('Paste JSON into the box first'); return; }
     try { const parsed = JSON.parse(txt); handleImportedConduction(parsed); pasteArea.value = ''; } catch (err) { alert('Invalid JSON pasted'); console.warn('paste import error', err); }
@@ -948,6 +1181,7 @@ function createConductionPanel() {
 
   // Presets UI: save/load named disease states (waveform + conduction)
   const presetsRow = document.createElement('div'); presetsRow.style.display = 'flex'; presetsRow.style.alignItems = 'center'; presetsRow.style.gap = '8px'; presetsRow.style.marginTop = '8px';
+  presetsRow.style.flexWrap = 'wrap';
   const presetNameInput = document.createElement('input'); presetNameInput.type = 'text'; presetNameInput.placeholder = 'Preset name (e.g. "MI lateral")'; presetNameInput.style.flex = '1'; presetNameInput.id = 'presetNameInput';
   const savePresetBtn = document.createElement('button'); savePresetBtn.textContent = 'Save Preset';
   savePresetBtn.id = 'savePresetBtn';
@@ -967,6 +1201,7 @@ function createConductionPanel() {
 
   // Sequence runner UI
   const seqRow = document.createElement('div'); seqRow.style.display='flex'; seqRow.style.flexDirection='column'; seqRow.style.gap='6px'; seqRow.style.marginTop='8px';
+  seqRow.style.flexWrap = 'wrap';
   const seqControls = document.createElement('div'); seqControls.style.display='flex'; seqControls.style.alignItems='center'; seqControls.style.gap='6px';
   const addSeqBtn = document.createElement('button'); addSeqBtn.textContent = 'Add to Sequence'; addSeqBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset to add'); return; } presetSequence.push(v); refreshPresetSequenceUI(); };
   addSeqBtn.id = 'addSeqBtn';
@@ -1027,9 +1262,9 @@ function createConductionPanel() {
   // Show constructor panel by default and append to body; panel will host
   // the ECG waveform controls (moved later) so it opens automatically
   conductionPanelDiv.style.display = '';
-  // set a sane default size for the constructor window
-  conductionPanelDiv.style.width = '640px';
-  conductionPanelDiv.style.maxWidth = '90%';
+  // set a sane default size for the constructor window (wider so controls fit)
+  conductionPanelDiv.style.width = '2000px';
+  conductionPanelDiv.style.maxWidth = '96%';
   document.body.appendChild(conductionPanelDiv);
   refreshConductionPanel();
 }
@@ -1294,7 +1529,7 @@ function dockConductionPanel() {
       conductionPanelDiv.style.position = conductionPanelOriginalStyles.position || 'fixed';
       conductionPanelDiv.style.right = conductionPanelOriginalStyles.right || '10px';
       conductionPanelDiv.style.top = conductionPanelOriginalStyles.top || '120px';
-      conductionPanelDiv.style.width = conductionPanelOriginalStyles.width || '900px';
+      conductionPanelDiv.style.width = conductionPanelOriginalStyles.width || '2000px';
       conductionPanelDiv.style.maxWidth = conductionPanelOriginalStyles.maxWidth || '80%';
       conductionPanelDiv.style.zIndex = conductionPanelOriginalStyles.zIndex || 10003;
       conductionPanelDiv.style.padding = conductionPanelOriginalStyles.padding || '10px';
@@ -1353,7 +1588,7 @@ const LEAD_PARAMS_KEY = 'ecg.leadParams.v1';
 function saveLeadParams() {
   try {
     const toSave = leadParams.map(p => ({p: Number(p.p), q: Number(p.q), r: Number(p.r), s: Number(p.s), t: Number(p.t)}));
-    localStorage.setItem(LEAD_PARAMS_KEY, JSON.stringify(toSave));
+    storageSetItem(LEAD_PARAMS_KEY, JSON.stringify(toSave));
   } catch (e) {
     console.warn('Failed to save lead params', e);
   }
@@ -1361,7 +1596,7 @@ function saveLeadParams() {
 
 function loadLeadParams() {
   try {
-    const raw = localStorage.getItem(LEAD_PARAMS_KEY);
+    const raw = storageGetItem(LEAD_PARAMS_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return;
@@ -1392,6 +1627,7 @@ function setup() {
           { id: 'pdurInput', var: 'pDuration' },
           { id: 'hrInput', var: 'heartRate' },
           { id: 'tdurInput', var: 'tDuration' },
+          { id: 'stInput', var: 'stOffset' },
           { id: 'prInput', var: 'prDur' },
           { id: 'qtInput', var: 'qtIntervalMs' }
         ];
@@ -1420,6 +1656,7 @@ function setup() {
     updateSliderValue('tdurInput', tDuration);
     updateSliderValue('prInput', prDur);
     updateSliderValue('qtInput', qtIntervalMs);
+    updateSliderValue('stInput', stOffset);
   try {
     // responsive canvas
     // match the device pixel ratio for crisp rendering when supported
@@ -1457,45 +1694,7 @@ function setup() {
   leadControlsDiv.style.display = 'none';
   document.body.appendChild(leadControlsDiv);
 
-  // Advanced Settings toggle button (shows/hides per-lead controls)
-  const advBtn = document.createElement('button');
-  advBtn.textContent = 'Advanced Settings';
-  advBtn.style.position = 'fixed';
-  advBtn.style.top = '10px';
-  advBtn.style.right = '10px';
-  advBtn.style.zIndex = 10002;
-  advBtn.style.padding = '8px 10px';
-  advBtn.style.fontSize = '13px';
-  advBtn.style.borderRadius = '6px';
-  advBtn.style.border = '1px solid rgba(0,0,0,0.12)';
-  advBtn.style.background = 'white';
-  advBtn.onclick = () => {
-    const isHidden = leadControlsDiv.style.display === 'none';
-    leadControlsDiv.style.display = isHidden ? '' : 'none';
-    advBtn.textContent = isHidden ? 'Hide Advanced' : 'Advanced Settings';
-  };
-  document.body.appendChild(advBtn);
-
-  // View mode toggle button (Single lead <-> 12-lead)
-  const viewToggleBtn = document.createElement('button');
-  viewToggleBtn.textContent = singleLeadView ? 'Switch to 12-lead' : 'Switch to Single Lead';
-  viewToggleBtn.style.position = 'fixed';
-  viewToggleBtn.style.top = '46px';
-  viewToggleBtn.style.right = '10px';
-  viewToggleBtn.style.zIndex = 10002;
-  viewToggleBtn.style.padding = '8px 10px';
-  viewToggleBtn.style.fontSize = '13px';
-  viewToggleBtn.style.borderRadius = '6px';
-  viewToggleBtn.style.border = '1px solid rgba(0,0,0,0.12)';
-  viewToggleBtn.style.background = 'white';
-  viewToggleBtn.onclick = () => {
-    singleLeadView = !singleLeadView;
-    viewToggleBtn.textContent = singleLeadView ? 'Switch to 12-lead' : 'Switch to Single Lead';
-    // hide per-lead overlay when in single-lead mode
-    if (leadControlsDiv) leadControlsDiv.style.display = singleLeadView ? 'none' : 'none';
-    // keep Advanced Settings button behavior separate; user can open per-lead panel when needed
-  };
-  document.body.appendChild(viewToggleBtn);
+  // Advanced/12-lead toggle buttons removed per user request.
 
   // The constructor panel is always visible; removed the hide/show toggle per request.
 
@@ -1623,6 +1822,18 @@ function setup() {
   const tdurLab = document.createElement('div'); tdurLab.textContent = 'T'; tdurLab.style.width = '18px'; tdurRow.appendChild(tdurLab);
   tdurRow.appendChild(tdurInput); tdurRow.appendChild(tdurVal); globalPanel.appendChild(tdurRow);
 
+  // ST elevation/depression slider (signal units)
+  const stRow = document.createElement('div');
+  stRow.style.display = 'flex'; stRow.style.alignItems = 'center'; stRow.style.gap = '8px';
+  const stInput = document.createElement('input');
+  stInput.type = 'range'; stInput.min = '-1.0'; stInput.max = '1.0'; stInput.step = '0.01'; stInput.value = String(stOffset);
+  stInput.id = 'stInput';
+  stInput.style.flex = '1';
+  const stVal = document.createElement('div'); stVal.textContent = String((stOffset || 0).toFixed(2)); stVal.style.width = '56px'; stVal.style.textAlign = 'right';
+  const stLab = document.createElement('div'); stLab.textContent = 'ST'; stLab.style.width = '18px';
+  stInput.oninput = (e) => { stOffset = Number(e.target.value) || 0; stVal.textContent = stOffset.toFixed(2); refreshConductionPanel(); saveEcgWaveformSettings(); };
+  stRow.appendChild(stLab); stRow.appendChild(stInput); stRow.appendChild(stVal); globalPanel.appendChild(stRow);
+
   const prRow = document.createElement('div'); prRow.style.display = 'flex'; prRow.style.alignItems = 'center'; prRow.style.gap = '8px';
   const prInput = document.createElement('input'); prInput.type = 'range'; prInput.min = '0.06'; prInput.max = '0.30'; prInput.step = '0.005'; prInput.value = String(prDur);
   prInput.id = 'prInput';
@@ -1662,6 +1873,21 @@ function setup() {
     const ovLabel = document.createElement('div'); ovLabel.textContent = 'Overlay uses dilation'; ovLabel.style.width = '140px';
     const ovChk = document.createElement('input'); ovChk.type = 'checkbox'; ovChk.checked = !!overlayUsesDilation; ovChk.onchange = (e) => { overlayUsesDilation = !!e.target.checked; saveEcgWaveformSettings(); };
     ovRow.appendChild(ovLabel); ovRow.appendChild(ovChk); globalPanel.appendChild(ovRow);
+    // Button to toggle visibility of the conduction overlay on the ECG/CCS
+    try {
+      const overlayToggleBtn = document.createElement('button');
+      const setOverlayBtnText = () => { overlayToggleBtn.textContent = showConductionOverlay ? 'Hide Overlay' : 'Show Overlay'; };
+      setOverlayBtnText();
+      overlayToggleBtn.style.marginLeft = '8px';
+      overlayToggleBtn.style.padding = '6px 8px';
+      overlayToggleBtn.onclick = () => {
+        showConductionOverlay = !showConductionOverlay;
+        setOverlayBtnText();
+        saveEcgWaveformSettings();
+        try { refreshConductionPanel(); } catch (e) {}
+      };
+      ovRow.appendChild(overlayToggleBtn);
+    } catch (e) { /* ignore */ }
   // Reset time dilation to 1 (user requested) and persist immediately
   try {
     timeDilation = 1.0;
@@ -1755,109 +1981,7 @@ function setup() {
     }
   } catch (e) { document.body.appendChild(globalPanel); }
   // (Time Dilation control moved into the Global panel; inline control removed)
-  // create conduction debug box (placed inside the global control panel)
-  try {
-    conductionDebugDiv = document.createElement('div');
-    conductionDebugDiv.style.padding = '6px 8px';
-    conductionDebugDiv.style.background = 'rgba(255,255,255,0.97)';
-    conductionDebugDiv.style.border = '1px solid rgba(0,0,0,0.06)';
-    conductionDebugDiv.style.borderRadius = '6px';
-    conductionDebugDiv.style.fontSize = '12px';
-    conductionDebugDiv.style.maxWidth = '360px';
-    conductionDebugDiv.style.whiteSpace = 'normal';
-    conductionDebugDiv.textContent = 'Conduction debug: awaiting playback...';
-    // If the conduction constructor panel exists, host the debug box inside it
-    // so it doesn't stick to the left of the main window. Otherwise fall back
-    // to a fixed-position body overlay (legacy behavior).
-    try {
-      const rect = globalPanel.getBoundingClientRect();
-      if (conductionPanelDiv) {
-        conductionDebugDiv.style.position = '';
-        conductionDebugDiv.style.margin = '8px';
-        conductionDebugDiv.style.maxWidth = '100%';
-        conductionDebugDiv.style.zIndex = '';
-        conductionPanelDiv.appendChild(conductionDebugDiv);
-      } else {
-        conductionDebugDiv.style.position = 'fixed';
-        conductionDebugDiv.style.left = String(Math.max(6, Math.round(rect.left))) + 'px';
-        conductionDebugDiv.style.top = String(Math.max(6, Math.round(rect.bottom + 8))) + 'px';
-        conductionDebugDiv.style.zIndex = 10004;
-        document.body.appendChild(conductionDebugDiv);
-      }
-    } catch (e) {
-      if (conductionPanelDiv) {
-        conductionDebugDiv.style.position = '';
-        conductionDebugDiv.style.margin = '8px';
-        conductionPanelDiv.appendChild(conductionDebugDiv);
-      } else {
-        conductionDebugDiv.style.position = 'fixed';
-        conductionDebugDiv.style.left = '10px';
-        conductionDebugDiv.style.top = '220px';
-        conductionDebugDiv.style.zIndex = 10004;
-        document.body.appendChild(conductionDebugDiv);
-      }
-    }
-  } catch (e) { conductionDebugDiv = null; }
-
-  // Open control panel in a new window
-  const openBtn = document.createElement('button');
-  openBtn.textContent = 'Open Control Panel';
-  openBtn.style.position = 'fixed';
-  openBtn.style.top = '10px';
-  openBtn.style.right = '150px';
-  openBtn.style.zIndex = 10002;
-  openBtn.style.padding = '8px 10px';
-  openBtn.style.fontSize = '13px';
-  openBtn.style.borderRadius = '6px';
-  openBtn.style.border = '1px solid rgba(0,0,0,0.12)';
-  openBtn.style.background = 'white';
-  openBtn.onclick = () => {
-    window.open('control.html', '_blank', 'width=420,height=320');
-  };
-  document.body.appendChild(openBtn);
-
-  // Button to open the conduction debug popup window
-  const debugPopBtn = document.createElement('button');
-  debugPopBtn.textContent = 'Open Debug Popup';
-  debugPopBtn.style.position = 'fixed';
-  debugPopBtn.style.top = '46px';
-  debugPopBtn.style.right = '150px';
-  debugPopBtn.style.zIndex = 10002;
-  debugPopBtn.style.padding = '6px 8px';
-  debugPopBtn.style.fontSize = '12px';
-  debugPopBtn.style.borderRadius = '6px';
-  debugPopBtn.style.border = '1px solid rgba(0,0,0,0.12)';
-  debugPopBtn.style.background = 'white';
-  debugPopBtn.onclick = () => { openConductionDebugWindow(); };
-  document.body.appendChild(debugPopBtn);
-
-function openConductionDebugWindow() {
-  try {
-    if (conductionDebugWindow && !conductionDebugWindow.closed) {
-      conductionDebugWindow.focus();
-      return;
-    }
-    const w = window.open('', 'ConductionDebug', 'width=360,height=260,left=120,top=120');
-    if (!w) { alert('Popup blocked: allow popups to open the debug window.'); return; }
-    conductionDebugWindow = w;
-    conductionDebugWinDiv = null;
-    try {
-      w.document.title = 'Conduction Debug';
-      const style = w.document.createElement('style');
-      style.textContent = 'body{font-family:Helvetica,Arial,sans-serif;margin:8px;background:#fff;color:#111} .title{font-weight:700;margin-bottom:6px} .item{margin-bottom:4px}';
-      w.document.head.appendChild(style);
-      const closeBtn = w.document.createElement('button'); closeBtn.textContent = 'Close'; closeBtn.style.float = 'right'; closeBtn.onclick = () => { try { w.close(); } catch (e) {} };
-      w.document.body.appendChild(closeBtn);
-      // create initial container so popup isn't blank
-      conductionDebugWinDiv = w.document.createElement('div');
-      conductionDebugWinDiv.style.marginTop = '6px';
-      conductionDebugWinDiv.textContent = 'Conduction debug: awaiting playback...';
-      w.document.body.appendChild(conductionDebugWinDiv);
-    } catch (e) { /* ignore */ }
-    // when popup closed, clear refs
-    try { w.addEventListener('beforeunload', () => { conductionDebugWindow = null; conductionDebugWinDiv = null; }); } catch (e) {}
-  } catch (e) { console.warn('openConductionDebugWindow error', e); }
-}
+  // Debug UI and popup removed per user request.
 
   // create BroadcastChannel for controls
   try {
@@ -2077,7 +2201,7 @@ function openConductionDebugWindow() {
   }
   // Other sliders (P duration, HR, T duration, PR, QT)
   [
-    'pdurInput','hrInput','tdurInput','prInput','qtInput'
+    'pdurInput','hrInput','tdurInput','prInput','qtInput','stInput'
   ].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.addEventListener('input', persistWaveform);
@@ -2231,6 +2355,7 @@ function draw() {
         }
         ecgG.push();
         // Overlay: draw expected start/end intervals for conduction items bound to ECG events
+        if (showConductionOverlay) {
         try {
           // Map event keys to point indices when available
           const eventIndexForKey = (key) => {
@@ -2308,7 +2433,7 @@ function draw() {
               } catch (e) { /* ignore drawing errors */ }
             }
           }
-        } catch (e) { /* overlay errors shouldn't break draw */ }
+        } catch (e) { /* overlay errors shouldn't break draw */ } }
 
         ecgG.stroke(0, 120, 0);
         ecgG.strokeWeight(3);
@@ -2734,7 +2859,17 @@ function drawConductionOverlay(ix, iy, iw, ih) {
   for (let i = 0; i < conductionItems.length; i++) {
     const it = conductionItems[i]; if (!it) continue;
     stroke(it.color || '#ff0000');
-    if (it.fill && it.closed) fill(it.color + '44'); else noFill();
+    // Always show shapes with a faint base fill (20% opacity) so they are
+    // visible even when not activated. Active playback will render a stronger
+    // fill on top of this base fill.
+    if (it.type === 'shape' && Array.isArray(it.points) && it.points.length >= 3) {
+      try { fill((it.color || '#ff0000') + '33'); } catch (e) { noFill(); }
+    } else if (it.fill && it.closed) {
+      // keep existing explicit fill behavior for closed items
+      fill(it.color + '44');
+    } else {
+      noFill();
+    }
 
     // draw base shape/path
     beginShape();
@@ -2874,49 +3009,7 @@ function drawConductionOverlay(ix, iy, iw, ih) {
     // keep draw loop robust; ignore per-item render errors
   }
 
-        // Diagnostic overlay: show per-item playback state to help debug why an item
-        // (e.g., Right Ventricle) may not be animating. This is lightweight and safe
-        // to leave in during testing; it's drawn in the top-right of the CCS image.
-        try {
-          const diagX = imgX + imgW - 224;
-          const diagY = imgY + 8;
-          const boxW = 216;
-          const lines = [];
-          for (let i = 0; i < conductionItems.length; i++) {
-            const it = conductionItems[i];
-            if (!it) continue;
-            const baseStart = Number(it.playbackStartTime) || 0;
-            const offset = Number(it.startOffsetMs) || 0;
-            const dilation = (typeof timeDilation === 'number' ? timeDilation : 1.0);
-            const scheduledStart = baseStart + offset * dilation;
-            const elapsed = Math.round(nowMs - scheduledStart);
-            // compute per-item effective duration (ms)
-            let effDur = 0;
-            if (it.durationSource) effDur = Math.max(10, (getEcgFeatureMs(it.durationSource) || 0)) * dilation;
-            else if (it.type === 'shape') {
-              const up = (it.rampUpSource ? (getEcgFeatureMs(it.rampUpSource) || 0) : Number(it.rampUpMs) || 0) * dilation;
-              const sus = (it.sustainSource ? (getEcgFeatureMs(it.sustainSource) || 0) : Number(it.sustainMs) || 0) * dilation;
-              const down = (it.rampDownSource ? (getEcgFeatureMs(it.rampDownSource) || 0) : Number(it.rampDownMs) || 0) * dilation;
-              effDur = Math.max(10, up + sus + down);
-            } else effDur = Math.max(10, Number(it.durationMs) || 1200) * dilation;
-            const playing = (scheduledStart > 0 && elapsed >= 0 && elapsed < effDur);
-            lines.push({ name: it.name || ('Item ' + i), playing, scheduledStart, elapsed, effDur, offset });
-            if (lines.length >= 12) break;
-          }
-          push();
-          noStroke(); fill(255, 255, 255, 230); rect(diagX, diagY, boxW, 18 + lines.length * 14, 6);
-          stroke(0,0,0,40); noFill(); rect(diagX, diagY, boxW, 18 + lines.length * 14, 6);
-          noStroke(); fill(20); textSize(12); textAlign(LEFT, TOP);
-          text('Conduction Debug', diagX + 6, diagY + 3);
-          for (let li = 0; li < lines.length; li++) {
-            const L = lines[li];
-            const y = diagY + 18 + li * 14;
-            fill(L.playing ? 'green' : 'black');
-            const txt = L.name + (L.playing ? ' • PLAYING' : ' • idle') + '  (' + String(L.elapsed) + ' / ' + String(Math.round(L.effDur)) + 'ms)';
-            text(txt, diagX + 6, y);
-          }
-          pop();
-        } catch (ee) { /* ignore diagnostic errors */ }
+        // On-canvas diagnostic overlay removed per user request.
 
       pop();
 }
@@ -2956,14 +3049,39 @@ function mousePressed() {
   // if edit mode and item selected, either select a nearby point for dragging or add a new point
   if (conductionEditMode && selectedConductionIndex >= 0) {
     const it = conductionItems[selectedConductionIndex];
+    // Right-click on a point deletes it when in edit mode
+    try {
+      if (typeof mouseButton !== 'undefined' && mouseButton === RIGHT) {
+        const nearDel = findNearestPointOnImage(mouseX, mouseY, ix, iy, iw, ih, 12);
+        if (nearDel && nearDel.idx === selectedConductionIndex) {
+          try { pushConductionHistory(selectedConductionIndex); } catch (e) {}
+          // remove the point
+          it.points.splice(nearDel.ptIdx, 1);
+          // if item has no points left, remove the item entirely
+          if (!Array.isArray(it.points) || it.points.length === 0) {
+            if (confirm('Item has no points left. Delete the conduction item?')) {
+              conductionItems.splice(selectedConductionIndex, 1);
+              selectedConductionIndex = -1; conductionEditMode = false;
+            } else {
+              // leave empty item
+            }
+          }
+          try { saveConductionItems(); } catch (e) {}
+          refreshConductionPanel();
+          return false; // prevent default/context menu
+        }
+      }
+    } catch (e) {}
     // look for existing point near mouse
     const near = findNearestPointOnImage(mouseX, mouseY, ix, iy, iw, ih, 12);
     if (near && near.idx === selectedConductionIndex) {
+      try { pushConductionHistory(selectedConductionIndex); } catch (e) {}
       conductionDragging.idx = selectedConductionIndex; conductionDragging.pt = near.ptIdx;
       return;
     }
     // otherwise add new point normalized to image coordinates
     const nx = (mouseX - ix) / iw; const ny = (mouseY - iy) / ih;
+    try { pushConductionHistory(selectedConductionIndex); } catch (e) {}
     it.points.push({x: nx, y: ny});
     refreshConductionPanel();
     return;
@@ -3560,7 +3678,7 @@ function drawSingleLeadTo(g, hr) {
 // sequence entries without permanently changing the app state.
 function applyWaveformTemporarily(waveform, fn) {
   if (!waveform || typeof fn !== 'function') return fn && fn();
-  const keys = ['atheroPercent','thrombusPercent','METs','heartRate','amplitude','timeWindow','tWaveScale','qWaveScale','stOffset','tDuration','qtIntervalMs','pDuration','pAmp','qrsWidth','qDur','rDur','sDur','pBiphasic','gP','gQ','gR','gS','gT','prDur','ecgWaveShift','overlayUsesDilation'];
+  const keys = ['atheroPercent','thrombusPercent','METs','heartRate','amplitude','timeWindow','tWaveScale','qWaveScale','stOffset','tDuration','qtIntervalMs','pDuration','pAmp','qrsWidth','qDur','rDur','sDur','pBiphasic','gP','gQ','gR','gS','gT','prDur','ecgWaveShift','overlayUsesDilation','showConductionOverlay'];
   const old = {};
   try {
     keys.forEach(k => { if (typeof window[k] !== 'undefined') old[k] = window[k]; window[k] = (typeof waveform[k] !== 'undefined') ? waveform[k] : window[k]; });

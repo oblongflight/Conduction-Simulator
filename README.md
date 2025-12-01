@@ -10,7 +10,12 @@ Quick start
 Notes
 
 - The p5 runtime builds are bundled in `libraries/`. The full p5 source is not included in this repository (not a submodule); this keeps the project lightweight and easy to share.
-- Conduction overlays are persistent in localStorage. Use the right-side "Conduction Paths/Shapes" panel to create/edit animations.
+- Conduction overlays and user data are persisted — by default the sketch uses a file-backed JSON store when available. Use the right-side "Conduction Paths/Shapes" panel to create/edit animations.
+
+Saving and restoring data:
+
+- In modern Chromium/Edge browsers you can choose a file to store sketch data and save directly into that file. From the browser console run `promptSaveAsDataFile()` to create or pick a `sketch-data.json` file and save current state, and `promptOpenDataFile()` to load it.
+- If the browser doesn't support file-writing, the sketch falls back to `localStorage` and offers a download fallback when needed.
 - The primary sketch is `script.js`.
 
 Repository
