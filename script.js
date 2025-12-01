@@ -1203,7 +1203,23 @@ function createConductionPanel() {
   const seqRow = document.createElement('div'); seqRow.style.display='flex'; seqRow.style.flexDirection='column'; seqRow.style.gap='6px'; seqRow.style.marginTop='8px';
   seqRow.style.flexWrap = 'wrap';
   const seqControls = document.createElement('div'); seqControls.style.display='flex'; seqControls.style.alignItems='center'; seqControls.style.gap='6px';
-  const addSeqBtn = document.createElement('button'); addSeqBtn.textContent = 'Add to Sequence'; addSeqBtn.onclick = () => { const v = presetSelect.value; if (!v) { alert('Select a preset to add'); return; } presetSequence.push(v); refreshPresetSequenceUI(); };
+  const addSeqBtn = document.createElement('button'); addSeqBtn.textContent = 'Add to Sequence';
+  addSeqBtn.onclick = () => {
+    try {
+      const v = presetSelect.value;
+      if (!v) { alert('Select a preset to add'); return; }
+      console.log('Add to Sequence clicked, adding preset:', v);
+      presetSequence.push(v);
+      // persist active sequence immediately and refresh UI
+      try { saveActiveSequence(); } catch (e) { console.warn('saveActiveSequence failed', e); }
+      refreshPresetSequenceUI();
+      // brief visual flash to indicate change
+      try {
+        const seqHolderEl = document.getElementById('presetSequenceHolder');
+        if (seqHolderEl) { seqHolderEl.style.boxShadow = '0 0 8px rgba(0,150,0,0.25)'; setTimeout(() => { try { seqHolderEl.style.boxShadow = ''; } catch (e) {} }, 300); }
+      } catch (e) {}
+    } catch (e) { console.warn('addSeqBtn.onclick error', e); alert('Failed to add preset to sequence: ' + String(e)); }
+  };
   addSeqBtn.id = 'addSeqBtn';
   const playSeqBtn = document.createElement('button'); playSeqBtn.textContent = 'Play Sequence'; playSeqBtn.onclick = () => { if (!presetSequencePlaying) startPresetSequence(); else stopPresetSequence(); playSeqBtn.textContent = presetSequencePlaying ? 'Pause Sequence' : 'Play Sequence'; };
   playSeqBtn.id = 'playSeqBtn';
