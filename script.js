@@ -533,20 +533,27 @@ let seqPreviewBuffers = [];
 
 function refreshPresetSequenceUI() {
   try {
-    const seqHolder = document.getElementById('presetSequenceHolder');
-    if (!seqHolder) return;
-    seqHolder.innerHTML = '';
-    presetSequence.forEach((name, idx) => {
-      const row = document.createElement('div'); row.style.display='flex'; row.style.alignItems='center'; row.style.gap='6px';
-      const lbl = document.createElement('div'); lbl.textContent = String(idx+1) + '. ' + name; lbl.style.flex='1';
-      const up = document.createElement('button'); up.textContent='↑'; up.onclick = () => { if (idx<=0) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx-1,0,a); refreshPresetSequenceUI(); };
-      const down = document.createElement('button'); down.textContent='↓'; down.onclick = () => { if (idx>=presetSequence.length-1) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx+1,0,a); refreshPresetSequenceUI(); };
-      const del = document.createElement('button'); del.textContent='Delete'; del.onclick = () => { presetSequence.splice(idx,1); refreshPresetSequenceUI(); };
-      row.appendChild(lbl); row.appendChild(up); row.appendChild(down); row.appendChild(del);
-      seqHolder.appendChild(row);
+    const docs = [document];
+    try { if (conductionWindow && conductionWindow.document) docs.push(conductionWindow.document); } catch (e) {}
+    try { if (conductionPanelDiv && conductionPanelDiv.ownerDocument && docs.indexOf(conductionPanelDiv.ownerDocument) === -1) docs.push(conductionPanelDiv.ownerDocument); } catch (e) {}
+    docs.forEach(doc => {
+      try {
+        const seqHolder = doc.getElementById('presetSequenceHolder');
+        if (!seqHolder) return;
+        seqHolder.innerHTML = '';
+        presetSequence.forEach((name, idx) => {
+          const row = doc.createElement('div'); row.style.display='flex'; row.style.alignItems='center'; row.style.gap='6px';
+          const lbl = doc.createElement('div'); lbl.textContent = String(idx+1) + '. ' + name; lbl.style.flex='1';
+          const up = doc.createElement('button'); up.textContent='↑'; up.onclick = () => { if (idx<=0) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx-1,0,a); refreshPresetSequenceUI(); };
+          const down = doc.createElement('button'); down.textContent='↓'; down.onclick = () => { if (idx>=presetSequence.length-1) return; const a=presetSequence.splice(idx,1)[0]; presetSequence.splice(idx+1,0,a); refreshPresetSequenceUI(); };
+          const del = doc.createElement('button'); del.textContent='Delete'; del.onclick = () => { presetSequence.splice(idx,1); refreshPresetSequenceUI(); };
+          row.appendChild(lbl); row.appendChild(up); row.appendChild(down); row.appendChild(del);
+          seqHolder.appendChild(row);
+        });
+        // highlight current
+        Array.from(seqHolder.children).forEach((c,i)=>{ c.style.background = (i===presetSequenceIndex && presetSequencePlaying) ? 'rgba(200,255,200,0.6)' : ''; });
+      } catch (e) { /* ignore per-doc errors */ }
     });
-    // highlight current
-    Array.from(seqHolder.children).forEach((c,i)=>{ c.style.background = (i===presetSequenceIndex && presetSequencePlaying) ? 'rgba(200,255,200,0.6)' : ''; });
     // mark previews stale so they will be regenerated
     seqPreviewNeedsUpdate = true;
     // persist current active sequence
@@ -703,6 +710,7 @@ function loadNamedPreset(name) {
     // persist waveform to localStorage and update UI/controls
     saveEcgWaveformSettings();
     refreshConductionPanel();
+    try { refreshPresetSelectGlobal(); refreshSequenceSelectGlobal(); } catch (e) {}
     // update slider elements if present
     const mapIds = { qrsWidth: 'qrsInput', qDur: 'qdurInput', rDur: 'rdurInput', sDur: 'sdurInput', pDuration: 'pdurInput', heartRate: 'hrInput', tDuration: 'tdurInput', prDur: 'prInput', qtIntervalMs: 'qtInput' };
     Object.keys(mapIds).forEach(k => {
@@ -1550,6 +1558,39 @@ function dockConductionPanel() {
       conductionPanelDiv.style.zIndex = conductionPanelOriginalStyles.zIndex || 10003;
       conductionPanelDiv.style.padding = conductionPanelOriginalStyles.padding || '10px';
     }
+    // Reattach local handlers for preset/sequence buttons to ensure
+    // they operate in the main document context after docking.
+    try {
+      const sel = (s) => { try { return conductionPanelDiv.querySelector(s); } catch (e) { return null; } };
+      const presetSel = sel('#presetSelect');
+      const loadBtn = sel('#loadPresetBtn');
+      if (loadBtn) {
+        loadBtn.onclick = function() {
+          const v = presetSel ? presetSel.value : '';
+          if (!v) { alert('Select a preset'); return; }
+          if (confirm('Load preset "' + v + '"? This will overwrite current settings.')) {
+            try { if (loadNamedPreset(v)) { alert('Loaded preset: ' + v); } else { alert('Failed to load preset: ' + v); } } catch (e) { console.warn('loadNamedPreset failed on dock', e); alert('Failed to load preset: ' + String(e)); }
+          }
+        };
+      }
+
+      const addSeq = sel('#addSeqBtn');
+      if (addSeq) {
+        addSeq.onclick = function() {
+          try {
+            const v = presetSel ? presetSel.value : '';
+            if (!v) { alert('Select a preset to add'); return; }
+            console.log('Add to Sequence (docked) adding preset:', v);
+            presetSequence.push(v);
+            try { saveActiveSequence(); } catch (e) { console.warn('saveActiveSequence failed', e); }
+            refreshPresetSequenceUI();
+            const seqHolderEl = document.getElementById('presetSequenceHolder');
+            if (seqHolderEl) { seqHolderEl.style.boxShadow = '0 0 8px rgba(0,150,0,0.25)'; setTimeout(() => { try { seqHolderEl.style.boxShadow = ''; } catch (e) {} }, 300); }
+          } catch (e) { console.warn('add to sequence (docked) failed', e); alert('Failed to add preset to sequence: ' + String(e)); }
+        };
+      }
+    } catch (e) { console.warn('reattach dock handlers failed', e); }
+
     refreshConductionPanel();
     if (conductionWindow && !conductionWindow.closed) {
       try { conductionWindow.close(); } catch (e) { /* ignore */ }
