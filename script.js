@@ -3019,7 +3019,38 @@ function drawConductionOverlay(ix, iy, iw, ih) {
     // visible even when not activated. Active playback will render a stronger
     // fill on top of this base fill.
     if (it.type === 'shape' && Array.isArray(it.points) && it.points.length >= 3) {
-      try { fill((it.color || '#ff0000') + '33'); } catch (e) { noFill(); }
+      // If rollingGradient is enabled, render a faint static gradient
+      // as the base fill so users see an effect immediately when toggled.
+      if (it.rollingGradient) {
+        try {
+          // compute pixel points and bounding box for gradient
+          const ptsPx = it.points.map(p => ({ x: ix + p.x * iw, y: iy + p.y * ih }));
+          let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+          for (const pp of ptsPx) { if (pp.x < minx) minx = pp.x; if (pp.y < miny) miny = pp.y; if (pp.x > maxx) maxx = pp.x; if (pp.y > maxy) maxy = pp.y; }
+          const cx = (minx + maxx) / 2; const cy = (miny + maxy) / 2;
+          const angleDeg = Number(it.gradientAngleDegrees || 0) % 360; const rad = angleDeg * Math.PI / 180.0;
+          const vx = Math.cos(rad); const vy = Math.sin(rad);
+          const halfDiag = Math.hypot(maxx - minx, maxy - miny) * 1.2;
+          const gx0 = cx - vx * halfDiag; const gy0 = cy - vy * halfDiag;
+          const gx1 = cx + vx * halfDiag; const gy1 = cy + vy * halfDiag;
+          const rgb = hexToRgb(it.color || '#ff0000');
+          const a = 0.22; // faint base alpha
+          const colorStop = `rgba(${rgb.r},${rgb.g},${rgb.b},${a})`;
+          const transparentStop = `rgba(${rgb.r},${rgb.g},${rgb.b},0)`;
+          const grad = drawingContext.createLinearGradient(gx0, gy0, gx1, gy1);
+          grad.addColorStop(0, transparentStop);
+          grad.addColorStop(0.45, transparentStop);
+          grad.addColorStop(0.5, colorStop);
+          grad.addColorStop(0.55, transparentStop);
+          grad.addColorStop(1, transparentStop);
+          // use gradient fill for base
+          push(); noStroke(); drawingContext.fillStyle = grad; beginShape();
+          for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
+          endShape(CLOSE); pop();
+        } catch (e) { try { fill((it.color || '#ff0000') + '33'); } catch (err) { noFill(); } }
+      } else {
+        try { fill((it.color || '#ff0000') + '33'); } catch (e) { noFill(); }
+      }
     } else if (it.fill && it.closed) {
       // keep existing explicit fill behavior for closed items
       fill(it.color + '44');
