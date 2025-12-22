@@ -3034,19 +3034,52 @@ function drawConductionOverlay(ix, iy, iw, ih) {
           const gx0 = cx - vx * halfDiag; const gy0 = cy - vy * halfDiag;
           const gx1 = cx + vx * halfDiag; const gy1 = cy + vy * halfDiag;
           const rgb = hexToRgb(it.color || '#ff0000');
-          const a = 0.22; // faint base alpha
+          // stronger base alpha so the checkbox shows a visible effect
+          const a = 0.45; // increased alpha for visibility
           const colorStop = `rgba(${rgb.r},${rgb.g},${rgb.b},${a})`;
           const transparentStop = `rgba(${rgb.r},${rgb.g},${rgb.b},0)`;
-          const grad = drawingContext.createLinearGradient(gx0, gy0, gx1, gy1);
-          grad.addColorStop(0, transparentStop);
-          grad.addColorStop(0.45, transparentStop);
-          grad.addColorStop(0.5, colorStop);
-          grad.addColorStop(0.55, transparentStop);
-          grad.addColorStop(1, transparentStop);
-          // use gradient fill for base
-          push(); noStroke(); drawingContext.fillStyle = grad; beginShape();
-          for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
-          endShape(CLOSE); pop();
+          const grad = (drawingContext && drawingContext.createLinearGradient) ? drawingContext.createLinearGradient(gx0, gy0, gx1, gy1) : null;
+          if (grad) {
+            // wider band around the center to make it obvious when toggled
+            grad.addColorStop(0, transparentStop);
+            grad.addColorStop(0.25, transparentStop);
+            grad.addColorStop(0.45, transparentStop);
+            grad.addColorStop(0.5, colorStop);
+            grad.addColorStop(0.55, transparentStop);
+            grad.addColorStop(0.75, transparentStop);
+            grad.addColorStop(1, transparentStop);
+            // use gradient fill for base
+            push();
+            try {
+              noStroke();
+              drawingContext.fillStyle = grad;
+              beginShape();
+              for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
+              endShape(CLOSE);
+              // subtle outline to emphasize shape when gradient enabled
+              strokeWeight(1);
+              stroke(rgb.r, rgb.g, rgb.b, Math.round(a * 180));
+              noFill();
+              beginShape();
+              for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
+              endShape(CLOSE);
+            } finally { pop(); }
+          } else {
+            // fallback: solid fill with higher alpha and thin stroke
+            push();
+            try {
+              fill(rgb.r, rgb.g, rgb.b, Math.round(a * 220));
+              beginShape();
+              for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
+              endShape(CLOSE);
+              strokeWeight(1);
+              stroke(rgb.r, rgb.g, rgb.b, Math.round(a * 180));
+              noFill();
+              beginShape();
+              for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
+              endShape(CLOSE);
+            } finally { pop(); }
+          }
         } catch (e) { try { fill((it.color || '#ff0000') + '33'); } catch (err) { noFill(); } }
       } else {
         try { fill((it.color || '#ff0000') + '33'); } catch (e) { noFill(); }
