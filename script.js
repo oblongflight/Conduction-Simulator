@@ -990,11 +990,6 @@ function createConductionItem(type) {
     ecgEvent: '',
     startOffsetMs: 0,
     playbackStartTime: 0
-    ,
-    // Rolling gradient options: if true, render depolarization as a moving gradient
-    rollingGradient: false,
-    // Gradient direction in degrees (0 = to the right, 90 = down)
-    gradientAngleDegrees: 0
   };
   conductionItems.push(newItem);
   try { saveConductionItems(); } catch (e) { console.warn('save after create failed', e); }
@@ -1101,16 +1096,6 @@ function refreshConductionPanel() {
         rampRow.appendChild(labSus); rampRow.appendChild(susSel); if (!it.sustainSource) rampRow.appendChild(susIn);
         rampRow.appendChild(labDown); rampRow.appendChild(downSel); if (!it.rampDownSource) rampRow.appendChild(downIn);
         middle.appendChild(rampRow);
-        // Rolling gradient toggle + angle input
-        const gradRow = document.createElement('div'); gradRow.style.display='flex'; gradRow.style.alignItems='center'; gradRow.style.gap='6px'; gradRow.style.marginLeft = '8px';
-        const gradChk = document.createElement('input'); gradChk.type = 'checkbox'; gradChk.checked = !!it.rollingGradient; gradChk.title = 'Render depolarization as a rolling gradient';
-        gradChk.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.rollingGradient = !!gradChk.checked; saveConductionItems(); };
-        const gradLab = document.createElement('div'); gradLab.textContent = 'Rolling gradient'; gradLab.style.fontSize = '11px';
-        const angleIn = document.createElement('input'); angleIn.type = 'number'; angleIn.min = '0'; angleIn.max = '360'; angleIn.step = '1'; angleIn.style.width = '70px'; angleIn.value = String(Number(it.gradientAngleDegrees || 0));
-        angleIn.title = 'Gradient direction (degrees)';
-        angleIn.onchange = () => { try { pushConductionHistory(idx); } catch (e) {} it.gradientAngleDegrees = Number(angleIn.value) || 0; saveConductionItems(); };
-        gradRow.appendChild(gradChk); gradRow.appendChild(gradLab); gradRow.appendChild(angleIn);
-        middle.appendChild(gradRow);
       }
 
       // right: reorder and delete
@@ -3019,71 +3004,7 @@ function drawConductionOverlay(ix, iy, iw, ih) {
     // visible even when not activated. Active playback will render a stronger
     // fill on top of this base fill.
     if (it.type === 'shape' && Array.isArray(it.points) && it.points.length >= 3) {
-      // If rollingGradient is enabled, render a faint static gradient
-      // as the base fill so users see an effect immediately when toggled.
-      if (it.rollingGradient) {
-        try {
-          // compute pixel points and bounding box for gradient
-          const ptsPx = it.points.map(p => ({ x: ix + p.x * iw, y: iy + p.y * ih }));
-          let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
-          for (const pp of ptsPx) { if (pp.x < minx) minx = pp.x; if (pp.y < miny) miny = pp.y; if (pp.x > maxx) maxx = pp.x; if (pp.y > maxy) maxy = pp.y; }
-          const cx = (minx + maxx) / 2; const cy = (miny + maxy) / 2;
-          const angleDeg = Number(it.gradientAngleDegrees || 0) % 360; const rad = angleDeg * Math.PI / 180.0;
-          const vx = Math.cos(rad); const vy = Math.sin(rad);
-          const halfDiag = Math.hypot(maxx - minx, maxy - miny) * 1.2;
-          const gx0 = cx - vx * halfDiag; const gy0 = cy - vy * halfDiag;
-          const gx1 = cx + vx * halfDiag; const gy1 = cy + vy * halfDiag;
-          const rgb = hexToRgb(it.color || '#ff0000');
-          // stronger base alpha so the checkbox shows a visible effect
-          const a = 0.45; // increased alpha for visibility
-          const colorStop = `rgba(${rgb.r},${rgb.g},${rgb.b},${a})`;
-          const transparentStop = `rgba(${rgb.r},${rgb.g},${rgb.b},0)`;
-          const grad = (drawingContext && drawingContext.createLinearGradient) ? drawingContext.createLinearGradient(gx0, gy0, gx1, gy1) : null;
-          if (grad) {
-            // wider band around the center to make it obvious when toggled
-            grad.addColorStop(0, transparentStop);
-            grad.addColorStop(0.25, transparentStop);
-            grad.addColorStop(0.45, transparentStop);
-            grad.addColorStop(0.5, colorStop);
-            grad.addColorStop(0.55, transparentStop);
-            grad.addColorStop(0.75, transparentStop);
-            grad.addColorStop(1, transparentStop);
-            // use gradient fill for base
-            push();
-            try {
-              noStroke();
-              drawingContext.fillStyle = grad;
-              beginShape();
-              for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
-              endShape(CLOSE);
-              // subtle outline to emphasize shape when gradient enabled
-              strokeWeight(1);
-              stroke(rgb.r, rgb.g, rgb.b, Math.round(a * 180));
-              noFill();
-              beginShape();
-              for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
-              endShape(CLOSE);
-            } finally { pop(); }
-          } else {
-            // fallback: solid fill with higher alpha and thin stroke
-            push();
-            try {
-              fill(rgb.r, rgb.g, rgb.b, Math.round(a * 220));
-              beginShape();
-              for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
-              endShape(CLOSE);
-              strokeWeight(1);
-              stroke(rgb.r, rgb.g, rgb.b, Math.round(a * 180));
-              noFill();
-              beginShape();
-              for (let p of it.points) vertex(ix + p.x * iw, iy + p.y * ih);
-              endShape(CLOSE);
-            } finally { pop(); }
-          }
-        } catch (e) { try { fill((it.color || '#ff0000') + '33'); } catch (err) { noFill(); } }
-      } else {
-        try { fill((it.color || '#ff0000') + '33'); } catch (e) { noFill(); }
-      }
+      try { fill((it.color || '#ff0000') + '33'); } catch (e) { noFill(); }
     } else if (it.fill && it.closed) {
       // keep existing explicit fill behavior for closed items
       fill(it.color + '44');
@@ -3170,51 +3091,9 @@ function drawConductionOverlay(ix, iy, iw, ih) {
           alpha = Math.max(0, Math.min(1, alpha));
         }
         const rgb = hexToRgb(it.color || '#ff0000');
-        push(); noStroke();
-        try {
-          if (it.rollingGradient) {
-            // compute pixel points and bounding box
-            const ptsPx = it.points.map(p => ({ x: imgX + p.x * imgW, y: imgY + p.y * imgH }));
-            let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
-            for (const pp of ptsPx) { if (pp.x < minx) minx = pp.x; if (pp.y < miny) miny = pp.y; if (pp.x > maxx) maxx = pp.x; if (pp.y > maxy) maxy = pp.y; }
-            const cx = (minx + maxx) / 2; const cy = (miny + maxy) / 2;
-            const angleDeg = Number(it.gradientAngleDegrees || 0) % 360; const rad = angleDeg * Math.PI / 180.0;
-            const vx = Math.cos(rad); const vy = Math.sin(rad);
-            const halfDiag = Math.hypot(maxx - minx, maxy - miny) * 1.2; // extend a bit to cover shape
-            const gx0 = cx - vx * halfDiag; const gy0 = cy - vy * halfDiag;
-            const gx1 = cx + vx * halfDiag; const gy1 = cy + vy * halfDiag;
-            const grad = drawingContext.createLinearGradient(gx0, gy0, gx1, gy1);
-            // rolling offset driven by progressItem (0..1)
-            const off = ((progressItem % 1) + 1) % 1;
-            const a = Math.max(0, Math.min(1, alpha));
-            const colorStop = `rgba(${rgb.r},${rgb.g},${rgb.b},${a})`;
-            const transparentStop = `rgba(${rgb.r},${rgb.g},${rgb.b},0)`;
-            // create several stops around the offset to form a band; sort by position
-            const rels = [-0.5, -0.25, 0, 0.25, 0.5].map(r => ({ pos: ((off + r) % 1 + 1) % 1, col: (Math.abs(r) < 0.125 ? colorStop : transparentStop) }));
-            rels.sort((A,B) => A.pos - B.pos);
-            // add stops; ensure first stop at 0 and last at 1 for consistency
-            if (rels.length > 0 && rels[0].pos > 0) grad.addColorStop(0, transparentStop);
-            for (const s of rels) grad.addColorStop(s.pos, s.col);
-            if (rels.length > 0 && rels[rels.length-1].pos < 1) grad.addColorStop(1, transparentStop);
-            // set canvas fill to gradient and draw polygon
-            drawingContext.fillStyle = grad;
-            beginShape();
-            for (let p of it.points) vertex(imgX + p.x * imgW, imgY + p.y * imgH);
-            endShape(CLOSE);
-          } else {
-            // solid fill (existing behavior)
-            fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220)); beginShape();
-            for (let p of it.points) vertex(imgX + p.x * imgW, imgY + p.y * imgH);
-            endShape(CLOSE);
-          }
-        } catch (e) {
-          // fallback to solid fill on any error
-          fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220)); beginShape();
-          for (let p of it.points) vertex(imgX + p.x * imgW, imgY + p.y * imgH);
-          endShape(CLOSE);
-          console.warn('rolling gradient render failed', e);
-        }
-        pop();
+        push(); noStroke(); fill(rgb.r, rgb.g, rgb.b, Math.round(alpha * 220)); beginShape();
+        for (let p of it.points) vertex(imgX + p.x * imgW, imgY + p.y * imgH);
+        endShape(CLOSE); pop();
       } else {
         strokeWeight(0); noStroke();
         if (it.points.length >= 2 && (it.mode || 'sequential') !== 'concurrent') {
