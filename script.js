@@ -1171,6 +1171,12 @@ function createConductionPanel() {
 
   const title = document.createElement('div'); title.textContent = 'Conduction Paths/Shapes'; title.style.fontWeight = '700'; title.style.marginBottom = '8px'; conductionPanelDiv.appendChild(title);
 
+  // Button to return to Basic view (hides advanced panels)
+  try {
+    const basicViewBtn = document.createElement('button'); basicViewBtn.textContent = 'Basic View'; basicViewBtn.style.marginLeft = '8px'; basicViewBtn.onclick = () => { try { const bp = document.getElementById('basicPanel'); if (bp) bp.style.display = ''; conductionPanelDiv.style.display = 'none'; if (globalControlPanel) globalControlPanel.style.display = 'none'; } catch (e) {} };
+    title.appendChild(basicViewBtn);
+  } catch (e) {}
+
   const btnRow = document.createElement('div'); btnRow.style.display='flex'; btnRow.style.gap='6px'; btnRow.style.marginBottom='8px';
   btnRow.style.flexWrap = 'wrap';
   const addPathBtn = document.createElement('button'); addPathBtn.textContent = 'Add Path'; addPathBtn.onclick = () => { createConductionItem('path'); };
@@ -1992,7 +1998,10 @@ function setup() {
   const tdRow = document.createElement('div'); tdRow.style.display = 'flex'; tdRow.style.alignItems = 'center'; tdRow.style.gap = '8px';
   const tdLabel = document.createElement('div'); tdLabel.textContent = 'Time dilation'; tdLabel.style.width = '90px';
   const tdInput = document.createElement('input'); tdInput.type = 'range'; tdInput.min = '0.2'; tdInput.max = '10.0'; tdInput.step = '0.05'; tdInput.value = String(timeDilation); tdInput.style.flex = '1';
+  tdInput.id = 'timeDilationInput';
   const tdVal = document.createElement('div'); tdVal.textContent = String(timeDilation.toFixed(2)); tdVal.style.width = '56px'; tdVal.style.textAlign = 'right';
+  tdVal.id = 'timeDilationVal';
+  tdRow.id = 'timeDilationRow';
   tdInput.oninput = (e) => { timeDilation = Number(e.target.value) || 1.0; tdVal.textContent = timeDilation.toFixed(2); saveTimeDilation(); refreshConductionPanel(); };
   tdRow.appendChild(tdLabel); tdRow.appendChild(tdInput); tdRow.appendChild(tdVal); globalPanel.appendChild(tdRow);
   // ECG horizontal shift slider
@@ -2282,6 +2291,111 @@ function setup() {
   try { createConductionPanel(); } catch (e) { console.warn('Failed to create conduction panel', e); }
   // briefly highlight the conduction panel so the user can locate it
   try { setTimeout(() => { highlightConductionPanel(4000); }, 150); } catch (e) {}
+  // Create compact Basic view panel (default) exposing only: preset select,
+  // sequence select, and time dilation. Advanced full UI remains available
+  // via the "Advanced" toggle button.
+  try {
+    // small basic panel
+    const basicPanel = document.createElement('div');
+    basicPanel.id = 'basicPanel';
+    basicPanel.style.position = 'fixed';
+    basicPanel.style.top = '10px';
+    basicPanel.style.right = '10px';
+    basicPanel.style.zIndex = 10005;
+    basicPanel.style.padding = '8px';
+    basicPanel.style.background = 'rgba(255,255,255,0.96)';
+    basicPanel.style.border = '1px solid rgba(0,0,0,0.12)';
+    basicPanel.style.borderRadius = '6px';
+    basicPanel.style.fontFamily = 'Helvetica, Arial, sans-serif';
+    basicPanel.style.fontSize = '13px';
+
+    const bpTitle = document.createElement('div'); bpTitle.textContent = 'Basic View'; bpTitle.style.fontWeight = '600'; bpTitle.style.marginBottom = '6px'; basicPanel.appendChild(bpTitle);
+
+    // Preset select (compact copy)
+    const basicPresetRow = document.createElement('div'); basicPresetRow.style.display = 'flex'; basicPresetRow.style.gap = '6px'; basicPresetRow.style.alignItems = 'center';
+    const basicPreset = document.createElement('select'); basicPreset.id = 'basicPresetSelect'; basicPreset.style.minWidth = '160px';
+    const basicLoadPreset = document.createElement('button'); basicLoadPreset.textContent = 'Load'; basicLoadPreset.onclick = () => { const v = basicPreset.value; if (!v) { alert('Select a preset'); return; } if (confirm('Load preset "' + v + '"? This will overwrite current settings.')) { if (loadNamedPreset(v)) { alert('Loaded preset: ' + v); } else alert('Failed to load preset: ' + v); } };
+    basicPresetRow.appendChild(basicPreset); basicPresetRow.appendChild(basicLoadPreset); basicPanel.appendChild(basicPresetRow);
+
+    // Sequence select (compact copy)
+    const basicSeqRow = document.createElement('div'); basicSeqRow.style.display = 'flex'; basicSeqRow.style.gap = '6px'; basicSeqRow.style.alignItems = 'center'; basicSeqRow.style.marginTop = '6px';
+    const basicSeq = document.createElement('select'); basicSeq.id = 'basicSequenceSelect'; basicSeq.style.minWidth = '160px';
+    const basicLoadSeq = document.createElement('button'); basicLoadSeq.textContent = 'Load Seq'; basicLoadSeq.onclick = () => { const v = basicSeq.value; if (!v) { alert('Select a sequence'); return; } if (confirm('Load sequence "' + v + '"? This will replace the current sequence.')) { if (loadNamedSequence(v)) { alert('Loaded sequence: ' + v); refreshPresetSequenceUI(); } else alert('Failed to load sequence: ' + v); } };
+    const basicPlaySeq = document.createElement('button'); basicPlaySeq.textContent = 'Play Sequence'; basicPlaySeq.id = 'basicPlaySeqBtn'; basicPlaySeq.style.marginLeft = '4px';
+    basicPlaySeq.onclick = () => {
+      try {
+        if (!presetSequencePlaying) {
+          // ensure sequence loops automatically when started from Basic
+          presetSequenceLoop = true;
+          // if no sequence selected, warn
+          if (!presetSequence || presetSequence.length === 0) {
+            if (basicSeq && basicSeq.value) {
+              // try to load named sequence from select
+              loadNamedSequence(basicSeq.value);
+            }
+          }
+          startPresetSequence();
+          basicPlaySeq.textContent = 'Pause Sequence';
+        } else {
+          stopPresetSequence();
+          basicPlaySeq.textContent = 'Play Sequence';
+        }
+      } catch (e) { console.warn('basic play sequence failed', e); }
+    };
+    basicSeqRow.appendChild(basicSeq); basicSeqRow.appendChild(basicLoadSeq); basicSeqRow.appendChild(basicPlaySeq); basicPanel.appendChild(basicSeqRow);
+
+    // Time dilation (compact, synced)
+    const basicTdRow = document.createElement('div'); basicTdRow.style.display='flex'; basicTdRow.style.alignItems='center'; basicTdRow.style.gap='8px'; basicTdRow.style.marginTop='6px';
+    const basicTdLab = document.createElement('div'); basicTdLab.textContent = 'Time dilation'; basicTdLab.style.width = '90px';
+    const basicTdInput = document.createElement('input'); basicTdInput.type = 'range'; basicTdInput.min = '0.2'; basicTdInput.max = '10.0'; basicTdInput.step = '0.05'; basicTdInput.value = String(timeDilation); basicTdInput.style.flex = '1'; basicTdInput.id = 'basicTimeDilationInput';
+    const basicTdVal = document.createElement('div'); basicTdVal.textContent = String(timeDilation.toFixed(2)); basicTdVal.style.width = '56px'; basicTdVal.style.textAlign = 'right'; basicTdVal.id = 'basicTimeDilationVal';
+    basicTdInput.oninput = (e) => { const v = Number(e.target.value) || 1.0; timeDilation = v; basicTdVal.textContent = timeDilation.toFixed(2); saveTimeDilation(); refreshConductionPanel(); try { const orig = document.getElementById('timeDilationInput'); if (orig) orig.value = String(timeDilation); const origVal = document.getElementById('timeDilationVal'); if (origVal) origVal.textContent = timeDilation.toFixed(2); } catch (er) {} };
+    basicTdRow.appendChild(basicTdLab); basicTdRow.appendChild(basicTdInput); basicTdRow.appendChild(basicTdVal); basicPanel.appendChild(basicTdRow);
+
+    // Toggle to advanced/full UI
+    const toggleRow = document.createElement('div'); toggleRow.style.display='flex'; toggleRow.style.justifyContent='flex-end'; toggleRow.style.marginTop='8px';
+    const advBtn = document.createElement('button'); advBtn.textContent = 'Advanced'; advBtn.onclick = () => {
+      // show advanced panels and hide basic panel
+      try { if (conductionPanelDiv) conductionPanelDiv.style.display = ''; if (globalControlPanel) globalControlPanel.style.display = ''; basicPanel.style.display = 'none'; } catch (e) {}
+    };
+    toggleRow.appendChild(advBtn); basicPanel.appendChild(toggleRow);
+
+    document.body.appendChild(basicPanel);
+
+    // Default to Basic: hide the big construction/advanced panels
+    try { if (conductionPanelDiv) conductionPanelDiv.style.display = 'none'; if (globalControlPanel) globalControlPanel.style.display = 'none'; } catch (e) {}
+
+    // Helper to populate compact selects by mirroring the main selects
+    function refreshBasicSelectors() {
+      try {
+        const srcPreset = document.getElementById('presetSelect'); const dstPreset = document.getElementById('basicPresetSelect');
+        // Do not overwrite the select while the user is interacting with it
+        if (srcPreset && dstPreset && document.activeElement !== dstPreset) {
+          dstPreset.innerHTML = '';
+          Array.from(srcPreset.options).forEach(o => { const no = document.createElement('option'); no.value = o.value; no.text = o.text; if (o.selected) no.selected = true; dstPreset.appendChild(no); });
+        }
+        const srcSeq = document.getElementById('sequenceSelect'); const dstSeq = document.getElementById('basicSequenceSelect');
+        if (srcSeq && dstSeq && document.activeElement !== dstSeq) {
+          dstSeq.innerHTML = '';
+          Array.from(srcSeq.options).forEach(o => { const no = document.createElement('option'); no.value = o.value; no.text = o.text; if (o.selected) no.selected = true; dstSeq.appendChild(no); });
+        }
+      } catch (e) { /* ignore */ }
+    }
+
+    // keep basic selects in sync when presets/sequences are refreshed elsewhere
+    setInterval(refreshBasicSelectors, 800);
+    // keep play button label in sync with global state (in case sequence started elsewhere)
+    setInterval(() => {
+      try {
+        const b = document.getElementById('basicPlaySeqBtn'); if (!b) return;
+        b.textContent = presetSequencePlaying ? 'Pause Sequence' : 'Play Sequence';
+        // disable play if there is no sequence available
+        if (!presetSequence || presetSequence.length === 0) b.disabled = true; else b.disabled = false;
+      } catch (e) {}
+    }, 400);
+    // also update on initial load
+    setTimeout(refreshBasicSelectors, 200);
+  } catch (e) { console.warn('Failed to create basic panel', e); }
   // load any previously active sequence so saved sequences persist across reloads
   try {
     // restore the active in-memory sequence (if present) and mark previews stale
@@ -2296,11 +2410,9 @@ function setup() {
   // automatically. Use a short timeout so page load isn't blocked; if
   // the browser blocks popups this will fail gracefully and the panel
   // remains embedded inline.
-  try {
-    setTimeout(() => {
-      try { openConductionWindow(); } catch (e) { /* popup may be blocked; ignore */ }
-    }, 250);
-  } catch (e) {}
+  // Automatic popout suppressed: user can open the Conduction panel
+  // manually via the "Pop Out Constructor" button. This prevents the
+  // panel from opening automatically on sketch start.
 
   // Listen for changes to ECG waveform constructor sliders and persist
   const persistWaveform = () => { saveEcgWaveformSettings(); };
