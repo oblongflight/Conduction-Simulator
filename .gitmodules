@@ -1,0 +1,3 @@
+[submodule "p5.js"]
+	path = p5.js
+	url = https://github.com/processing/p5.js.git
