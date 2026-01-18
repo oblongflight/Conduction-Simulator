@@ -13,6 +13,27 @@
   </head>
 
   <body>
+    <!-- Preload sketch defaults from sketch-data.json when available -->
+    <script>
+      (async function(){
+        try {
+          const resp = await fetch('sketch-data.json');
+          if (!resp.ok) return;
+          const data = await resp.json();
+          try { window._sketchDataCache = window._sketchDataCache || {}; } catch (e) { window._sketchDataCache = {}; }
+          Object.keys(data || {}).forEach(k => {
+            try {
+              // If the user already has a value in localStorage, keep it.
+              if (localStorage.getItem(k) === null) localStorage.setItem(k, data[k]);
+              if (!(k in window._sketchDataCache)) window._sketchDataCache[k] = data[k];
+            } catch (e) {}
+          });
+        } catch (e) {
+          /* ignore fetch failures */
+        }
+      })();
+    </script>
+
     <!-- Load the Single Lead ACS sketch (spaces URL-encoded) -->
     <script src="script.js"></script>
   </body>
