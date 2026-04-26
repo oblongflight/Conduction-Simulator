@@ -253,6 +253,10 @@ let showConductionOverlay = true;
 let tWaveScale = 1.0; // multiplier for T wave amplitude (can be negative)
 let qWaveScale = 1.0; // multiplier for Q wave magnitude
 let stOffset = 0.0; // ST elevation/depression (in signal units)
+// ST window placement (ms relative to the QRS R-peak at t=0). Defaults
+// approximate the historical anchor of "end of R" -> "start of T".
+let stStartMs = 30;  // start of ST plateau
+let stEndMs   = 120; // end of ST plateau
 let tDuration = 0.12; // T wave duration (seconds, approximate width)
 let qtIntervalMs = 360; // QT interval in milliseconds (Q onset to T end)
 
@@ -289,6 +293,11 @@ let ccsImg = null;
 // View mode: true = single-lead (CCS left + ECG right), false = 12-lead grid
 let singleLeadView = true;
 
+// App mode: 'conduction' (default) shows heart + conduction overlay only.
+// 'ischemia' reserves a strip at the top of the left half for the vessel
+// cross-section and exposes athero/thrombus/METs controls.
+let appMode = 'conduction';
+
 // Diagnostic / UI state
 let conductionDragging = { idx: -1, pt: -1 };
 // whether the user is in edit mode for conduction shapes/paths
@@ -313,6 +322,8 @@ function saveEcgWaveformSettings() {
       tWaveScale: tWaveScale,
       qWaveScale: qWaveScale,
       stOffset: stOffset,
+      stStartMs: stStartMs,
+      stEndMs: stEndMs,
       tDuration: tDuration,
       qtIntervalMs: qtIntervalMs,
       pDuration: pDuration,
@@ -373,6 +384,8 @@ function loadEcgWaveformSettings() {
     if (typeof p.tWaveScale === 'number') tWaveScale = p.tWaveScale;
     if (typeof p.qWaveScale === 'number') qWaveScale = p.qWaveScale;
     if (typeof p.stOffset === 'number') stOffset = p.stOffset;
+    if (typeof p.stStartMs === 'number') stStartMs = p.stStartMs;
+    if (typeof p.stEndMs === 'number') stEndMs = p.stEndMs;
     if (typeof p.tDuration === 'number') tDuration = p.tDuration;
     if (typeof p.qtIntervalMs === 'number') qtIntervalMs = p.qtIntervalMs;
     if (typeof p.pDuration === 'number') pDuration = p.pDuration;
@@ -659,7 +672,7 @@ function saveNamedPreset(name) {
     const key = String(name).trim();
     const wave = {
       atheroPercent, thrombusPercent, METs, heartRate, amplitude, timeWindow,
-      tWaveScale, qWaveScale, stOffset, tDuration, qtIntervalMs,
+      tWaveScale, qWaveScale, stOffset, stStartMs, stEndMs, tDuration, qtIntervalMs,
       pDuration, pAmp, qrsWidth, qDur, rDur, sDur, pBiphasic,
       gP, gQ, gR, gS, gT, prDur, ecgWaveShift, overlayUsesDilation
     };
@@ -704,6 +717,8 @@ function loadNamedPreset(name) {
         if (typeof p.waveform.tWaveScale === 'number') tWaveScale = p.waveform.tWaveScale;
         if (typeof p.waveform.qWaveScale === 'number') qWaveScale = p.waveform.qWaveScale;
         if (typeof p.waveform.stOffset === 'number') stOffset = p.waveform.stOffset;
+        if (typeof p.waveform.stStartMs === 'number') stStartMs = p.waveform.stStartMs;
+        if (typeof p.waveform.stEndMs === 'number') stEndMs = p.waveform.stEndMs;
         if (typeof p.waveform.tDuration === 'number') tDuration = p.waveform.tDuration;
         if (typeof p.waveform.qtIntervalMs === 'number') qtIntervalMs = p.waveform.qtIntervalMs;
         if (typeof p.waveform.pDuration === 'number') pDuration = p.waveform.pDuration;
@@ -872,7 +887,7 @@ function handleImportedConduction(parsed) {
 // Persist / load conduction items
 const CONDUCTION_ITEMS_KEY = 'ecg.conductionItems.v1';
 const ECG_TRIGGER_KEY = 'ecg.triggering.v1';
-let ecgTriggeringEnabled = false;
+let ecgTriggeringEnabled = true;
 function saveConductionItems() {
   try {
     storageSetItem(CONDUCTION_ITEMS_KEY, JSON.stringify(conductionItems));
@@ -1433,6 +1448,10 @@ function computeItemEffectiveDurationMs(it, includeDilation = true) {
 function triggerEcgEvent(eventKey) {
   try {
     if (!eventKey) return;
+    // In ischemia mode we suspend conduction animations entirely (placeholder
+    // for a future ischemic-area visualization). Manual triggers and pacer
+    // ticks all go through this function, so gating here is sufficient.
+    if (typeof appMode !== 'undefined' && appMode === 'ischemia') return;
     const now = (pausedConduction ? conductionPausedAtMs : (millis() - conductionTimeOffsetMs));
     let triggered = 0;
     conductionItems.forEach(it => {
@@ -1981,6 +2000,43 @@ function setup() {
   stInput.oninput = (e) => { stOffset = Number(e.target.value) || 0; stVal.textContent = stOffset.toFixed(2); refreshConductionPanel(); saveEcgWaveformSettings(); };
   stRow.appendChild(stLab); stRow.appendChild(stInput); stRow.appendChild(stVal); globalPanel.appendChild(stRow);
 
+  // ST window start/end (ms relative to QRS R-peak). These define WHERE the
+  // ST plateau sits along the beat. The ischemia curve can override per
+  // breakpoint; these sliders are the baseline.
+  const stStartRow = document.createElement('div');
+  stStartRow.style.display = 'flex'; stStartRow.style.alignItems = 'center'; stStartRow.style.gap = '8px';
+  const stStartInput = document.createElement('input');
+  stStartInput.type = 'range'; stStartInput.min = '-20'; stStartInput.max = '300'; stStartInput.step = '1'; stStartInput.value = String(stStartMs);
+  stStartInput.id = 'stStartInput'; stStartInput.style.flex = '1';
+  stStartInput.title = 'Start of the ST plateau, in ms relative to the QRS R-peak';
+  const stStartVal = document.createElement('div'); stStartVal.textContent = String(Math.round(stStartMs)) + ' ms'; stStartVal.style.width = '56px'; stStartVal.style.textAlign = 'right';
+  const stStartLab = document.createElement('div'); stStartLab.textContent = 'ST start'; stStartLab.style.width = '56px'; stStartLab.style.fontSize = '11px';
+  stStartInput.oninput = (e) => {
+    let v = Number(e.target.value) || 0;
+    if (v >= stEndMs - 5) v = stEndMs - 5;
+    stStartMs = v; stStartInput.value = String(v); stStartVal.textContent = String(Math.round(v)) + ' ms';
+    refreshConductionPanel(); saveEcgWaveformSettings();
+  };
+  stStartRow.appendChild(stStartLab); stStartRow.appendChild(stStartInput); stStartRow.appendChild(stStartVal);
+  globalPanel.appendChild(stStartRow);
+
+  const stEndRow = document.createElement('div');
+  stEndRow.style.display = 'flex'; stEndRow.style.alignItems = 'center'; stEndRow.style.gap = '8px';
+  const stEndInput = document.createElement('input');
+  stEndInput.type = 'range'; stEndInput.min = '0'; stEndInput.max = '400'; stEndInput.step = '1'; stEndInput.value = String(stEndMs);
+  stEndInput.id = 'stEndInput'; stEndInput.style.flex = '1';
+  stEndInput.title = 'End of the ST plateau, in ms relative to the QRS R-peak';
+  const stEndVal = document.createElement('div'); stEndVal.textContent = String(Math.round(stEndMs)) + ' ms'; stEndVal.style.width = '56px'; stEndVal.style.textAlign = 'right';
+  const stEndLab = document.createElement('div'); stEndLab.textContent = 'ST end'; stEndLab.style.width = '56px'; stEndLab.style.fontSize = '11px';
+  stEndInput.oninput = (e) => {
+    let v = Number(e.target.value) || 0;
+    if (v <= stStartMs + 5) v = stStartMs + 5;
+    stEndMs = v; stEndInput.value = String(v); stEndVal.textContent = String(Math.round(v)) + ' ms';
+    refreshConductionPanel(); saveEcgWaveformSettings();
+  };
+  stEndRow.appendChild(stEndLab); stEndRow.appendChild(stEndInput); stEndRow.appendChild(stEndVal);
+  globalPanel.appendChild(stEndRow);
+
   const prRow = document.createElement('div'); prRow.style.display = 'flex'; prRow.style.alignItems = 'center'; prRow.style.gap = '8px';
   const prInput = document.createElement('input'); prInput.type = 'range'; prInput.min = '0.06'; prInput.max = '0.30'; prInput.step = '0.005'; prInput.value = String(prDur);
   prInput.id = 'prInput';
@@ -2484,28 +2540,35 @@ function draw() {
     if (singleLeadView) {
       // Single-lead layout: CCS image on left half, ECG tracing on right half
       const halfW = Math.floor(width / 2);
+      // In ischemia mode, reserve top portion of the left half for the
+      // transverse vessel canvas (rendered as a DOM overlay above the p5
+      // canvas). The heart image is shrunk to fit below the reserved strip.
+      const vesselReservedTop = (appMode === 'ischemia') ? Math.floor(height * 0.32) : 0;
       // draw CCS image on left half, centered and scaled (or reserve left half if no image)
       push();
       imageMode(CORNER);
       const imgW = halfW;
-      const imgH = height;
+      const imgH = Math.max(40, height - vesselReservedTop);
       let iw = imgW;
       let ih = imgH;
       let ix = 0;
-      let iy = 0;
+      let iy = vesselReservedTop;
       if (ccsImg) {
         const s = Math.min(imgW / ccsImg.width, imgH / ccsImg.height);
         iw = ccsImg.width * s;
         ih = ccsImg.height * s;
         ix = Math.round((imgW - iw) / 2);
-        iy = Math.round((imgH - ih) / 2);
+        iy = vesselReservedTop + Math.round((imgH - ih) / 2);
         image(ccsImg, ix, iy, iw, ih);
       } else {
         // draw placeholder rectangle for CCS area when image missing
-        noFill(); stroke(200); rect(0, 0, imgW, imgH);
+        noFill(); stroke(200); rect(0, vesselReservedTop, imgW, imgH);
       }
-      // draw any conduction overlays on top of CCS / placeholder
-      try { drawConductionOverlay(ix, iy, iw, ih); } catch (e) { /* ignore overlay errors */ }
+      // draw any conduction overlays on top of CCS / placeholder (skipped in
+      // ischemia mode — animations are suspended there)
+      if (appMode !== 'ischemia') {
+        try { drawConductionOverlay(ix, iy, iw, ih); } catch (e) { /* ignore overlay errors */ }
+      }
       pop();
 
       // Render static PQRST waveform and moving indicator synced to heart rate and conduction
@@ -2520,144 +2583,188 @@ function draw() {
         for (let y = 0; y < ecgG.height; y += 20) ecgG.line(0, y, ecgG.width, y);
         ecgG.pop();
 
-        // Draw static PQRST waveform and sync indicator
+        // Draw scrolling PQRST waveform with stationary red indicator
         const padLeft = 40, padRight = 40, padTop = 40, padBottom = 40;
         const w = ecgG.width - padLeft - padRight;
         const h = ecgG.height - padTop - padBottom;
         const centerY = padTop + h / 2;
         const amplitude = h * 0.35;
-        const sampleCount = w;
-        let points = [];
-        let pStartIdx = 0;
-        let foundPStart = false;
-        let prevV = null;
-        // Use the same time reference as ECG rendering
-        const beatPeriod = 60.0 / heartRate;
-        const duration = beatPeriod * 1000 * timeDilation;
+
+        // Time references
+        const beatPeriod = 60.0 / heartRate; // seconds per beat (ECG time)
         const nowMs = pausedEcg ? ecgPausedAtMs : (millis() - ecgTimeOffsetMs);
-        // t_rel range: -0.2s to +0.6s (we keep this range constant)
-        // base shift previously used: 150ms left
-        const baseShift = -0.15; // seconds
-        // compute the canonical start and range (independent of user shift)
-        const canonicalStart = -0.2 + baseShift;
-        const canonicalEnd = 0.6 - 0.15;
-        const canonicalRange = canonicalEnd - canonicalStart;
-        // apply user-configurable horizontal shift without changing the range
-        const tRelStart = canonicalStart + (typeof ecgWaveShift === 'number' ? ecgWaveShift : 0);
-        const tRelRange = canonicalRange;
-        const tRelEnd = tRelStart + tRelRange;
-        // Calculate time within current beat, mapped to t_rel range
-        const beatFrac = (nowMs / duration) % 1.0;
-        const beatTime = tRelStart + beatFrac * tRelRange;
-        // Sequence runner: if waiting for ECG end, detect beat wrap (end of
-        // visible window) by observing when the beat fraction wraps from near
-        // 1 back to 0. When detected, advance the sequence immediately.
+        // timeDilation slows playback: ECG seconds elapse slower than wall time
+        const dilation = (typeof timeDilation === 'number' && timeDilation > 0) ? timeDilation : 1.0;
+        const nowSec = (nowMs / 1000.0) / dilation;
+        const userShift = (typeof ecgWaveShift === 'number') ? ecgWaveShift : 0;
+
+        // Visible time window: show ~2 beats across the waveform area
+        const beatsVisible = 2;
+        const timeWindowSec = beatPeriod * beatsVisible;
+        const pixelsPerSecond = w / timeWindowSec;
+
+        // Stationary red indicator position. Place ~one QRS width to the
+        // left of the previous 85% position so a small slice of upcoming
+        // waveform (and the QRS itself) is fully visible to the right of
+        // the indicator. ~one QRS width ≈ 0.10 s.
+        const qrsWidthSec = 0.10;
+        const indicatorOffsetFracFromRight = (qrsWidthSec / Math.max(0.001, timeWindowSec));
+        const indicatorFrac = Math.max(0.05, Math.min(0.95, 0.85 - indicatorOffsetFracFromRight));
+        const indicatorX = padLeft + Math.floor(w * indicatorFrac);
+
+        // Time at any pixel x: t = nowSec + (x - indicatorX) / pixelsPerSecond + userShift
+        // Solve for x at indicator: x = indicatorX -> t = nowSec + userShift
+        const timeAtX = (x) => nowSec + (x - indicatorX) / pixelsPerSecond + userShift;
+        const xAtTime = (t) => indicatorX + (t - nowSec - userShift) * pixelsPerSecond;
+
+        // Visible beat times (centers of QRS at t = bt)
+        const visibleStartT = timeAtX(padLeft) - 0.6;
+        const visibleEndT = timeAtX(padLeft + w) + 0.6;
+        const firstBeat = Math.floor(visibleStartT / beatPeriod) * beatPeriod;
+        const beatTimes = [];
+        for (let bt = firstBeat; bt < visibleEndT; bt += beatPeriod) beatTimes.push(bt);
+
+        // --- Ischemia: derive effective T-wave scale and ST offset for the
+        // currently displayed waveform. The single-lead path used to sample
+        // singleBeatSignal() with the *baseline* tWaveScale/stOffset, so the
+        // athero/thrombus/METs sliders had no visible effect on this view.
+        // We now compute eff once per frame, publish ischemiaPercent for the
+        // readout, and use eff.effT / eff.effST everywhere we sample the beat.
+        let _ischT = tWaveScale;
+        let _ischST = stOffset;
+        let _ischStStartMs = stStartMs;
+        let _ischStEndMs   = stEndMs;
         try {
-          const currentBeatFrac = Number(beatFrac) || 0;
+          if (typeof computeIschemia === 'function' && typeof mapIschemiaToEff === 'function') {
+            // Allow the Ischemia Curve editor to temporarily override the
+            // displayed ischemia % while the user hovers over the curve, so
+            // they can see the waveform at any pct in real time without
+            // changing slider values.
+            let _isch;
+            if (typeof window._ischemiaPreviewPct === 'number' && isFinite(window._ischemiaPreviewPct)) {
+              _isch = Math.max(0, Math.min(100, window._ischemiaPreviewPct));
+            } else {
+              _isch = computeIschemia(atheroPercent, METs, thrombusPercent);
+            }
+            ischemiaPercent = _isch;
+            const _eff = mapIschemiaToEff(_isch);
+            if (_eff && typeof _eff.effT === 'number') _ischT = _eff.effT;
+            if (_eff && typeof _eff.effST === 'number') _ischST = _eff.effST;
+            if (_eff && typeof _eff.effStStartMs === 'number') _ischStStartMs = _eff.effStStartMs;
+            if (_eff && typeof _eff.effStEndMs   === 'number') _ischStEndMs   = _eff.effStEndMs;
+            if (typeof ischemiaSpan !== 'undefined' && ischemiaSpan) ischemiaSpan.textContent = String(Math.round(ischemiaPercent));
+            if (typeof ischemiaSlider !== 'undefined' && ischemiaSlider) ischemiaSlider.value = String(Math.round(ischemiaPercent));
+          }
+        } catch (e) { /* fall back to baseline */ }
+
+        // Detect wave-feature offsets (relative to QRS center) using a template beat.
+        // These move with whatever singleBeatSignal currently produces.
+        let pStartOffset = null, pEndOffset = null;
+        let qStartOffset = null, qEndOffset = null;
+        let rStartOffset = null, rEndOffset = null;
+        let sStartOffset = null, sEndOffset = null;
+        let tStartOffset = null, tEndOffset = null;
+        {
+          const tplStart = -0.45, tplEnd = 0.65;
+          const tplN = 440;
+          let prev = null;
+          let pPicked = false, qPicked = false, rPicked = false, sPicked = false, tPicked = false;
+          for (let i = 0; i <= tplN; i++) {
+            const tr = tplStart + (i / tplN) * (tplEnd - tplStart);
+            const vv = singleBeatSignal(tr, tWaveScale, stOffset, {p:1,q:1,r:1,s:1,t:1});
+            if (prev !== null) {
+              if (!pPicked && prev <= 0.02 && vv > 0.02 && tr < -0.05) { pStartOffset = tr; pPicked = true; }
+              else if (pPicked && pEndOffset === null && prev > 0.02 && vv <= 0.02 && tr < -0.02) { pEndOffset = tr; }
+              if (!qPicked && prev > -0.02 && vv <= -0.02) { qStartOffset = tr; qPicked = true; }
+              else if (qPicked && qEndOffset === null && prev <= -0.02 && vv > -0.02) { qEndOffset = tr; }
+              if (!rPicked && qPicked && prev < 0.02 && vv >= 0.02) { rStartOffset = tr; rPicked = true; }
+              else if (rPicked && rEndOffset === null && prev >= 0.02 && vv < 0.02) { rEndOffset = tr; }
+              if (!sPicked && rPicked && prev > -0.02 && vv <= -0.02) { sStartOffset = tr; sPicked = true; }
+              else if (sPicked && sEndOffset === null && prev <= -0.02 && vv > -0.02) { sEndOffset = tr; }
+              if (!tPicked && sPicked && prev < 0.02 && vv >= 0.02) { tStartOffset = tr; tPicked = true; }
+              else if (tPicked && tEndOffset === null && prev >= 0.02 && vv < 0.02) { tEndOffset = tr; }
+            }
+            prev = vv;
+          }
+          // Prefer duration-based P end when available
+          if (pStartOffset !== null && typeof pDuration === 'number' && pDuration > 0) {
+            pEndOffset = pStartOffset + pDuration;
+          }
+        }
+
+        // Sequence runner: detect beat wrap by observing nowSec passing a beat boundary
+        try {
+          const currentBeatFrac = ((nowSec / beatPeriod) % 1 + 1) % 1;
           if (presetSequenceWaitingForEcgEnd && presetSequencePlaying) {
             if (currentBeatFrac < lastEcgBeatFrac) {
-              // Wrapped: advance to next preset
               presetSequenceWaitingForEcgEnd = false;
               presetSequenceIndex++;
               if (presetSequenceIndex >= presetSequence.length) {
                 if (presetSequenceLoop) presetSequenceIndex = 0; else { stopPresetSequence(); }
               }
               if (presetSequencePlaying) {
-                // Load next preset and continue waiting for next wrap
                 playCurrentAndScheduleNext();
               }
             }
           }
           lastEcgBeatFrac = currentBeatFrac;
         } catch (e) { /* ignore sequence timing errors */ }
-        for (let i = 0; i <= sampleCount; i++) {
-          const t_rel = (i / sampleCount) * tRelRange + tRelStart;
-          const v = singleBeatSignal(t_rel, tWaveScale, stOffset, {p:1,q:1,r:1,s:1,t:1});
-          const x = padLeft + i;
+
+        // Build sample points across the waveform region by summing visible beats.
+        const points = [];
+        for (let xi = 0; xi <= w; xi++) {
+          const x = padLeft + xi;
+          const t = timeAtX(x);
+          let v = 0;
+          for (let bt of beatTimes) v += singleBeatSignal(t - bt, _ischT, _ischST, {p:1,q:1,r:1,s:1,t:1}, { stStartMs: _ischStStartMs, stEndMs: _ischStEndMs });
           const y = centerY - v * amplitude;
-          points.push({x, y, t_rel, v});
-          // Find start of P wave (where signal rises above a threshold)
-          if (!foundPStart && prevV !== null && v > 0.02 && prevV <= 0.02) {
-            pStartIdx = i;
-            foundPStart = true;
-          }
-          prevV = v;
-          // Find start indices for Q, R, S, T waves
-          if (i > 0) {
-            // Q: sharp negative deflection after P
-            if (!window._foundQStart && points[i-1].v > -0.02 && v <= -0.02) {
-              window._qStartIdx = i;
-              window._foundQStart = true;
-            }
-            // R: sharp positive after Q
-            if (!window._foundRStart && points[i-1].v < 0.02 && v >= 0.02 && foundPStart && window._foundQStart) {
-              window._rStartIdx = i;
-              window._foundRStart = true;
-            }
-            // S: negative after R
-            if (!window._foundSStart && points[i-1].v > -0.02 && v <= -0.02 && window._foundRStart) {
-              window._sStartIdx = i;
-              window._foundSStart = true;
-            }
-            // T: positive after S
-            if (!window._foundTStart && points[i-1].v < 0.02 && v >= 0.02 && window._foundSStart) {
-              window._tStartIdx = i;
-              window._foundTStart = true;
-            }
-          }
+          points.push({x, y, t});
         }
+
         ecgG.push();
-        // Overlay: draw expected start/end intervals for conduction items bound to ECG events
+        // Overlay: draw expected start/end intervals for conduction items bound to ECG events.
+        // With scrolling, draw an overlay rect for each visible beat occurrence.
         if (showConductionOverlay) {
         try {
-          // Map event keys to point indices when available
-          const eventIndexForKey = (key) => {
-            if (!key) return null;
+          const offsetForKey = (key) => {
             switch (key) {
-              case 'P_start': return foundPStart ? pStartIdx : null;
-              case 'P_end': return foundPStart ? Math.min(points.length-1, pStartIdx + Math.round((pDuration||0)*sampleCount/tRelRange)) : null;
-              case 'Q_start': return (window._foundQStart ? window._qStartIdx : null);
-              case 'R_start': return (window._foundRStart ? window._rStartIdx : null);
-              case 'S_start': return (window._foundSStart ? window._sStartIdx : null);
-              case 'T_start': return (window._foundTStart ? window._tStartIdx : null);
+              case 'P_start': return pStartOffset;
+              case 'P_end': return pEndOffset;
+              case 'Q_start': return qStartOffset;
+              case 'R_start': return rStartOffset;
+              case 'S_start': return sStartOffset;
+              case 'T_start': return tStartOffset;
               default: return null;
             }
           };
-          // Collect overlay rectangles first so we can assign non-overlapping vertical tiers
           const overlays = [];
+          const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
           for (let it of conductionItems) {
             if (!it) continue;
             if ((it.startMode || 'after_previous') !== 'on_ecg_event') continue;
             const ev = it.ecgEvent;
             if (!ev) continue;
-            const startIdx = eventIndexForKey(ev);
-            if (typeof startIdx !== 'number' || !points[startIdx]) continue;
-            const startT_base = points[startIdx].t_rel;
-            // Overlays reflect ECG-feature timing and should not be affected by
-            // the playback `timeDilation`. Compute durations and offsets in
-            // raw (non-dilated) milliseconds so they remain tied to the ECG.
+            const off = offsetForKey(ev);
+            if (typeof off !== 'number') continue;
             const durMs = computeItemEffectiveDurationMs(it, false) || 0;
             const durSec = durMs / 1000.0;
-            // Apply per-item start offset (ms) without dilation so overlays show
-            // the real ECG-relative offset.
             const offsetMs = Number(it.startOffsetMs) || 0;
             const offsetSec = offsetMs / 1000.0;
-            const startT = startT_base + offsetSec;
-            const endT = startT + durSec;
-            const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-            const startX = clamp(Math.round(padLeft + ((startT - tRelStart) / tRelRange) * w), padLeft, padLeft + w);
-            const endX = clamp(Math.round(padLeft + ((endT - tRelStart) / tRelRange) * w), padLeft, padLeft + w);
-            if (endX <= startX) continue;
-            overlays.push({ startX, endX, color: it.color || '#ff0000', label: it.name || it.id || '(item)' });
+            for (let bt of beatTimes) {
+              const startT = bt + off + offsetSec;
+              const endT = startT + durSec;
+              const sx = clamp(Math.round(xAtTime(startT)), padLeft, padLeft + w);
+              const ex = clamp(Math.round(xAtTime(endT)), padLeft, padLeft + w);
+              if (ex <= sx) continue;
+              overlays.push({ startX: sx, endX: ex, color: it.color || '#ff0000', label: it.name || it.id || '(item)' });
+            }
           }
 
           if (overlays.length > 0) {
-            // sort by startX so stacking is deterministic
             overlays.sort((a,b) => a.startX - b.startX || (a.endX - b.endX));
-            // determine number of tiers based on available height and desired tier height
             const maxTiers = Math.max(1, Math.min(6, Math.floor(h / 20)));
             const tierHeight = Math.max(12, Math.min(28, Math.floor(h / Math.max(1, maxTiers)) - 4));
-            const gap = 6; // minimal horizontal gap to allow placing overlays on same tier
+            const gap = 6;
             const lastEnd = [];
             overlays.forEach(o => {
               let tier = 0;
@@ -2666,7 +2773,6 @@ function draw() {
               o.tier = tier;
             });
 
-            // draw overlays with tiered vertical positions
             for (let o of overlays) {
               try {
                 const rgb = hexToRgb(o.color || '#ff0000');
@@ -2679,7 +2785,6 @@ function draw() {
                 ecgG.strokeWeight(1);
                 ecgG.line(o.startX, y, o.startX, y + hrect);
                 ecgG.line(o.endX, y, o.endX, y + hrect);
-                // label
                 ecgG.noStroke(); ecgG.fill(0); ecgG.textSize(12);
                 const tx = Math.max(o.startX + 4, Math.min(o.endX - 40, o.startX + 4));
                 ecgG.text(o.label, tx, y + Math.min(14, Math.max(12, Math.round(hrect/2))));
@@ -2688,6 +2793,7 @@ function draw() {
           }
         } catch (e) { /* overlay errors shouldn't break draw */ } }
 
+        // Draw the waveform
         ecgG.stroke(0, 120, 0);
         ecgG.strokeWeight(3);
         ecgG.noFill();
@@ -2696,36 +2802,18 @@ function draw() {
         ecgG.endShape();
         ecgG.pop();
 
-        // Find indicator position by matching beatTime to t_rel (smooth interpolation)
-        let indicatorX, indicatorIdx = 0;
-        if (beatTime <= points[0].t_rel) {
-          indicatorX = points[0].x;
-          indicatorIdx = 0;
-        } else if (beatTime >= points[points.length-1].t_rel) {
-          indicatorX = points[points.length-1].x;
-          indicatorIdx = points.length-1;
-        } else {
-          for (let i = 1; i < points.length; i++) {
-            if (points[i].t_rel >= beatTime) {
-              const prev = points[i-1], curr = points[i];
-              const frac = (beatTime - prev.t_rel) / (curr.t_rel - prev.t_rel);
-              indicatorX = prev.x + frac * (curr.x - prev.x);
-              indicatorIdx = i;
-              break;
-            }
-          }
-        }
+        // Stationary red indicator line
         ecgG.push();
-        ecgG.stroke(255,0,0);
+        ecgG.stroke(255, 0, 0);
         ecgG.strokeWeight(2);
         ecgG.line(indicatorX, padTop, indicatorX, ecgG.height - padBottom);
         ecgG.pop();
 
-        // Debugging: Track indicator crossing wave starts and log to popup
+        // Debug log helper (kept for compatibility with debug popup)
         if (!window._waveCrossLog) window._waveCrossLog = [];
         function logWaveCross(wave, x) {
-          const now = new Date();
-          window._waveCrossLog.push({wave, time: now.toLocaleTimeString(), x: Math.round(x)});
+          const nowDt = new Date();
+          window._waveCrossLog.push({wave, time: nowDt.toLocaleTimeString(), x: Math.round(x)});
           if (window.conductionDebugWindow && !window.conductionDebugWindow.closed) {
             try {
               const doc = window.conductionDebugWindow.document;
@@ -2744,73 +2832,42 @@ function draw() {
             } catch (e) {}
           }
         }
-        // Track indicator crossing wave starts and trigger conduction steps by ECG event
+
+        // Wave-feature crossings: trigger when the waveform feature time
+        // crosses the stationary indicator (i.e., feature absolute time
+        // crosses nowSec + userShift between the previous frame and this one).
         const eventCrossings = [];
-        if (typeof window._lastIndicatorX === 'number') {
-          // Helper: push event if indicator crosses from left to right
-          function checkCross(idx, label, eventKey) {
-            if (typeof idx === 'number') {
-              const x = points[idx].x;
-              if (window._lastIndicatorX < x && indicatorX >= x) {
-                logWaveCross(label, x);
-                // record P start effective timestamp for ms counter
-                if (label === 'P') {
-                  try { lastPStartMs = Math.max(0, nowMs); } catch (e) {}
-                }
-                eventCrossings.push(eventKey);
+        const indicatorTime = nowSec + userShift;
+        const prevIndicatorTime = (typeof window._lastIndicatorTime === 'number') ? window._lastIndicatorTime : indicatorTime;
+        function checkFeatureCross(featOffset, label, eventKey) {
+          if (typeof featOffset !== 'number') return;
+          for (let bt of beatTimes) {
+            const featT = bt + featOffset;
+            if (prevIndicatorTime < featT && featT <= indicatorTime) {
+              try { logWaveCross(label, indicatorX); } catch (e) {}
+              if (label === 'P') {
+                try { lastPStartMs = Math.max(0, nowMs); } catch (e) {}
               }
+              eventCrossings.push(eventKey);
             }
-          }
-          if (foundPStart) checkCross(pStartIdx, 'P', 'P_start');
-          if (window._foundQStart) checkCross(window._qStartIdx, 'Q', 'Q_start');
-          if (window._foundRStart) checkCross(window._rStartIdx, 'R', 'R_start');
-          if (window._foundSStart) checkCross(window._sStartIdx, 'S', 'S_start');
-          if (window._foundTStart) checkCross(window._tStartIdx, 'T', 'T_start');
-          // End events: next sample after start
-          function checkEnd(idx, label, eventKey) {
-            if (typeof idx !== 'number') return;
-            // Default: use the next sample as the end marker
-            let endIdx = idx + 1;
-            // For P waves, prefer a duration-based end: P_end = P_start + pDuration
-            if (label === 'P') {
-              try {
-                const pStartTRel = points[idx] && points[idx].t_rel;
-                if (typeof pStartTRel === 'number' && (typeof pDuration === 'number' && pDuration > 0)) {
-                  const targetT = pStartTRel + pDuration; // seconds relative
-                  for (let j = idx + 1; j < points.length; j++) {
-                    if (points[j].t_rel >= targetT) { endIdx = j; break; }
-                  }
-                  if (endIdx >= points.length) endIdx = points.length - 1;
-                }
-              } catch (e) { /* fall back to idx+1 */ }
-            }
-            if (endIdx < points.length) {
-              const x = points[endIdx].x;
-              if (window._lastIndicatorX < x && indicatorX >= x) {
-                logWaveCross(label + ' end', x);
-                eventCrossings.push(eventKey);
-              }
-            }
-          }
-          if (foundPStart) checkEnd(pStartIdx, 'P', 'P_end');
-          if (window._foundQStart) checkEnd(window._qStartIdx, 'Q', 'Q_end');
-          if (window._foundRStart) checkEnd(window._rStartIdx, 'R', 'R_end');
-          if (window._foundSStart) checkEnd(window._sStartIdx, 'S', 'S_end');
-          if (window._foundTStart) checkEnd(window._tStartIdx, 'T', 'T_end');
-          // Reset trigger when indicator wraps around to left
-          if (window._lastIndicatorX > indicatorX) {
-            window._conductionTriggered = false;
-            window._foundQStart = false;
-            window._foundRStart = false;
-            window._foundSStart = false;
-            window._foundTStart = false;
           }
         }
+        checkFeatureCross(pStartOffset, 'P', 'P_start');
+        checkFeatureCross(pEndOffset, 'P end', 'P_end');
+        checkFeatureCross(qStartOffset, 'Q', 'Q_start');
+        checkFeatureCross(qEndOffset, 'Q end', 'Q_end');
+        checkFeatureCross(rStartOffset, 'R', 'R_start');
+        checkFeatureCross(rEndOffset, 'R end', 'R_end');
+        checkFeatureCross(sStartOffset, 'S', 'S_start');
+        checkFeatureCross(sEndOffset, 'S end', 'S_end');
+        checkFeatureCross(tStartOffset, 'T', 'T_start');
+        checkFeatureCross(tEndOffset, 'T end', 'T_end');
+        window._lastIndicatorTime = indicatorTime;
+        // Maintain back-compat for any external code referencing _lastIndicatorX
         window._lastIndicatorX = indicatorX;
 
-        // ECG event crossings detected. We optionally forward events to the
-        // global trigger handler when ECG-triggering is enabled (user toggle).
-        // Manual triggers (the per-item Trigger buttons) still work.
+        // ECG event crossings detected. Forward to global trigger handler
+        // when ECG-triggering is enabled (manual per-item triggers still work).
         if (eventCrossings.length > 0) {
           if (ecgTriggeringEnabled) {
             try {
@@ -3364,33 +3421,144 @@ function mouseReleased() {
   }
 }
 
-// Map an ischemia percentage (0..100) into effective T scale and ST offset
+// =============================================================================
+// Ischemia → ECG mapping
+// The mapping is a piecewise-linear curve over ischemia% with breakpoints that
+// specify (effT, effST). At pct=0 the baseline tWaveScale / stOffset are used;
+// from there the curve is interpolated between consecutive breakpoints sorted
+// by percent. Edit/save/load via the "Ischemia Curve" panel.
+//
+// effT  : T-wave scale at this ischemia level (negative = inverted T)
+// effST : ST-segment offset (positive = elevation, negative = depression)
+//
+// The defaults below reproduce the old hard-coded behavior:
+//   0..50  : T inverts from baseline -> -1, ST stays at baseline
+//   50..90 : T pinned at -1, ST drops baseline -> -0.4 (depression)
+//   90..95 : T pinned at -1, ST swings -0.4 -> +0.1
+//   95..100: T -1 -> -0.25, ST +0.1 -> +0.7 (transmural / STEMI-like)
+// =============================================================================
+const ISCHEMIA_CURVE_DEFAULT = [
+  { pct: 50,  effT: -1.0,  effST: null  },  // null effST = inherit baseline stOffset
+  { pct: 90,  effT: -1.0,  effST: -0.4  },
+  { pct: 95,  effT: -1.0,  effST:  0.1  },
+  { pct: 100, effT: -0.25, effST:  0.7  },
+];
+
+// Active curve (mutable). Loaded from localStorage on startup.
+let ischemiaCurve = ISCHEMIA_CURVE_DEFAULT.map(p => ({ ...p }));
+
+const ISCHEMIA_CURVE_KEY = 'ccs.ischemiaCurve.v1';
+const ISCHEMIA_CURVE_LIBRARY_KEY = 'ccs.ischemiaCurves.v1';
+
+function _normalizeIschemiaCurve(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return ISCHEMIA_CURVE_DEFAULT.map(p => ({ ...p }));
+  const cleaned = arr
+    .filter(p => p && typeof p.pct === 'number' && isFinite(p.pct))
+    .map(p => ({
+      pct: Math.max(0, Math.min(100, Number(p.pct))),
+      effT: (p.effT === null || p.effT === undefined) ? null : Number(p.effT),
+      effST: (p.effST === null || p.effST === undefined) ? null : Number(p.effST),
+      effStStartMs: (p.effStStartMs === null || p.effStStartMs === undefined) ? null : Number(p.effStStartMs),
+      effStEndMs:   (p.effStEndMs   === null || p.effStEndMs   === undefined) ? null : Number(p.effStEndMs),
+    }))
+    .sort((a, b) => a.pct - b.pct);
+  return cleaned.length > 0 ? cleaned : ISCHEMIA_CURVE_DEFAULT.map(p => ({ ...p }));
+}
+
+function saveIschemiaCurve() {
+  try { storageSetItem(ISCHEMIA_CURVE_KEY, JSON.stringify(ischemiaCurve)); } catch (e) { console.warn('saveIschemiaCurve', e); }
+}
+function loadIschemiaCurve() {
+  try {
+    const raw = storageGetItem(ISCHEMIA_CURVE_KEY);
+    if (!raw) return;
+    ischemiaCurve = _normalizeIschemiaCurve(JSON.parse(raw));
+  } catch (e) { console.warn('loadIschemiaCurve', e); }
+}
+function _getAllIschemiaCurves() {
+  try { const raw = storageGetItem(ISCHEMIA_CURVE_LIBRARY_KEY); return raw ? (JSON.parse(raw) || {}) : {}; } catch (e) { return {}; }
+}
+function _saveAllIschemiaCurves(obj) {
+  try { storageSetItem(ISCHEMIA_CURVE_LIBRARY_KEY, JSON.stringify(obj || {})); } catch (e) {}
+}
+function saveNamedIschemiaCurve(name) {
+  if (!name) return false;
+  try {
+    const all = _getAllIschemiaCurves();
+    all[name] = { name, savedAt: (new Date()).toISOString(), curve: ischemiaCurve.map(p => ({ ...p })) };
+    _saveAllIschemiaCurves(all);
+    return true;
+  } catch (e) { console.warn('saveNamedIschemiaCurve', e); return false; }
+}
+function loadNamedIschemiaCurve(name) {
+  try {
+    const all = _getAllIschemiaCurves();
+    const p = all[name];
+    if (!p || !Array.isArray(p.curve)) return false;
+    ischemiaCurve = _normalizeIschemiaCurve(p.curve);
+    saveIschemiaCurve();
+    return true;
+  } catch (e) { return false; }
+}
+function deleteNamedIschemiaCurve(name) {
+  try {
+    const all = _getAllIschemiaCurves();
+    if (!(name in all)) return false;
+    delete all[name];
+    _saveAllIschemiaCurves(all);
+    return true;
+  } catch (e) { return false; }
+}
+
+// Initial load (storage helpers are defined earlier in the file)
+try { loadIschemiaCurve(); } catch (e) {}
+
+// Map an ischemia percentage (0..100) into effective T scale, ST offset, and
+// ST window (start/end in ms relative to QRS R-peak), using the editable
+// piecewise-linear ischemiaCurve.
 function mapIschemiaToEff(pct) {
-  let baselineT = tWaveScale;
-  let baselineST = stOffset;
-  let effT = baselineT;
-  let effST = baselineST;
-  const pctC = constrain(pct, 0, 100);
-  if (pctC > 0) {
-    if (pctC <= 50) {
-      let f = pctC / 50.0;
-      effT = lerp(baselineT, -1, f);
-      effST = baselineST;
-    } else if (pctC <= 90) {
-      effT = -1;
-      let f = (pctC - 50) / 40.0;
-      effST = lerp(baselineST, -0.4, f);
-    } else if (pctC <= 95) {
-      effT = -1;
-      let f = (pctC - 90) / 5.0;
-      effST = lerp(-0.4, 0.1, f);
-    } else {
-      let f = (pctC - 95) / 5.0;
-      effT = lerp(-1, -0.25, f);
-      effST = lerp(0.1, 0.7, f);
+  const baselineT = tWaveScale;
+  const baselineST = stOffset;
+  const baselineStStartMs = stStartMs;
+  const baselineStEndMs   = stEndMs;
+  const pctC = Math.max(0, Math.min(100, Number(pct) || 0));
+  if (pctC <= 0) return { effT: baselineT, effST: baselineST, effStStartMs: baselineStStartMs, effStEndMs: baselineStEndMs };
+
+  // Build a working list with an implicit baseline anchor at pct=0.
+  const curve = (Array.isArray(ischemiaCurve) && ischemiaCurve.length > 0)
+    ? ischemiaCurve.slice().sort((a, b) => a.pct - b.pct)
+    : ISCHEMIA_CURVE_DEFAULT.slice();
+  const resolveT  = (p) => (p.effT  === null || p.effT  === undefined) ? baselineT  : p.effT;
+  const resolveST = (p) => (p.effST === null || p.effST === undefined) ? baselineST : p.effST;
+  const resolveStStart = (p) => (p.effStStartMs === null || p.effStStartMs === undefined) ? baselineStStartMs : p.effStStartMs;
+  const resolveStEnd   = (p) => (p.effStEndMs   === null || p.effStEndMs   === undefined) ? baselineStEndMs   : p.effStEndMs;
+  const points = [{ pct: 0, effT: baselineT, effST: baselineST, effStStartMs: baselineStStartMs, effStEndMs: baselineStEndMs }]
+    .concat(curve.map(p => ({
+      pct: p.pct,
+      effT: resolveT(p), effST: resolveST(p),
+      effStStartMs: resolveStStart(p), effStEndMs: resolveStEnd(p),
+    })));
+
+  // Above the highest breakpoint: clamp to that breakpoint's values.
+  if (pctC >= points[points.length - 1].pct) {
+    const last = points[points.length - 1];
+    return { effT: last.effT, effST: last.effST, effStStartMs: last.effStStartMs, effStEndMs: last.effStEndMs };
+  }
+  // Find the bracketing pair and lerp.
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i], b = points[i + 1];
+    if (pctC >= a.pct && pctC <= b.pct) {
+      const span = Math.max(1e-6, b.pct - a.pct);
+      const f = (pctC - a.pct) / span;
+      return {
+        effT:  a.effT  + (b.effT  - a.effT)  * f,
+        effST: a.effST + (b.effST - a.effST) * f,
+        effStStartMs: a.effStStartMs + (b.effStStartMs - a.effStStartMs) * f,
+        effStEndMs:   a.effStEndMs   + (b.effStEndMs   - a.effStEndMs)   * f,
+      };
     }
   }
-  return { effT, effST };
+  return { effT: baselineT, effST: baselineST, effStStartMs: baselineStStartMs, effStEndMs: baselineStEndMs };
 }
 
 // Compute an ischemia percentage (0..100) from athero %, METs and thrombus %
@@ -3581,7 +3749,7 @@ function timeToX(t, now, pixelsPerSecond) {
 // Single beat signal function (seconds relative to beat center)
 // Composed of P wave (small, negative/positive), QRS (sharp), and T wave (broader)
 // singleBeatSignal now accepts an optional per-lead multiplier object: {q,r,s,t}
-function singleBeatSignal(t, effTWaveScale, effSTOffset, leadMults) {
+function singleBeatSignal(t, effTWaveScale, effSTOffset, leadMults, stOpts) {
   // We'll build each wave with explicit windows so we can enforce
   // small baseline intervals between waves.
   // Default / dynamic window boundaries (relative to QRS at t=0)
@@ -3762,6 +3930,10 @@ function singleBeatSignal(t, effTWaveScale, effSTOffset, leadMults) {
     sScale = (1 - sFlattenAmount) * 1 + sFlattenAmount * expScale;
     sScale = constrain(sScale, 0, 1);
   }
+  // Additionally, when ST is offset (either elevated OR depressed) AND the
+  // user-set ST window overlaps the S wave, the ST plateau replaces the S
+  // notch — that fade-out happens further below where we know the ST window
+  // bounds. Here we leave the S-shape contribution alone.
   // Blend S between its scaled negative base and a positive raise value.
   // When sScale==1 => s == sBase (original negative S).
   // When sScale==0 => s == sMaxRaise (fully raised, possibly positive).
@@ -3785,19 +3957,51 @@ function singleBeatSignal(t, effTWaveScale, effSTOffset, leadMults) {
   let tw = gauss(t, tCenter, tSigma) * 0.36 * effTWaveScale * tMult * smoothWindow(t, tStart, tEndFinal);
   tw *= gT;
 
-  // ST segment: create a smooth plateau (flat ST) between the end of S and
-  // the start of T using the raised-cosine smoothWindow. This gives a
-  // gentle transition from the S wave into the ST segment instead of a
-  // gaussian tail that can look abrupt.
-  // Define a window from slightly before sEnd to slightly before tStart
-  let stStart = sEnd - sStOverlap; // fixed overlap with S for smoothing
-  // Make ST end always centered on the T wave (tCenter).
-  let stEndWindow = tCenter;
-  // Ensure there's at least a minimal window; if not, push stStart earlier.
+  // ST segment: a plateau over a USER-CONTROLLED time window (in ms,
+  // relative to the QRS R-peak at t=0). Defaults pull from the global
+  // stStartMs/stEndMs sliders; the ischemia curve can override per
+  // breakpoint via stOpts.stStartMs / stOpts.stEndMs (in ms).
+  //
+  // The offset is added on top of whatever waves it overlaps. To avoid
+  // any return to the isoelectric line at the joints we use a near-
+  // instantaneous (~3 ms) cosine taper at each end so the offset is at
+  // its full value almost immediately at stStart and decays just as
+  // quickly at stEnd. Any wave (R tail, T onset, etc.) that occupies
+  // the same time interval is summed with the offset, so the trace is
+  // continuous: e.g., elevation inside R rises directly from the R peak
+  // to the elevated plateau, and depression inside the S region replaces
+  // the negative S notch with the depressed plateau.
+  const _stStartSec = ((stOpts && typeof stOpts.stStartMs === 'number') ? stOpts.stStartMs : stStartMs) / 1000.0;
+  const _stEndSec   = ((stOpts && typeof stOpts.stEndMs   === 'number') ? stOpts.stEndMs   : stEndMs)   / 1000.0;
+  let stStart = _stStartSec;
+  let stEndWindow = _stEndSec;
   if (stEndWindow <= stStart + 0.005) {
-    stStart = stEndWindow - 0.005;
+    stEndWindow = stStart + 0.005;
   }
-  let st = effSTOffset * smoothWindow(t, stStart, stEndWindow);
+  // Suppress the negative S whenever the ST window covers the S region
+  // AND there's a non-trivial offset, so the depressed/elevated plateau
+  // is visually contiguous with whatever wave it overlaps.
+  // (sScale was computed earlier; this further fades S if the user has
+  // pulled stStart back into or before the S wave.)
+  if (Math.abs(effSTOffset) > 0.02 && stStart <= sEnd) {
+    const overlapFrac = constrain((sEnd - stStart) / Math.max(1e-6, sEnd - sStart), 0, 1);
+    s *= (1 - overlapFrac);
+  }
+  function stEnvelope(x, a, b) {
+    if (x <= a || x >= b) return 0.0;
+    const span = b - a;
+    const taper = Math.min(0.003, span * 0.25); // ~3 ms onset/offset
+    if (x < a + taper) {
+      const u = (x - a) / taper;
+      return 0.5 * (1 - Math.cos(Math.PI * u));
+    }
+    if (x > b - taper) {
+      const u = (b - x) / taper;
+      return 0.5 * (1 - Math.cos(Math.PI * u));
+    }
+    return 1.0;
+  }
+  let st = effSTOffset * stEnvelope(t, stStart, stEndWindow);
 
   return p + q + r + s + tw + st;
 }
@@ -3861,6 +4065,12 @@ function drawSingleLeadTo(g, hr) {
 
   // compute ischemia-based T/ST
   const derivedIschemia = computeIschemia(atheroPercent, METs, thrombusPercent);
+  // Publish to global so the readout (and any other UI) stays in sync. The
+  // 12-lead path (drawECG) does this too; single-lead used to compute it
+  // locally and never write it back, leaving the readout frozen at 0.
+  ischemiaPercent = derivedIschemia;
+  if (typeof ischemiaSpan !== 'undefined' && ischemiaSpan) ischemiaSpan.textContent = String(Math.round(ischemiaPercent));
+  if (typeof ischemiaSlider !== 'undefined' && ischemiaSlider) ischemiaSlider.value = String(Math.round(ischemiaPercent));
   const eff = mapIschemiaToEff(derivedIschemia);
 
   // Build single-beat template (sampled at 1 px)
@@ -3975,7 +4185,7 @@ function drawStaticSingleLeadTo(g, hr) {
       // Use current waveform globals (possibly overridden via applyWaveformTemporarily)
       const derived = computeIschemia(atheroPercent, METs, thrombusPercent);
       const eff = mapIschemiaToEff(derived);
-      const v = singleBeatSignal(t_rel, eff.effT, eff.effST, {p:1,q:1,r:1,s:1,t:1});
+      const v = singleBeatSignal(t_rel, eff.effT, eff.effST, {p:1,q:1,r:1,s:1,t:1}, { stStartMs: eff.effStStartMs, stEndMs: eff.effStEndMs });
       const x = padLeft + ix;
       const y = centerY - v * amp;
       const xa = Math.round(x * (window._ecg_dpr || 1)) / (window._ecg_dpr || 1);
@@ -4120,10 +4330,1243 @@ function drawVessel() {
   vesselCtx.stroke();
 
   // (thrombus now represented as annulus; no central dot)
-
-  // small label
-  vesselCtx.fillStyle = '#222';
-  vesselCtx.font = Math.max(10, Math.round(w * 0.07)) + 'px sans-serif';
-  vesselCtx.textAlign = 'center';
-  vesselCtx.fillText('Vessel (transverse)', cx, h - 8);
 }
+
+// =============================================================================
+// App chrome: unified top toolbar + consistent panel styling.
+// Built on top of the pre-existing panels (globalControlPanel,
+// conductionPanelDiv, leadControlsDiv, basicPanel, data-file div). Adds a
+// stylesheet, a top toolbar with toggle buttons, and a shared header bar
+// (title + close X) on each panel. Hides the old scattered toggle buttons.
+// Idempotent: safe to call once after panels exist.
+// =============================================================================
+function installAppChrome() {
+  if (window.__appChromeInstalled) return;
+  window.__appChromeInstalled = true;
+
+  // ---- Inject stylesheet ---------------------------------------------------
+  const css = `
+    :root {
+      --app-bg: #f7f9fc;
+      --app-panel-bg: #ffffff;
+      --app-panel-border: rgba(15, 23, 42, 0.08);
+      --app-panel-shadow: 0 8px 24px rgba(15, 23, 42, 0.10);
+      --app-text: #0f172a;
+      --app-muted: #475569;
+      --app-accent: #2563eb;
+      --app-accent-hover: #1d4ed8;
+      --app-danger: #dc2626;
+      --app-success: #16a34a;
+      --app-toolbar-h: 48px;
+      --app-radius: 8px;
+    }
+    .app-toolbar {
+      position: fixed; top: 0; left: 0; right: 0;
+      height: var(--app-toolbar-h);
+      display: flex; align-items: center; gap: 6px;
+      padding: 0 12px;
+      background: linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%);
+      border-bottom: 1px solid var(--app-panel-border);
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+      z-index: 11000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      color: var(--app-text);
+    }
+    .app-toolbar__brand {
+      font-weight: 700; letter-spacing: 0.2px;
+      padding: 0 12px 0 4px;
+      color: var(--app-text);
+      border-right: 1px solid var(--app-panel-border);
+      margin-right: 6px;
+    }
+    .app-toolbar__spacer { flex: 1 1 auto; }
+    .app-toolbar__readout {
+      font-variant-numeric: tabular-nums;
+      color: var(--app-muted);
+      padding: 0 8px;
+      white-space: nowrap;
+    }
+    .app-btn {
+      appearance: none;
+      font: inherit;
+      color: var(--app-text);
+      background: #ffffff;
+      border: 1px solid var(--app-panel-border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+      line-height: 1.2;
+    }
+    .app-btn:hover { background: #f1f5f9; }
+    .app-btn:active { background: #e2e8f0; }
+    .app-btn--toolbar { padding: 6px 12px; }
+    .app-btn--toolbar.is-active {
+      background: var(--app-accent);
+      border-color: var(--app-accent);
+      color: #ffffff;
+    }
+    .app-btn--primary {
+      background: var(--app-accent);
+      border-color: var(--app-accent);
+      color: #ffffff;
+    }
+    .app-btn--primary:hover { background: var(--app-accent-hover); border-color: var(--app-accent-hover); }
+    .app-btn--danger { color: var(--app-danger); }
+    .app-btn--danger:hover { background: #fee2e2; border-color: #fecaca; }
+    .app-btn--icon {
+      padding: 4px 8px;
+      line-height: 1;
+      font-size: 16px;
+    }
+
+    .app-panel {
+      position: fixed;
+      top: calc(var(--app-toolbar-h) + 8px);
+      background: var(--app-panel-bg) !important;
+      border: 1px solid var(--app-panel-border) !important;
+      border-radius: var(--app-radius) !important;
+      box-shadow: var(--app-panel-shadow);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      color: var(--app-text);
+      z-index: 10500;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+    }
+    .app-panel--hidden { display: none !important; }
+    .app-panel__header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px;
+      background: #f8fafc;
+      border-bottom: 1px solid var(--app-panel-border);
+      font-weight: 600;
+      font-size: 13px;
+      user-select: none;
+      cursor: move;
+    }
+    .app-panel__title { flex: 1 1 auto; }
+    .app-panel__close {
+      appearance: none;
+      background: transparent;
+      border: none;
+      color: var(--app-muted);
+      font-size: 18px;
+      line-height: 1;
+      padding: 2px 6px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    .app-panel__close:hover { background: #e2e8f0; color: var(--app-text); }
+    .app-panel__body {
+      padding: 10px 12px;
+      overflow: auto;
+      flex: 1 1 auto;
+    }
+
+    /* Style the existing inline buttons & inputs inside our panels for a
+       cohesive look without rewriting them. */
+    .app-panel button,
+    .app-panel input[type="button"] {
+      font: inherit;
+      background: #ffffff;
+      color: var(--app-text);
+      border: 1px solid var(--app-panel-border);
+      border-radius: 6px;
+      padding: 4px 9px;
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+    .app-panel button:hover { background: #f1f5f9; }
+    .app-panel select,
+    .app-panel input[type="text"],
+    .app-panel input[type="number"],
+    .app-panel textarea {
+      font: inherit;
+      color: var(--app-text);
+      background: #ffffff;
+      border: 1px solid var(--app-panel-border);
+      border-radius: 6px;
+      padding: 3px 6px;
+    }
+    .app-panel input[type="range"] { accent-color: var(--app-accent); }
+  `;
+  const style = document.createElement('style');
+  style.id = 'app-chrome-style';
+  style.textContent = css;
+  document.head.appendChild(style);
+
+  // ---- Hide redundant legacy controls -------------------------------------
+  const oldToggle = document.getElementById('toggleConstructorBtn');
+  if (oldToggle) oldToggle.style.display = 'none';
+  // The pop-out button at top:84px right:10px has no id; find by text.
+  Array.from(document.querySelectorAll('button')).forEach(b => {
+    const t = (b.textContent || '').trim();
+    if (t === 'Pop Out Constructor' && b.style.position === 'fixed') {
+      b.style.display = 'none';
+    }
+  });
+  // Hide the basic panel (its functions are folded into the toolbar / panels).
+  const basicEl = document.getElementById('basicPanel');
+  if (basicEl) basicEl.style.display = 'none';
+  // Hide the bottom-left "Data: local" controls bar; we expose its functions
+  // via toolbar buttons and the data-file status in the toolbar.
+  if (window._sketchDataStatusSpan && window._sketchDataStatusSpan.parentNode) {
+    const dataBar = window._sketchDataStatusSpan.parentNode;
+    dataBar.style.display = 'none';
+  }
+
+  // ---- Helper: wrap an existing panel with chrome (header + close) -------
+  function wrapAsPanel(panel, title, opts) {
+    if (!panel || panel.__chromeWrapped) return;
+    panel.__chromeWrapped = true;
+    panel.classList.add('app-panel');
+    // Move existing children into a body wrapper.
+    const body = document.createElement('div');
+    body.className = 'app-panel__body';
+    while (panel.firstChild) body.appendChild(panel.firstChild);
+    // Header
+    const header = document.createElement('div');
+    header.className = 'app-panel__header';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'app-panel__title';
+    titleEl.textContent = title;
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'app-panel__close';
+    closeBtn.textContent = '×';
+    closeBtn.title = 'Close (Esc)';
+    closeBtn.onclick = () => { setPanelOpen(panel, false); };
+    header.appendChild(titleEl);
+    header.appendChild(closeBtn);
+    panel.appendChild(header);
+    panel.appendChild(body);
+    panel.__bodyEl = body;
+    panel.__headerEl = header;
+    panel.__titleEl = titleEl;
+
+    // Apply layout from opts: width, height, position
+    if (opts && opts.width) panel.style.width = opts.width;
+    if (opts && opts.height) panel.style.height = opts.height;
+    if (opts && typeof opts.right === 'string') panel.style.right = opts.right;
+    if (opts && typeof opts.left === 'string') panel.style.left = opts.left;
+    if (opts && typeof opts.top === 'string') panel.style.top = opts.top;
+    if (opts && typeof opts.bottom === 'string') panel.style.bottom = opts.bottom;
+    if (opts && typeof opts.maxWidth === 'string') panel.style.maxWidth = opts.maxWidth;
+    if (opts && typeof opts.maxHeight === 'string') panel.style.maxHeight = opts.maxHeight;
+
+    // Drag-by-header so users can reposition panels.
+    enableDrag(panel, header);
+  }
+
+  function setPanelOpen(panel, open) {
+    if (!panel) return;
+    if (open) {
+      panel.classList.remove('app-panel--hidden');
+      panel.style.display = '';
+    } else {
+      panel.classList.add('app-panel--hidden');
+    }
+    syncToolbarActiveStates();
+  }
+  function isPanelOpen(panel) {
+    if (!panel) return false;
+    return !panel.classList.contains('app-panel--hidden') && panel.style.display !== 'none';
+  }
+
+  function enableDrag(panel, handle) {
+    let dragging = false, startX = 0, startY = 0, origLeft = 0, origTop = 0;
+    handle.addEventListener('mousedown', (e) => {
+      // Don't start drag from buttons inside the header
+      if (e.target && (e.target.tagName === 'BUTTON' || e.target.closest('button'))) return;
+      dragging = true;
+      startX = e.clientX; startY = e.clientY;
+      const rect = panel.getBoundingClientRect();
+      origLeft = rect.left; origTop = rect.top;
+      panel.style.right = 'auto'; panel.style.bottom = 'auto';
+      panel.style.left = origLeft + 'px';
+      panel.style.top = origTop + 'px';
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      panel.style.left = (origLeft + (e.clientX - startX)) + 'px';
+      panel.style.top = (origTop + (e.clientY - startY)) + 'px';
+    });
+    window.addEventListener('mouseup', () => { dragging = false; });
+  }
+
+  // ---- Wrap the real panels -----------------------------------------------
+  // Waveform/global controls panel
+  if (window.globalControlPanel || (typeof globalControlPanel !== 'undefined' && globalControlPanel)) {
+    const p = window.globalControlPanel || globalControlPanel;
+    wrapAsPanel(p, 'Waveform & ECG Controls', { left: '12px', top: 'calc(var(--app-toolbar-h) + 8px)', width: '360px', maxHeight: 'calc(100vh - var(--app-toolbar-h) - 24px)' });
+  }
+  // Constructor panel
+  if (typeof conductionPanelDiv !== 'undefined' && conductionPanelDiv) {
+    wrapAsPanel(conductionPanelDiv, 'Conduction Constructor', { right: '12px', top: 'calc(var(--app-toolbar-h) + 8px)', width: 'min(1200px, calc(100vw - 24px))', maxHeight: 'calc(100vh - var(--app-toolbar-h) - 24px)' });
+    // The "Hide Constructor" / "Basic View" buttons inside the body are now
+    // redundant; remove them if found.
+    try {
+      conductionPanelDiv.querySelectorAll('button').forEach(b => {
+        const t = (b.textContent || '').trim();
+        if (t === 'Basic View') b.style.display = 'none';
+      });
+    } catch (e) {}
+  }
+  // Leads panel: do NOT wrap as a chrome panel because leadControlsDiv is a
+  // full-screen overlay holding 12 absolutely-positioned per-lead boxes.
+  // Wrapping would re-anchor their coordinates. Instead the toolbar Leads
+  // button toggles its display directly.
+  if (typeof leadControlsDiv !== 'undefined' && leadControlsDiv) {
+    // Mark as panel-like for isPanelOpen / setPanelOpen helpers.
+    leadControlsDiv.classList.add('app-panel--like');
+  }
+
+  // ---- Build a Files panel from the legacy data-file controls -------------
+  let filesPanel = null;
+  filesPanel = document.createElement('div');
+  filesPanel.id = 'appFilesPanel';
+  filesPanel.classList.add('app-panel', 'app-panel--hidden');
+  filesPanel.style.left = '12px';
+  filesPanel.style.top = 'calc(var(--app-toolbar-h) + 8px)';
+  filesPanel.style.width = '320px';
+  document.body.appendChild(filesPanel);
+  {
+    const header = document.createElement('div');
+    header.className = 'app-panel__header';
+    const titleEl = document.createElement('div'); titleEl.className = 'app-panel__title'; titleEl.textContent = 'Files & Data';
+    const closeBtn = document.createElement('button'); closeBtn.className = 'app-panel__close'; closeBtn.textContent = '×'; closeBtn.title = 'Close (Esc)';
+    closeBtn.onclick = () => setPanelOpen(filesPanel, false);
+    header.appendChild(titleEl); header.appendChild(closeBtn);
+    const body = document.createElement('div'); body.className = 'app-panel__body';
+    body.style.display = 'flex'; body.style.flexDirection = 'column'; body.style.gap = '8px';
+
+    function row(...kids) {
+      const r = document.createElement('div');
+      r.style.display = 'flex'; r.style.gap = '6px'; r.style.flexWrap = 'wrap';
+      kids.forEach(k => r.appendChild(k));
+      return r;
+    }
+    function btn(label, onClick, opts) {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.className = 'app-btn' + (opts && opts.primary ? ' app-btn--primary' : '');
+      b.onclick = onClick;
+      if (opts && opts.title) b.title = opts.title;
+      return b;
+    }
+
+    const status = document.createElement('div');
+    status.style.fontSize = '12px'; status.style.color = 'var(--app-muted)';
+    status.textContent = window._sketchDataHandle ? 'Storage: file' : 'Storage: local';
+    setInterval(() => {
+      try { status.textContent = window._sketchDataHandle ? 'Storage: file' : 'Storage: local'; } catch (e) {}
+    }, 1000);
+
+    body.appendChild(status);
+    body.appendChild(row(
+      btn('Open data file…', () => { try { promptOpenDataFile(); } catch (e) {} }),
+      btn('Save as…', () => { try { promptSaveAsDataFile(); } catch (e) {} })
+    ));
+    body.appendChild(row(
+      btn('Import CCS components…', () => { try { promptImportCcsComponents(); } catch (e) {} })
+    ));
+    body.appendChild(row(
+      btn('New shape', () => { try { createConductionItem('shape'); refreshConductionPanel(); } catch (e) {} }),
+      btn('New path', () => { try { createConductionItem('path'); refreshConductionPanel(); } catch (e) {} })
+    ));
+
+    filesPanel.appendChild(header);
+    filesPanel.appendChild(body);
+    enableDrag(filesPanel, header);
+  }
+
+  // ---- Build the toolbar --------------------------------------------------
+  const toolbar = document.createElement('div');
+  toolbar.className = 'app-toolbar';
+  toolbar.id = 'appToolbar';
+
+  const brand = document.createElement('div');
+  brand.className = 'app-toolbar__brand';
+  brand.textContent = 'Cardiac Sim';
+  toolbar.appendChild(brand);
+
+  // Helper: toolbar button bound to a panel
+  const toolbarPanelButtons = [];
+  function makeToolbarToggle(label, panel, opts) {
+    const b = document.createElement('button');
+    b.className = 'app-btn app-btn--toolbar';
+    b.textContent = label;
+    if (opts && opts.title) b.title = opts.title;
+    b.onclick = () => {
+      const wasOpen = isPanelOpen(panel);
+      setPanelOpen(panel, !wasOpen);
+    };
+    toolbar.appendChild(b);
+    toolbarPanelButtons.push({ btn: b, panel });
+    return b;
+  }
+
+  // Pause/Resume both
+  const pauseBtn = document.createElement('button');
+  pauseBtn.className = 'app-btn app-btn--toolbar';
+  pauseBtn.textContent = '⏸ Pause';
+  pauseBtn.title = 'Pause/Resume ECG and conduction';
+  pauseBtn.onclick = () => {
+    try {
+      // toggle global pause state by flipping both ECG and conduction
+      const nowEcg = !!pausedEcg;
+      // Use the same pattern as existing pause buttons
+      if (!nowEcg) {
+        ecgPausedAtMs = millis() - ecgTimeOffsetMs;
+        pausedEcg = true;
+        try { conductionPausedAtMs = millis() - conductionTimeOffsetMs; pausedConduction = true; } catch (e) {}
+        pauseBtn.textContent = '▶ Resume';
+        pauseBtn.classList.add('is-active');
+      } else {
+        ecgTimeOffsetMs = millis() - ecgPausedAtMs;
+        pausedEcg = false;
+        try { conductionTimeOffsetMs = millis() - conductionPausedAtMs; pausedConduction = false; } catch (e) {}
+        pauseBtn.textContent = '⏸ Pause';
+        pauseBtn.classList.remove('is-active');
+      }
+    } catch (e) { console.warn('toolbar pause error', e); }
+  };
+  toolbar.appendChild(pauseBtn);
+
+  // Panel toggle buttons
+  const waveformPanel = window.globalControlPanel || (typeof globalControlPanel !== 'undefined' ? globalControlPanel : null);
+  const constructorPanel = (typeof conductionPanelDiv !== 'undefined') ? conductionPanelDiv : null;
+  const leadsPanel = (typeof leadControlsDiv !== 'undefined') ? leadControlsDiv : null;
+  if (waveformPanel) makeToolbarToggle('Waveform', waveformPanel, { title: 'Waveform & ECG controls' });
+  if (constructorPanel) makeToolbarToggle('Constructor', constructorPanel, { title: 'Conduction paths/shapes constructor' });
+  if (leadsPanel) makeToolbarToggle('Leads', leadsPanel, { title: 'Per-lead amplitude controls' });
+  makeToolbarToggle('Files', filesPanel, { title: 'File and data controls' });
+
+  // Pop out constructor (separate window)
+  const popoutBtn = document.createElement('button');
+  popoutBtn.className = 'app-btn app-btn--toolbar';
+  popoutBtn.textContent = '⤢ Pop Out';
+  popoutBtn.title = 'Open the constructor in its own window';
+  popoutBtn.onclick = () => { try { openConductionWindow(); } catch (e) { console.warn(e); } };
+  toolbar.appendChild(popoutBtn);
+
+  // Spacer + readout
+  const spacer = document.createElement('div'); spacer.className = 'app-toolbar__spacer'; toolbar.appendChild(spacer);
+  const readout = document.createElement('div');
+  readout.className = 'app-toolbar__readout';
+  readout.id = 'appToolbarReadout';
+  toolbar.appendChild(readout);
+
+  document.body.appendChild(toolbar);
+
+  // Push the canvas down so the toolbar doesn't overlap the ECG view.
+  try {
+    const canvasEl = document.querySelector('canvas');
+    if (canvasEl) canvasEl.style.marginTop = '0px'; // p5 fills viewport; we just leave a gap visually via toolbar overlap
+    document.body.style.paddingTop = '0';
+  } catch (e) {}
+
+  // Sync active states + readout
+  function syncToolbarActiveStates() {
+    toolbarPanelButtons.forEach(({ btn, panel }) => {
+      if (isPanelOpen(panel)) btn.classList.add('is-active');
+      else btn.classList.remove('is-active');
+    });
+  }
+  window.__syncToolbarActive = syncToolbarActiveStates;
+  // expose so close-btn handlers can call it
+  // (we already reference setPanelOpen which calls it)
+  setInterval(() => {
+    try {
+      const hr = (typeof heartRate === 'number') ? Math.round(heartRate) : '--';
+      const td = (typeof timeDilation === 'number') ? timeDilation.toFixed(2) : '--';
+      readout.textContent = 'HR ' + hr + ' bpm   ·   ×' + td + ' speed';
+      syncToolbarActiveStates();
+    } catch (e) {}
+  }, 250);
+
+  // Esc key closes any open panels
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      [waveformPanel, constructorPanel, leadsPanel, filesPanel].forEach(p => {
+        if (p && isPanelOpen(p)) setPanelOpen(p, false);
+      });
+    }
+  });
+
+  // Default state: everything closed (clean ECG view).
+  [waveformPanel, constructorPanel, leadsPanel, filesPanel].forEach(p => {
+    if (p) setPanelOpen(p, false);
+  });
+  syncToolbarActiveStates();
+}
+
+// Install chrome shortly after setup() runs and panels are constructed.
+// Delay past the data-file controls' setTimeout (1200ms) so we can hide them.
+setTimeout(() => { try { installAppChrome(); } catch (e) { console.warn('installAppChrome failed', e); } }, 1500);
+
+// =============================================================================
+// Mode switching + Quick Bar + Ischemia overlay
+// Adds:
+//   - A toolbar "Mode" button that toggles between Conduction and Ischemia modes
+//   - A bottom-right "Quick Controls" bar (waveform presets, sequence presets,
+//     time dilation) anchored under the ECG strip
+//   - In ischemia mode: a transverse vessel canvas above the heart image and
+//     a small panel exposing athero / thrombus / METs sliders
+// =============================================================================
+function installModeAndQuickBar() {
+  if (window.__modeAndQuickInstalled) return;
+  window.__modeAndQuickInstalled = true;
+
+  // ---- Vessel overlay (DOM canvas) -----------------------------------------
+  // Positioned over the top of the left half of the p5 canvas. Hidden in
+  // conduction mode, visible in ischemia mode. drawVessel() already paints
+  // into vesselCanvas/vesselCtx — we just need to create them.
+  const vesselWrap = document.createElement('div');
+  vesselWrap.id = 'vesselWrap';
+  vesselWrap.style.position = 'fixed';
+  vesselWrap.style.left = '0';
+  vesselWrap.style.top = 'var(--app-toolbar-h)';
+  vesselWrap.style.width = '50vw';
+  vesselWrap.style.height = '32vh';
+  vesselWrap.style.pointerEvents = 'none';
+  vesselWrap.style.display = 'none';
+  vesselWrap.style.zIndex = '500';
+  vesselWrap.style.padding = '12px';
+  vesselWrap.style.boxSizing = 'border-box';
+  const vesselCanvasEl = document.createElement('canvas');
+  vesselCanvasEl.id = 'vesselCanvas';
+  vesselCanvasEl.style.width = '100%';
+  vesselCanvasEl.style.height = '100%';
+  vesselCanvasEl.style.display = 'block';
+  vesselWrap.appendChild(vesselCanvasEl);
+  document.body.appendChild(vesselWrap);
+  // Bind to globals used by drawVessel()
+  vesselCanvas = vesselCanvasEl;
+  vesselCtx = vesselCanvasEl.getContext('2d');
+  function sizeVesselCanvas() {
+    try {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = vesselCanvasEl.getBoundingClientRect();
+      vesselCanvasEl.width = Math.max(1, Math.round(rect.width * dpr));
+      vesselCanvasEl.height = Math.max(1, Math.round(rect.height * dpr));
+    } catch (e) {}
+  }
+  window.addEventListener('resize', sizeVesselCanvas);
+  setTimeout(sizeVesselCanvas, 50);
+
+  // ---- Ischemia controls panel --------------------------------------------
+  const ischPanel = document.createElement('div');
+  ischPanel.id = 'appIschemiaPanel';
+  ischPanel.classList.add('app-panel', 'app-panel--hidden');
+  // Place the panel at the same vertical level as the vessel canvas, on the
+  // right side of the left half so it doesn't cover the vessel circle.
+  ischPanel.style.left = 'calc(50vw - 332px)';
+  ischPanel.style.top = 'calc(var(--app-toolbar-h) + 12px)';
+  ischPanel.style.width = '320px';
+  document.body.appendChild(ischPanel);
+  {
+    const header = document.createElement('div');
+    header.className = 'app-panel__header';
+    const titleEl = document.createElement('div'); titleEl.className = 'app-panel__title'; titleEl.textContent = 'Ischemia & Vessel';
+    const closeBtn = document.createElement('button'); closeBtn.className = 'app-panel__close'; closeBtn.textContent = '×';
+    closeBtn.onclick = () => ischPanel.classList.add('app-panel--hidden');
+    header.appendChild(titleEl); header.appendChild(closeBtn);
+    const body = document.createElement('div'); body.className = 'app-panel__body';
+    body.style.display = 'flex'; body.style.flexDirection = 'column'; body.style.gap = '10px';
+
+    function makeSlider(label, min, max, step, initial, onChange, unit) {
+      const wrap = document.createElement('div');
+      const top = document.createElement('div');
+      top.style.display = 'flex'; top.style.justifyContent = 'space-between';
+      top.style.fontSize = '12px'; top.style.color = 'var(--app-muted)';
+      top.style.marginBottom = '4px';
+      const lab = document.createElement('span'); lab.textContent = label;
+      const val = document.createElement('span'); val.style.fontVariantNumeric = 'tabular-nums';
+      val.textContent = String(initial) + (unit || '');
+      top.appendChild(lab); top.appendChild(val);
+      const input = document.createElement('input');
+      input.type = 'range'; input.min = String(min); input.max = String(max);
+      input.step = String(step); input.value = String(initial);
+      input.style.width = '100%';
+      input.oninput = (e) => {
+        const v = Number(e.target.value);
+        val.textContent = (Number.isInteger(step) ? String(v) : v.toFixed(2)) + (unit || '');
+        onChange(v);
+      };
+      wrap.appendChild(top); wrap.appendChild(input);
+      wrap.__input = input; wrap.__val = val;
+      return wrap;
+    }
+
+    const atheroSlider = makeSlider('Atherosclerosis', 0, 100, 1, atheroPercent, (v) => {
+      atheroPercent = v;
+      try { saveEcgWaveformSettings(); } catch (e) {}
+    }, '%');
+    const thrombusSlider = makeSlider('Thrombus', 0, 100, 1, thrombusPercent, (v) => {
+      thrombusPercent = v;
+      try { saveEcgWaveformSettings(); } catch (e) {}
+    }, '%');
+    const metsSlider = makeSlider('METs (exertion)', 1, 10, 0.5, METs, (v) => {
+      METs = v;
+      try { saveEcgWaveformSettings(); } catch (e) {}
+    }, '');
+
+    body.appendChild(atheroSlider);
+    body.appendChild(thrombusSlider);
+    body.appendChild(metsSlider);
+
+    // Live ischemia readout
+    const readout = document.createElement('div');
+    readout.style.fontSize = '12px';
+    readout.style.color = 'var(--app-muted)';
+    readout.style.padding = '6px 8px';
+    readout.style.background = '#f8fafc';
+    readout.style.borderRadius = '6px';
+    readout.style.borderLeft = '3px solid var(--app-accent)';
+    body.appendChild(readout);
+    setInterval(() => {
+      try {
+        const isch = (typeof ischemiaPercent === 'number') ? Math.round(ischemiaPercent) : 0;
+        readout.textContent = 'Effective ischemia: ' + isch + '%';
+        // Also keep slider values in sync if changed elsewhere (e.g. preset load)
+        if (Number(atheroSlider.__input.value) !== Math.round(atheroPercent)) {
+          atheroSlider.__input.value = String(Math.round(atheroPercent));
+          atheroSlider.__val.textContent = Math.round(atheroPercent) + '%';
+        }
+        if (Number(thrombusSlider.__input.value) !== Math.round(thrombusPercent)) {
+          thrombusSlider.__input.value = String(Math.round(thrombusPercent));
+          thrombusSlider.__val.textContent = Math.round(thrombusPercent) + '%';
+        }
+      } catch (e) {}
+    }, 300);
+
+    ischPanel.appendChild(header);
+    ischPanel.appendChild(body);
+  }
+
+  // ---- Mode toggle --------------------------------------------------------
+  function setMode(mode) {
+    appMode = mode;
+    if (mode === 'ischemia') {
+      vesselWrap.style.display = '';
+      ischPanel.classList.remove('app-panel--hidden');
+      modeBtn.textContent = '🩺 Conduction Mode';
+      modeBtn.title = 'Switch to Conduction mode';
+      sizeVesselCanvas();
+    } else {
+      vesselWrap.style.display = 'none';
+      ischPanel.classList.add('app-panel--hidden');
+      modeBtn.textContent = '🫀 Ischemia Mode';
+      modeBtn.title = 'Switch to Ischemia mode (vessel + athero/thrombus)';
+    }
+  }
+
+  // Insert mode button into the toolbar (created by installAppChrome)
+  const toolbar = document.getElementById('appToolbar');
+  const modeBtn = document.createElement('button');
+  modeBtn.className = 'app-btn app-btn--toolbar';
+  modeBtn.textContent = '🫀 Ischemia Mode';
+  modeBtn.title = 'Switch to Ischemia mode (vessel + athero/thrombus)';
+  modeBtn.onclick = () => setMode(appMode === 'ischemia' ? 'conduction' : 'ischemia');
+  if (toolbar) {
+    // Insert before the spacer so it sits with the other primary buttons
+    const spacer = toolbar.querySelector('.app-toolbar__spacer');
+    if (spacer) toolbar.insertBefore(modeBtn, spacer);
+    else toolbar.appendChild(modeBtn);
+  }
+
+  // ---- Quick Controls bar (under the ECG) ---------------------------------
+  const quickBar = document.createElement('div');
+  quickBar.id = 'appQuickBar';
+  quickBar.style.position = 'fixed';
+  quickBar.style.left = '50vw';
+  quickBar.style.right = '12px';
+  quickBar.style.bottom = '12px';
+  quickBar.style.zIndex = '10000';
+  quickBar.style.background = 'var(--app-panel-bg)';
+  quickBar.style.border = '1px solid var(--app-panel-border)';
+  quickBar.style.borderRadius = 'var(--app-radius)';
+  quickBar.style.boxShadow = 'var(--app-panel-shadow)';
+  quickBar.style.padding = '10px 12px';
+  quickBar.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
+  quickBar.style.fontSize = '13px';
+  quickBar.style.color = 'var(--app-text)';
+  quickBar.style.marginLeft = '12px';
+  quickBar.style.display = 'flex';
+  quickBar.style.flexWrap = 'wrap';
+  quickBar.style.gap = '14px';
+  quickBar.style.alignItems = 'center';
+
+  function group(labelText) {
+    const g = document.createElement('div');
+    g.style.display = 'flex'; g.style.flexDirection = 'column'; g.style.gap = '4px';
+    g.style.minWidth = '0';
+    const lab = document.createElement('div');
+    lab.textContent = labelText;
+    lab.style.fontSize = '11px'; lab.style.fontWeight = '600';
+    lab.style.color = 'var(--app-muted)'; lab.style.textTransform = 'uppercase';
+    lab.style.letterSpacing = '0.4px';
+    g.appendChild(lab);
+    const row = document.createElement('div');
+    row.style.display = 'flex'; row.style.gap = '6px'; row.style.alignItems = 'center';
+    g.appendChild(row);
+    g.__row = row;
+    return g;
+  }
+  function qbtn(label, onClick, opts) {
+    const b = document.createElement('button');
+    b.className = 'app-btn' + (opts && opts.primary ? ' app-btn--primary' : '');
+    b.textContent = label;
+    b.onclick = onClick;
+    if (opts && opts.title) b.title = opts.title;
+    return b;
+  }
+
+  // --- Waveform presets group ---
+  const wpGroup = group('Waveform Preset');
+  const wpSel = document.createElement('select');
+  wpSel.id = 'quickPresetSelect';
+  wpSel.style.minWidth = '160px';
+  wpSel.style.padding = '4px 6px';
+  wpSel.style.borderRadius = '6px';
+  wpSel.style.border = '1px solid var(--app-panel-border)';
+  wpSel.style.background = '#fff';
+  wpGroup.__row.appendChild(wpSel);
+  wpGroup.__row.appendChild(qbtn('Load', () => {
+    const v = wpSel.value;
+    if (!v) { alert('Select a preset'); return; }
+    try { if (loadNamedPreset(v)) { /* loaded silently */ } else alert('Failed to load: ' + v); } catch (e) { console.warn(e); }
+  }));
+  wpGroup.__row.appendChild(qbtn('Save…', () => {
+    const n = prompt('Save current waveform as preset name:');
+    if (!n) return;
+    try { if (saveNamedPreset(n)) refreshPresetSelectGlobal(); else alert('Save failed'); } catch (e) { console.warn(e); }
+  }));
+  quickBar.appendChild(wpGroup);
+
+  // --- Sequence group ---
+  const sqGroup = group('Sequence');
+  const sqSel = document.createElement('select');
+  sqSel.id = 'quickSequenceSelect';
+  sqSel.style.minWidth = '160px';
+  sqSel.style.padding = '4px 6px';
+  sqSel.style.borderRadius = '6px';
+  sqSel.style.border = '1px solid var(--app-panel-border)';
+  sqSel.style.background = '#fff';
+  sqGroup.__row.appendChild(sqSel);
+  sqGroup.__row.appendChild(qbtn('Load', () => {
+    const v = sqSel.value;
+    if (!v) { alert('Select a sequence'); return; }
+    try { if (loadNamedSequence(v)) { try { refreshPresetSequenceUI(); } catch (e) {} } else alert('Failed to load sequence'); } catch (e) { console.warn(e); }
+  }));
+  sqGroup.__row.appendChild(qbtn('Save…', () => {
+    const n = prompt('Save current sequence as name:');
+    if (!n) return;
+    try { if (saveNamedSequence(n)) {} else alert('Save failed'); } catch (e) { console.warn(e); }
+  }));
+  const startSeqBtn = qbtn('Start', () => {
+    try {
+      if (!presetSequencePlaying) {
+        presetSequenceLoop = true;
+        if ((!presetSequence || presetSequence.length === 0) && sqSel.value) {
+          loadNamedSequence(sqSel.value);
+        }
+        startPresetSequence();
+      } else {
+        stopPresetSequence();
+      }
+    } catch (e) { console.warn(e); }
+  }, { primary: true });
+  sqGroup.__row.appendChild(startSeqBtn);
+  quickBar.appendChild(sqGroup);
+
+  // --- Time dilation group ---
+  const tdGroup = group('Speed (Time Dilation)');
+  const tdInput = document.createElement('input');
+  tdInput.type = 'range'; tdInput.min = '0.2'; tdInput.max = '10.0'; tdInput.step = '0.05';
+  tdInput.value = String(timeDilation);
+  tdInput.style.width = '180px';
+  tdInput.style.accentColor = 'var(--app-accent)';
+  const tdVal = document.createElement('div');
+  tdVal.textContent = '×' + Number(timeDilation).toFixed(2);
+  tdVal.style.fontVariantNumeric = 'tabular-nums';
+  tdVal.style.minWidth = '46px';
+  tdVal.style.color = 'var(--app-muted)';
+  tdInput.oninput = (e) => {
+    const v = Number(e.target.value) || 1.0;
+    timeDilation = v;
+    tdVal.textContent = '×' + v.toFixed(2);
+    try { saveTimeDilation(); } catch (e) {}
+    // Sync any other time-dilation inputs
+    try {
+      const orig = document.getElementById('timeDilationInput');
+      if (orig && orig !== tdInput) orig.value = String(v);
+      const origVal = document.getElementById('timeDilationVal');
+      if (origVal) origVal.textContent = v.toFixed(2);
+      const basic = document.getElementById('basicTimeDilationInput');
+      if (basic && basic !== tdInput) basic.value = String(v);
+      const basicVal = document.getElementById('basicTimeDilationVal');
+      if (basicVal) basicVal.textContent = v.toFixed(2);
+    } catch (e) {}
+  };
+  tdGroup.__row.appendChild(tdInput);
+  tdGroup.__row.appendChild(tdVal);
+  quickBar.appendChild(tdGroup);
+
+  document.body.appendChild(quickBar);
+
+  // Mirror options from constructor's preset/sequence selects into the quick
+  // bar selects (the constructor's selects are auto-refreshed by
+  // refreshPresetSelectGlobal / refreshSequenceSelectGlobal).
+  function mirrorOptions(srcSelectId, dstSelect) {
+    try {
+      const src = document.getElementById(srcSelectId);
+      if (!src) return;
+      const prev = dstSelect.value;
+      dstSelect.innerHTML = '';
+      Array.from(src.options).forEach(o => {
+        const no = document.createElement('option');
+        no.value = o.value; no.text = o.text;
+        dstSelect.appendChild(no);
+      });
+      // restore selection if option still exists
+      if (prev && Array.from(dstSelect.options).some(o => o.value === prev)) {
+        dstSelect.value = prev;
+      }
+    } catch (e) {}
+  }
+  setInterval(() => {
+    mirrorOptions('presetSelect', wpSel);
+    mirrorOptions('sequenceSelect', sqSel);
+    // Sync Start button label with running state
+    try { startSeqBtn.textContent = presetSequencePlaying ? 'Stop' : 'Start'; } catch (e) {}
+    // Sync time dilation if changed elsewhere
+    try {
+      if (Math.abs(Number(tdInput.value) - timeDilation) > 0.001) {
+        tdInput.value = String(timeDilation);
+        tdVal.textContent = '×' + Number(timeDilation).toFixed(2);
+      }
+    } catch (e) {}
+  }, 600);
+  // Initial population
+  setTimeout(() => {
+    mirrorOptions('presetSelect', wpSel);
+    mirrorOptions('sequenceSelect', sqSel);
+  }, 200);
+
+  // Initialize mode display
+  setMode(appMode || 'conduction');
+
+  // Start a render loop for the vessel canvas. drawVessel() is a no-op when
+  // the canvas is hidden anyway, but we only invoke it in ischemia mode to
+  // save work.
+  function vesselTick() {
+    try {
+      if (appMode === 'ischemia' && typeof drawVessel === 'function') drawVessel();
+    } catch (e) { /* ignore per-frame errors */ }
+    requestAnimationFrame(vesselTick);
+  }
+  requestAnimationFrame(vesselTick);
+}
+
+// Install after the toolbar exists.
+setTimeout(() => {
+  try { installModeAndQuickBar(); }
+  catch (e) { console.warn('installModeAndQuickBar failed', e); }
+}, 1700);
+
+// =============================================================================
+// Ischemia Curve editor panel
+// Lets you edit the piecewise-linear (pct -> effT, effST) breakpoints that
+// drive how the athero / thrombus / METs sliders change the displayed ECG.
+// Save current curve as a named library entry; load/delete named entries.
+// =============================================================================
+function installIschemiaCurveEditor() {
+  if (window.__ischemiaCurveEditorInstalled) return;
+  window.__ischemiaCurveEditorInstalled = true;
+
+  // Panel
+  const panel = document.createElement('div');
+  panel.id = 'appIschemiaCurvePanel';
+  panel.classList.add('app-panel', 'app-panel--hidden');
+  panel.style.left = 'calc(50vw - 620px)';
+  panel.style.top = 'calc(var(--app-toolbar-h) + 12px)';
+  panel.style.width = '620px';
+  panel.style.maxHeight = 'calc(100vh - var(--app-toolbar-h) - 24px)';
+  panel.style.overflow = 'auto';
+  document.body.appendChild(panel);
+
+  const header = document.createElement('div');
+  header.className = 'app-panel__header';
+  const title = document.createElement('div'); title.className = 'app-panel__title';
+  title.textContent = 'Ischemia Curve';
+  const closeBtn = document.createElement('button'); closeBtn.className = 'app-panel__close'; closeBtn.textContent = '×';
+  closeBtn.onclick = () => { panel.classList.add('app-panel--hidden'); window._ischemiaPreviewPct = null; };
+  header.appendChild(title); header.appendChild(closeBtn);
+
+  const body = document.createElement('div'); body.className = 'app-panel__body';
+  body.style.display = 'flex'; body.style.flexDirection = 'column'; body.style.gap = '12px';
+
+  const help = document.createElement('div');
+  help.style.fontSize = '12px';
+  help.style.color = 'var(--app-muted)';
+  help.style.lineHeight = '1.4';
+  help.innerHTML = 'Each row is a breakpoint at a given <b>ischemia %</b>. Between breakpoints, '
+    + '<b>effT</b> (T-wave scale; negative = inverted) and <b>effST</b> (ST offset; +elevation, −depression) '
+    + 'are linearly interpolated from the baseline (waveform tab) at 0%. Leave a cell blank to inherit baseline.';
+  body.appendChild(help);
+
+  // Library row
+  const libRow = document.createElement('div');
+  libRow.style.display = 'flex'; libRow.style.gap = '6px'; libRow.style.alignItems = 'center';
+  libRow.style.flexWrap = 'wrap';
+  const libSel = document.createElement('select');
+  libSel.style.flex = '1 1 160px'; libSel.style.minWidth = '140px';
+  libSel.style.padding = '4px 6px'; libSel.style.borderRadius = '6px';
+  libSel.style.border = '1px solid var(--app-panel-border)'; libSel.style.background = '#fff';
+  function refreshLib() {
+    const all = _getAllIschemiaCurves();
+    const keys = Object.keys(all).sort();
+    const prev = libSel.value;
+    libSel.innerHTML = '';
+    const empty = document.createElement('option'); empty.value = ''; empty.text = '-- saved curves --';
+    libSel.appendChild(empty);
+    keys.forEach(k => {
+      const o = document.createElement('option');
+      o.value = k;
+      o.text = k + (all[k] && all[k].savedAt ? ('  (' + new Date(all[k].savedAt).toLocaleString() + ')') : '');
+      libSel.appendChild(o);
+    });
+    if (prev && Array.from(libSel.options).some(o => o.value === prev)) libSel.value = prev;
+  }
+  function mkBtn(label, onClick, opts) {
+    const b = document.createElement('button');
+    b.className = 'app-btn' + (opts && opts.primary ? ' app-btn--primary' : '') + (opts && opts.danger ? ' app-btn--danger' : '');
+    b.textContent = label; b.onclick = onClick;
+    return b;
+  }
+  libRow.appendChild(libSel);
+  libRow.appendChild(mkBtn('Load', () => {
+    const v = libSel.value; if (!v) { alert('Pick a curve to load'); return; }
+    if (loadNamedIschemiaCurve(v)) { rebuildRows(); } else alert('Failed to load curve');
+  }));
+  libRow.appendChild(mkBtn('Save As…', () => {
+    const n = prompt('Save current curve as:'); if (!n) return;
+    if (saveNamedIschemiaCurve(n)) { refreshLib(); libSel.value = n; } else alert('Save failed');
+  }, { primary: true }));
+  libRow.appendChild(mkBtn('Delete', () => {
+    const v = libSel.value; if (!v) { alert('Pick a curve to delete'); return; }
+    if (!confirm('Delete saved curve "' + v + '"?')) return;
+    if (deleteNamedIschemiaCurve(v)) refreshLib(); else alert('Delete failed');
+  }, { danger: true }));
+  body.appendChild(libRow);
+
+  // Breakpoint table
+  const table = document.createElement('div');
+  table.style.display = 'grid';
+  table.style.gridTemplateColumns = '0.7fr 0.7fr 0.7fr 0.9fr 0.9fr auto';
+  table.style.gap = '6px 8px';
+  table.style.alignItems = 'center';
+  body.appendChild(table);
+
+  function header3(text) {
+    const h = document.createElement('div');
+    h.textContent = text;
+    h.style.fontSize = '11px'; h.style.fontWeight = '600';
+    h.style.color = 'var(--app-muted)'; h.style.textTransform = 'uppercase';
+    h.style.letterSpacing = '0.4px';
+    return h;
+  }
+
+  // Live preview: live ascii-ish svg curve below the table.
+  const preview = document.createElement('div');
+  preview.style.background = '#f8fafc';
+  preview.style.border = '1px solid var(--app-panel-border)';
+  preview.style.borderRadius = '6px';
+  preview.style.padding = '8px';
+  preview.style.userSelect = 'none';
+  preview.style.touchAction = 'none';
+  body.appendChild(preview);
+
+  // Interactive preview state
+  const PREVIEW = {
+    W: 440, H: 160, padL: 32, padR: 8, padT: 8, padB: 22,
+    yMin: -1.5, yMax: 1.5,
+    drag: null, // { idx, axis: 'effT' | 'effST' }
+  };
+  function pxFromPct(pct) { return PREVIEW.padL + (pct / 100) * (PREVIEW.W - PREVIEW.padL - PREVIEW.padR); }
+  function pctFromPx(px)  { return ((px - PREVIEW.padL) / (PREVIEW.W - PREVIEW.padL - PREVIEW.padR)) * 100; }
+  function pxFromVal(v)   { return PREVIEW.padT + (1 - (v - PREVIEW.yMin) / (PREVIEW.yMax - PREVIEW.yMin)) * (PREVIEW.H - PREVIEW.padT - PREVIEW.padB); }
+  function valFromPx(py)  { return PREVIEW.yMin + (1 - (py - PREVIEW.padT) / (PREVIEW.H - PREVIEW.padT - PREVIEW.padB)) * (PREVIEW.yMax - PREVIEW.yMin); }
+
+  function drawPreview(hoverPct) {
+    try {
+      const { W, H, padL, padR, padT, padB } = PREVIEW;
+      const innerW = W - padL - padR, innerH = H - padT - padB;
+      const xAt = (pct) => padL + (pct / 100) * innerW;
+      const yAt = (v) => padT + (1 - (v - PREVIEW.yMin) / (PREVIEW.yMax - PREVIEW.yMin)) * innerH;
+      let svg = '<svg id="ischCurveSvg" width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg" style="display:block;cursor:crosshair">';
+      svg += '<rect x="0" y="0" width="' + W + '" height="' + H + '" fill="white"/>';
+      // grid
+      for (let g = 0; g <= 100; g += 25) {
+        const x = xAt(g);
+        svg += '<line x1="' + x + '" y1="' + padT + '" x2="' + x + '" y2="' + (padT + innerH) + '" stroke="#e5e7eb"/>';
+        svg += '<text x="' + x + '" y="' + (H - 6) + '" font-size="10" text-anchor="middle" fill="#64748b">' + g + '%</text>';
+      }
+      // y gridlines at -1, -0.5, 0.5, 1
+      [-1, -0.5, 0.5, 1].forEach(v => {
+        const y = yAt(v);
+        svg += '<line x1="' + padL + '" y1="' + y + '" x2="' + (padL + innerW) + '" y2="' + y + '" stroke="#f1f5f9"/>';
+        svg += '<text x="' + (padL - 4) + '" y="' + (y + 3) + '" font-size="9" text-anchor="end" fill="#94a3b8">' + v + '</text>';
+      });
+      // zero line
+      const yZero = yAt(0);
+      svg += '<line x1="' + padL + '" y1="' + yZero + '" x2="' + (padL + innerW) + '" y2="' + yZero + '" stroke="#cbd5e1"/>';
+      svg += '<text x="6" y="' + (yZero + 4) + '" font-size="10" fill="#64748b">0</text>';
+
+      // hover guide line + readout
+      if (typeof hoverPct === 'number' && hoverPct >= 0 && hoverPct <= 100) {
+        const hx = xAt(hoverPct);
+        svg += '<line x1="' + hx + '" y1="' + padT + '" x2="' + hx + '" y2="' + (padT + innerH) + '" stroke="#0ea5e9" stroke-width="1" stroke-dasharray="3,3"/>';
+        const eff = mapIschemiaToEff(hoverPct);
+        const label = Math.round(hoverPct) + '%  effT=' + eff.effT.toFixed(2) + '  effST=' + eff.effST.toFixed(2);
+        const tx = Math.min(W - 6, hx + 6);
+        const anchor = (hx > W - 140) ? 'end' : 'start';
+        const tx2 = (anchor === 'end') ? hx - 6 : hx + 6;
+        svg += '<text x="' + tx2 + '" y="' + (padT + 12) + '" font-size="11" font-weight="600" text-anchor="' + anchor + '" fill="#0369a1">' + label + '</text>';
+      }
+
+      // sample curve every 1%
+      let pathT = '', pathST = '';
+      for (let p = 0; p <= 100; p += 1) {
+        const eff = mapIschemiaToEff(p);
+        const xx = xAt(p);
+        const yT = yAt(eff.effT);
+        const yST = yAt(eff.effST);
+        pathT += (p === 0 ? 'M' : 'L') + xx.toFixed(1) + ',' + yT.toFixed(1) + ' ';
+        pathST += (p === 0 ? 'M' : 'L') + xx.toFixed(1) + ',' + yST.toFixed(1) + ' ';
+      }
+      svg += '<path d="' + pathT + '" fill="none" stroke="#dc2626" stroke-width="2" pointer-events="none"/>';
+      svg += '<path d="' + pathST + '" fill="none" stroke="#2563eb" stroke-width="2" pointer-events="none"/>';
+
+      // baseline anchor at pct=0 (immutable, shown as small dots)
+      svg += '<circle cx="' + xAt(0) + '" cy="' + yAt(tWaveScale) + '" r="3.5" fill="#fecaca" stroke="#dc2626" stroke-width="1"/>';
+      svg += '<circle cx="' + xAt(0) + '" cy="' + yAt(stOffset) + '" r="3.5" fill="#bfdbfe" stroke="#2563eb" stroke-width="1"/>';
+
+      // draggable handles for each breakpoint
+      const sorted = ischemiaCurve.slice().sort((a, b) => a.pct - b.pct);
+      sorted.forEach((p, idx) => {
+        const cx = xAt(p.pct);
+        const effT = (p.effT === null || p.effT === undefined) ? tWaveScale : p.effT;
+        const effST = (p.effST === null || p.effST === undefined) ? stOffset : p.effST;
+        // T handle (red square)
+        svg += '<rect data-handle="T" data-idx="' + idx + '" x="' + (cx - 5) + '" y="' + (yAt(effT) - 5) + '" width="10" height="10" fill="#dc2626" stroke="white" stroke-width="1.5" style="cursor:grab"/>';
+        // ST handle (blue circle)
+        svg += '<circle data-handle="ST" data-idx="' + idx + '" cx="' + cx + '" cy="' + yAt(effST) + '" r="6" fill="#2563eb" stroke="white" stroke-width="1.5" style="cursor:grab"/>';
+      });
+
+      // legend
+      svg += '<rect x="' + (padL) + '" y="2" width="10" height="10" fill="#dc2626"/><text x="' + (padL + 14) + '" y="11" font-size="10" fill="#0f172a">effT (drag □)</text>';
+      svg += '<circle cx="' + (padL + 96) + '" cy="7" r="5" fill="#2563eb"/><text x="' + (padL + 106) + '" y="11" font-size="10" fill="#0f172a">effST (drag ○)</text>';
+      svg += '</svg>';
+      preview.innerHTML = svg;
+
+      // Wire interactions on the freshly inserted SVG
+      const svgEl = preview.querySelector('#ischCurveSvg');
+      if (!svgEl) return;
+      function svgPointFromEvent(e) {
+        const rect = svgEl.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * (W / rect.width);
+        const y = (e.clientY - rect.top)  * (H / rect.height);
+        return { x, y };
+      }
+      svgEl.addEventListener('mousedown', (e) => {
+        const target = e.target;
+        const handle = target && target.getAttribute && target.getAttribute('data-handle');
+        const idx = target && target.getAttribute && Number(target.getAttribute('data-idx'));
+        if (handle && Number.isInteger(idx)) {
+          PREVIEW.drag = { idx, axis: handle };
+          e.preventDefault();
+        }
+      });
+      svgEl.addEventListener('mousemove', (e) => {
+        const pt = svgPointFromEvent(e);
+        if (PREVIEW.drag) {
+          const sorted2 = ischemiaCurve.slice().sort((a, b) => a.pct - b.pct);
+          const p = sorted2[PREVIEW.drag.idx];
+          if (!p) return;
+          const newPct = Math.max(0.5, Math.min(100, pctFromPx(pt.x)));
+          const newVal = Math.max(PREVIEW.yMin, Math.min(PREVIEW.yMax, valFromPx(pt.y)));
+          p.pct = Math.round(newPct);
+          if (PREVIEW.drag.axis === 'T') p.effT = Math.round(newVal * 100) / 100;
+          else p.effST = Math.round(newVal * 100) / 100;
+          // Replace in-place sort & store
+          ischemiaCurve.length = 0;
+          sorted2.forEach(q => ischemiaCurve.push(q));
+          saveIschemiaCurve();
+          // While dragging, also live-preview at that pct
+          window._ischemiaPreviewPct = p.pct;
+          rebuildRows(); // also redraws preview with this hoverPct
+          drawPreview(p.pct);
+        } else {
+          // Hover preview only when over the chart area
+          if (pt.x >= PREVIEW.padL && pt.x <= W - PREVIEW.padR && pt.y >= PREVIEW.padT && pt.y <= H - PREVIEW.padB) {
+            const hp = Math.max(0, Math.min(100, pctFromPx(pt.x)));
+            window._ischemiaPreviewPct = hp;
+            drawPreview(hp);
+          }
+        }
+      });
+      function endDrag() {
+        if (PREVIEW.drag) {
+          PREVIEW.drag = null;
+          rebuildRows();
+        }
+      }
+      svgEl.addEventListener('mouseup', endDrag);
+      svgEl.addEventListener('mouseleave', () => {
+        if (!PREVIEW.drag) {
+          window._ischemiaPreviewPct = null;
+          drawPreview(); // redraw without hover guide
+        }
+      });
+      // Window-level mouseup so a release outside the SVG still ends the drag
+      window.addEventListener('mouseup', endDrag, { once: true });
+    } catch (e) { preview.textContent = '(preview error: ' + e.message + ')'; }
+  }
+
+  function rebuildRows() {
+    table.innerHTML = '';
+    table.appendChild(header3('Ischemia %'));
+    table.appendChild(header3('effT'));
+    table.appendChild(header3('effST'));
+    table.appendChild(header3('ST start (ms)'));
+    table.appendChild(header3('ST end (ms)'));
+    table.appendChild(header3(''));
+
+    const sorted = ischemiaCurve.slice().sort((a, b) => a.pct - b.pct);
+    ischemiaCurve.length = 0;
+    sorted.forEach(p => ischemiaCurve.push(p));
+
+    ischemiaCurve.forEach((p, idx) => {
+      const pctIn = document.createElement('input');
+      pctIn.type = 'number'; pctIn.min = '0'; pctIn.max = '100'; pctIn.step = '1';
+      pctIn.value = String(p.pct);
+      pctIn.style.width = '100%'; pctIn.style.padding = '4px';
+      pctIn.style.border = '1px solid var(--app-panel-border)'; pctIn.style.borderRadius = '4px';
+      pctIn.oninput = (e) => {
+        const v = Number(e.target.value);
+        if (isFinite(v)) { p.pct = Math.max(0, Math.min(100, v)); saveIschemiaCurve(); drawPreview(); }
+      };
+      const tIn = document.createElement('input');
+      tIn.type = 'number'; tIn.step = '0.05'; tIn.placeholder = 'baseline';
+      tIn.value = (p.effT === null || p.effT === undefined) ? '' : String(p.effT);
+      tIn.style.width = '100%'; tIn.style.padding = '4px';
+      tIn.style.border = '1px solid var(--app-panel-border)'; tIn.style.borderRadius = '4px';
+      tIn.oninput = (e) => {
+        const s = e.target.value.trim();
+        p.effT = (s === '') ? null : Number(s);
+        saveIschemiaCurve(); drawPreview();
+      };
+      const stIn = document.createElement('input');
+      stIn.type = 'number'; stIn.step = '0.05'; stIn.placeholder = 'baseline';
+      stIn.value = (p.effST === null || p.effST === undefined) ? '' : String(p.effST);
+      stIn.style.width = '100%'; stIn.style.padding = '4px';
+      stIn.style.border = '1px solid var(--app-panel-border)'; stIn.style.borderRadius = '4px';
+      stIn.oninput = (e) => {
+        const s = e.target.value.trim();
+        p.effST = (s === '') ? null : Number(s);
+        saveIschemiaCurve(); drawPreview();
+      };
+      const stStartIn = document.createElement('input');
+      stStartIn.type = 'number'; stStartIn.step = '1'; stStartIn.placeholder = 'baseline';
+      stStartIn.title = 'ST window START in ms relative to QRS R-peak (blank = use baseline slider)';
+      stStartIn.value = (p.effStStartMs === null || p.effStStartMs === undefined) ? '' : String(Math.round(p.effStStartMs));
+      stStartIn.style.width = '100%'; stStartIn.style.padding = '4px';
+      stStartIn.style.border = '1px solid var(--app-panel-border)'; stStartIn.style.borderRadius = '4px';
+      stStartIn.oninput = (e) => {
+        const s = e.target.value.trim();
+        p.effStStartMs = (s === '') ? null : Number(s);
+        saveIschemiaCurve(); drawPreview();
+      };
+      const stEndIn = document.createElement('input');
+      stEndIn.type = 'number'; stEndIn.step = '1'; stEndIn.placeholder = 'baseline';
+      stEndIn.title = 'ST window END in ms relative to QRS R-peak (blank = use baseline slider)';
+      stEndIn.value = (p.effStEndMs === null || p.effStEndMs === undefined) ? '' : String(Math.round(p.effStEndMs));
+      stEndIn.style.width = '100%'; stEndIn.style.padding = '4px';
+      stEndIn.style.border = '1px solid var(--app-panel-border)'; stEndIn.style.borderRadius = '4px';
+      stEndIn.oninput = (e) => {
+        const s = e.target.value.trim();
+        p.effStEndMs = (s === '') ? null : Number(s);
+        saveIschemiaCurve(); drawPreview();
+      };
+      const delBtn = document.createElement('button');
+      delBtn.className = 'app-btn app-btn--danger'; delBtn.textContent = '×';
+      delBtn.title = 'Remove this breakpoint';
+      delBtn.onclick = () => {
+        ischemiaCurve.splice(idx, 1);
+        saveIschemiaCurve(); rebuildRows(); drawPreview();
+      };
+
+      table.appendChild(pctIn);
+      table.appendChild(tIn);
+      table.appendChild(stIn);
+      table.appendChild(stStartIn);
+      table.appendChild(stEndIn);
+      table.appendChild(delBtn);
+    });
+
+    drawPreview();
+  }
+
+  // Add / Reset row
+  const addRow = document.createElement('div');
+  addRow.style.display = 'flex'; addRow.style.gap = '6px'; addRow.style.flexWrap = 'wrap';
+  addRow.appendChild(mkBtn('+ Add breakpoint', () => {
+    // Insert a sensible new pct (median of largest gap)
+    const sorted = ischemiaCurve.slice().sort((a, b) => a.pct - b.pct);
+    const anchors = [0].concat(sorted.map(p => p.pct)).concat([100]);
+    let bestGap = 0, bestPct = 50;
+    for (let i = 0; i < anchors.length - 1; i++) {
+      const gap = anchors[i + 1] - anchors[i];
+      if (gap > bestGap) { bestGap = gap; bestPct = Math.round((anchors[i] + anchors[i + 1]) / 2); }
+    }
+    ischemiaCurve.push({ pct: bestPct, effT: null, effST: null, effStStartMs: null, effStEndMs: null });
+    saveIschemiaCurve(); rebuildRows();
+  }));
+  addRow.appendChild(mkBtn('Reset to default', () => {
+    if (!confirm('Reset the active curve to defaults?')) return;
+    ischemiaCurve = ISCHEMIA_CURVE_DEFAULT.map(p => ({ ...p }));
+    saveIschemiaCurve(); rebuildRows();
+  }));
+  body.appendChild(addRow);
+
+  panel.appendChild(header);
+  panel.appendChild(body);
+
+  // Toolbar button
+  const toolbar = document.getElementById('appToolbar');
+  const btn = document.createElement('button');
+  btn.className = 'app-btn app-btn--toolbar';
+  btn.textContent = '📈 Ischemia Curve';
+  btn.title = 'Edit how athero/thrombus/METs change the ECG';
+  btn.onclick = () => {
+    panel.classList.toggle('app-panel--hidden');
+    if (!panel.classList.contains('app-panel--hidden')) { rebuildRows(); refreshLib(); }
+  };
+  if (toolbar) {
+    const spacer = toolbar.querySelector('.app-toolbar__spacer');
+    if (spacer) toolbar.insertBefore(btn, spacer);
+    else toolbar.appendChild(btn);
+  }
+
+  refreshLib();
+  rebuildRows();
+}
+
+setTimeout(() => {
+  try { installIschemiaCurveEditor(); }
+  catch (e) { console.warn('installIschemiaCurveEditor failed', e); }
+}, 1800);
