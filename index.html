@@ -1,40 +1,101 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <title>Sketch</title>
-
-    <link rel="stylesheet" type="text/css" href="style.css">
-
-    <script src="libraries/p5.min.js"></script>
-    <script src="libraries/p5.sound.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Conduction Lab</title>
+    <link rel="stylesheet" href="style.css" />
   </head>
-
   <body>
-    <!-- Preload sketch defaults from sketch-data.json when available -->
-    <script>
-      (async function(){
-        try {
-          const resp = await fetch('sketch-data.json');
-          if (!resp.ok) return;
-          const data = await resp.json();
-          try { window._sketchDataCache = window._sketchDataCache || {}; } catch (e) { window._sketchDataCache = {}; }
-          Object.keys(data || {}).forEach(k => {
-            try {
-              // If the user already has a value in localStorage, keep it.
-              if (localStorage.getItem(k) === null) localStorage.setItem(k, data[k]);
-              if (!(k in window._sketchDataCache)) window._sketchDataCache[k] = data[k];
-            } catch (e) {}
-          });
-        } catch (e) {
-          /* ignore fetch failures */
-        }
-      })();
-    </script>
-
-    <!-- Load the Single Lead ACS sketch (spaces URL-encoded) -->
+    <main class="app-shell">
+      <header class="topbar">
+        <div><p class="eyebrow">SEE THE IMPULSE. UNDERSTAND THE RHYTHM.</p><h1>Conduction Lab</h1></div>
+        <button id="developer-toggle" aria-expanded="false" aria-controls="developer-panel">Waveform authoring</button>
+      </header>
+      <div id="error-message" class="notice error" role="alert" hidden></div>
+      <section class="scenario-bar" aria-label="Conduction scenario">
+        <label class="field">AV conduction
+          <select id="av-pattern">
+            <option value="normal">Normal (NSR)</option>
+            <option value="first">First-degree AV block</option>
+            <option value="mobitz1">Second-degree: Mobitz I</option>
+            <option value="mobitz2">Second-degree: Mobitz II</option>
+            <option value="third">Third-degree AV block</option>
+          </select>
+        </label>
+        <label class="field">Bundle conduction
+          <select id="bundle-pattern">
+            <option value="none">Normal bundles</option>
+            <option value="rbbb">Right bundle branch block</option>
+            <option value="lbbb">Left bundle branch block</option>
+          </select>
+        </label>
+        <label class="field number-field">Atrial rate <span><input id="heart-rate" type="number" min="40" max="120" value="70" /> bpm</span></label>
+        <div class="transport" role="group" aria-label="Playback controls">
+          <button id="pause-button" class="primary-control" aria-pressed="false" disabled>Pause</button>
+          <label class="field speed-field">Playback speed <input id="speed" type="range" min="0.1" max="2" step="0.1" value="1" /><output id="speed-value" for="speed">1.0x</output></label>
+        </div>
+        <label class="field number-field" id="pr-field" hidden>PR interval <span><input id="pr-interval" type="number" min="220" max="380" step="10" value="260" /> ms</span></label>
+        <label class="field number-field" id="wenckebach-field" hidden>Initial PR <span><input id="wenckebach-pr" type="number" min="120" max="200" step="10" value="160" /> ms</span></label>
+        <label class="field number-field" id="pr-step-field" hidden>Initial PR increment <span><input id="pr-step" type="number" min="20" max="60" step="10" value="40" /> ms</span></label>
+        <label class="field" id="ratio-field" hidden>Conduction pattern
+          <select id="conducted-beats"><option value="2">2 conducted, 1 blocked</option><option value="3" selected>3 conducted, 1 blocked</option><option value="4">4 conducted, 1 blocked</option><option value="5">5 conducted, 1 blocked</option></select>
+        </label>
+        <label class="field number-field" id="escape-field" hidden>Junctional escape <span><input id="escape-rate" type="number" min="20" max="60" value="40" /> bpm</span></label>
+      </section>
+      <section class="teaching-grid" aria-label="Synchronized anatomy and ECG">
+        <div class="anatomy-panel">
+          <div class="section-heading"><span class="eyebrow">CONDUCTION MAP</span></div>
+          <svg id="anatomy" viewBox="0 0 822 566" role="img" aria-labelledby="anatomy-title anatomy-description">
+            <title id="anatomy-title">Cardiac conduction system</title>
+            <desc id="anatomy-description">An impulse travels from the sinus node through the atria, AV node, His bundle and bundle branches. Blocked pathways are marked in red.</desc>
+            <image href="CCS.png" width="822" height="566" />
+            <g id="anatomy-overlays"></g>
+          </svg>
+        </div>
+        <div class="rhythm-panel">
+          <section class="monitor" aria-label="V1 rhythm strip">
+            <div class="monitor-header"><span>LEAD V1</span><span id="monitor-status">LOADING</span></div>
+            <div id="ecg-plot" role="img" aria-label="Continuous V1 rhythm strip with the current instant at its center, 2.5 seconds of history and 2.5 seconds of upcoming activity">
+              <canvas id="ecg-canvas" aria-hidden="true"></canvas>
+              <div id="ecg-waveform" aria-hidden="true"><div id="ecg-trace"></div></div>
+              <div class="ecg-playhead" aria-hidden="true"></div>
+              <div class="ecg-axis" aria-hidden="true"><span>-2.5 s</span><span>NOW</span><span>+2.5 s</span></div>
+            </div>
+            <div class="monitor-footer"><span id="readout">A 70 bpm</span><span>5 s window · 1 mV calibration</span></div>
+          </section>
+          <div class="measurements" aria-label="Electrical measurements">
+            <div><span>PR</span><strong id="pr-readout">160 ms</strong></div>
+            <div><span>QRS</span><strong id="qrs-readout">90 ms</strong></div>
+            <div><span>SIMULATION</span><strong id="time-readout">0.00 s</strong></div>
+          </div>
+        </div>
+      </section>
+      <aside id="developer-panel" class="developer-panel" hidden aria-labelledby="authoring-title">
+        <div class="panel-header"><div><p class="eyebrow">AUTHORING · SEPARATE FROM CONDUCTION RULES</p><h2 id="authoring-title">V1 waveform constructor</h2></div><button id="developer-close">Close authoring</button></div>
+        <p class="small-note">Automatic morphology follows the selected bundle pattern. Custom morphology overrides the drawing of the ECG, not the conduction mechanism. PR comes from the scenario; QT and component durations come from this editor. Editing restarts the recording.</p>
+        <div class="constructor-summary">
+          <label class="field">Morphology <select id="waveform-select"><option value="automatic">Automatic V1</option></select></label>
+          <button id="duplicate-waveform">Duplicate to edit</button>
+        </div>
+        <div id="custom-warning" class="notice" hidden>Custom morphology is active. It may not show the characteristic V1 appearance or QRS width of the selected bundle block. Choose Automatic V1 to restore the teaching templates.</div>
+        <fieldset id="waveform-fields" disabled>
+          <div class="constructor-summary">
+            <label class="field name-field">Waveform name <input id="waveform-name" type="text" maxlength="80" /></label>
+            <label class="field number-field">QT interval <span><input id="qt-interval" type="number" min="120" max="2000" step="1" /> ms</span></label>
+          </div>
+          <div class="segment-controls">
+            <label class="field">PR offset (mV) <input id="pr-offset" type="range" min="-0.5" max="0.5" step="0.01" value="0" /><output id="pr-offset-value">0.00</output></label>
+            <label class="field">ST offset (mV) <input id="st-offset" type="range" min="-0.5" max="0.5" step="0.01" value="0" /><output id="st-offset-value">0.00</output></label>
+          </div>
+          <div id="wave-editor" class="wave-editor"></div>
+        </fieldset>
+        <div class="developer-actions"><button id="save-waveform" class="primary-control" disabled>Save waveform</button><button id="delete-waveform" class="danger-button" disabled>Delete waveform</button><span class="action-spacer"></span><button id="export-waveforms">Export library</button><label class="file-button">Import library<input id="import-waveforms" type="file" accept="application/json" /></label></div>
+        <p id="authoring-status" role="status" class="small-note"></p>
+      </aside>
+    </main>
+    <script src="conduction.js"></script>
+    <script src="ecg-strip.js"></script>
     <script src="script.js"></script>
   </body>
 </html>
