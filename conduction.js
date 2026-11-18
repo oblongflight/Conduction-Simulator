@@ -37,8 +37,19 @@
       ]
     }
   };
+  const rhythms = {
+    sinus: { rateLabel: "Atrial rate", defaultRate: 70, minRate: 40, maxRate: 120 },
+    wandering: { rateLabel: "Atrial rate", defaultRate: 80, minRate: 40, maxRate: 90 },
+    pac: { rateLabel: "Atrial rate", defaultRate: 70, minRate: 40, maxRate: 120 },
+    psvt: { rateLabel: "Tachycardia rate", defaultRate: 180, minRate: 140, maxRate: 250 },
+    wpw: { rateLabel: "Atrial rate", defaultRate: 70, minRate: 40, maxRate: 120 },
+    atrial_tachy: { rateLabel: "Atrial rate", defaultRate: 150, minRate: 100, maxRate: 250 },
+    flutter: { rateLabel: "Atrial rate", defaultRate: 300, minRate: 240, maxRate: 360 },
+    afib: { rateLabel: "Ventricular response", defaultRate: 90, minRate: 50, maxRate: 200 },
+    junctional_tachy: { rateLabel: "Junctional rate", defaultRate: 130, minRate: 100, maxRate: 180 }
+  };
   const defaults = {
-    av: "normal", bundle: "none", atrialRate: 70, escapeRate: 40,
+    rhythm: "sinus", av: "normal", bundle: "none", atrialRate: 70, escapeRate: 40,
     pr: 260, wenckebachPr: 160, prStep: 40, conductedBeats: 3
   };
   const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
@@ -109,12 +120,17 @@
     constructor(settings = {}, morphology) {
       this.settings = { ...defaults, ...settings };
       const s = this.settings;
-      if (!["normal", "first", "mobitz1", "mobitz2", "third"].includes(s.av) ||
+      if (!Object.hasOwn(settings, "atrialRate") && rhythms[s.rhythm]) {
+        s.atrialRate = rhythms[s.rhythm].defaultRate;
+      }
+      if (!rhythms[s.rhythm] ||
+          !["normal", "first", "mobitz1", "mobitz2", "third"].includes(s.av) ||
           !["none", "rbbb", "lbbb"].includes(s.bundle)) {
-        throw new Error("Unknown AV or bundle conduction pattern.");
+        throw new Error("Unknown rhythm, AV, or bundle conduction pattern.");
       }
       for (const [key, min, max] of [
-        ["atrialRate", 40, 120], ["escapeRate", 20, 60], ["pr", 220, 380],
+        ["atrialRate", rhythms[s.rhythm].minRate, rhythms[s.rhythm].maxRate],
+        ["escapeRate", 20, 60], ["pr", 220, 380],
         ["wenckebachPr", 120, 200], ["prStep", 20, 60], ["conductedBeats", 2, 5]
       ]) {
         if (!Number.isFinite(s[key]) || s[key] < min || s[key] > max ||
@@ -131,8 +147,14 @@
       this.ventricles = [];
       this.serial = 0;
       this.beatIndex = 0;
-      this.schedule(0, "sinus");
-      if (s.av === "third") this.schedule(350, "escape");
+      if (s.rhythm === "psvt" || s.rhythm === "junctional_tachy") {
+        this.schedule(0, "tachy");
+      } else if (s.rhythm === "afib") {
+        this.schedule(0, "afib");
+      } else {
+        this.schedule(0, "atrial");
+      }
+      if (s.av === "third" && s.rhythm !== "junctional_tachy") this.schedule(350, "escape");
       this.advanceTo(0);
     }
 
@@ -144,43 +166,99 @@
     process(event) {
       const s = this.settings;
       const t = event.time;
-      if (event.type === "sinus") {
+      if (event.type === "atrial" || event.type === "pac") {
         const index = this.beatIndex++;
         const position = index % (s.conductedBeats + 1);
-        const dropped = (s.av === "mobitz1" || s.av === "mobitz2") && position === s.conductedBeats;
-        const pr = s.av === "first" ? s.pr :
-          s.av === "mobitz1" ? Math.round(s.wenckebachPr + 2 * s.prStep * (1 - 0.5 ** position)) : 160;
+        const droppedByAv = (s.av === "mobitz1" || s.av === "mobitz2") && position === s.conductedBeats;
+        const droppedByFlutter = s.rhythm === "flutter" && index % 2 === 1;
+        const dropped = droppedByAv || droppedByFlutter;
+        const wanderingPr = [130, 180, 220][index % 3];
+        const basePr = s.rhythm === "wpw" ? 100 :
+          s.av === "first" ? s.pr :
+          s.av === "mobitz1" ? Math.round(s.wenckebachPr + 2 * s.prStep * (1 - 0.5 ** position)) :
+          s.rhythm === "wandering" ? wanderingPr :
+          s.rhythm === "atrial_tachy" ? 140 : 160;
+        const pWave = { ...this.morphology.waves[0] };
+        if (s.rhythm === "wandering") {
+          pWave.amplitude *= [1, -0.65, 0.55][index % 3];
+          pWave.orientation = [0.5, 0.34, 0.68][index % 3];
+          pWave.duration = [75, 95, 110][index % 3];
+        } else if (event.type === "pac") {
+          pWave.amplitude *= -1.35;
+          pWave.orientation = 0.36;
+          pWave.duration = Math.max(50, pWave.duration - 15);
+        }
         const beat = {
-          time: t, pr: s.av === "third" ? null : pr,
-          conducted: s.av !== "third" && !dropped,
+          time: t, pr: s.av === "third" && s.rhythm !== "wpw" ? null : basePr,
+          conducted: s.rhythm === "wpw" || (s.av !== "third" && !dropped),
+          origin: event.type === "pac" ? "PAC" : s.rhythm,
+          pWave: s.rhythm === "flutter" ? null : pWave,
           blockSite: s.av === "mobitz2" ? "his" : "av"
         };
         this.atria.push(beat);
-        this.schedule(t + 60000 / s.atrialRate, "sinus");
-        this.schedule(t + 80, "av-arrival", { beat });
-        if (s.av === "third") {
+        const period = 60000 / s.atrialRate;
+        let nextInterval = period;
+        let nextType = "atrial";
+        if (s.rhythm === "wandering") {
+          nextInterval *= [0.9, 1.08, 1.02][index % 3];
+        } else if (s.rhythm === "pac") {
+          if (event.type === "pac") nextInterval *= 1.2;
+          else if ((index + 1) % 4 === 0) {
+            nextInterval *= 0.55;
+            nextType = "pac";
+          }
+        }
+        this.schedule(t + nextInterval, nextType);
+        if (s.rhythm === "wpw") {
+          this.schedule(t + 100, "ventricular", { origin: "preexcited", preexcited: true, beat });
+        } else if (s.av === "third") {
           this.schedule(t + 110, "block", { beat, site: "av" });
         } else if (dropped && s.av === "mobitz1") {
-          this.schedule(t + pr - 35, "block", { beat, site: "av" });
+          this.schedule(t + basePr - 35, "block", { beat, site: "av" });
         } else {
-          this.schedule(t + pr - 35, "av-release", { beat });
-          this.schedule(t + pr - 20, "his", { beat });
-          if (dropped) this.schedule(t + pr - 10, "block", { beat, site: "his" });
-          else this.schedule(t + pr, "ventricular", { origin: "conducted", beat });
+          this.schedule(t + 80, "av-arrival", { beat });
+          this.schedule(t + basePr - 35, "av-release", { beat });
+          this.schedule(t + basePr - 20, "his", { beat });
+          if (dropped) this.schedule(t + basePr - 10, "block", { beat, site: beat.blockSite });
+          else this.schedule(t + basePr, "ventricular", { origin: "conducted", beat });
         }
+      } else if (event.type === "tachy") {
+        const origin = s.rhythm === "psvt" ? "psvt" : "junctional";
+        const interval = 60000 / s.atrialRate;
+        const beat = { time: t, origin, bundle: s.bundle };
+        this.schedule(t + 20, "his", { origin });
+        this.schedule(t + 35, "ventricular", { origin, beat });
+        this.schedule(t + 65, "retrograde-atria", { origin });
+        this.schedule(t + interval, "tachy");
+      } else if (event.type === "retrograde-atria") {
+        this.atria.push({
+          time: t, pr: null, conducted: false, retrograde: true, origin: event.origin,
+          pWave: { ...this.morphology.waves[0], amplitude: -Math.abs(this.morphology.waves[0].amplitude) }
+        });
+      } else if (event.type === "afib") {
+        const variation = [0.68, 1.24, 0.82, 1.31, 0.74, 1.16, 0.93, 1.12][this.beatIndex++ % 8];
+        if (s.av === "third") this.schedule(t, "block", { site: "av" });
+        else this.schedule(t, "ventricular", { origin: "afib" });
+        this.schedule(t + (60000 / s.atrialRate) * variation, "afib");
       } else if (event.type === "escape") {
         this.schedule(t + 60000 / s.escapeRate, "escape");
         this.schedule(t, "his", { origin: "escape" });
         this.schedule(t + 20, "ventricular", { origin: "escape" });
       } else if (event.type === "ventricular") {
-        const beat = { time: t, origin: event.origin, bundle: s.bundle };
+        const preexcitedOffset = event.preexcited ? 40 : 0;
+        const beat = {
+          time: t, origin: event.origin, bundle: s.bundle, preexcited: !!event.preexcited,
+          qrsMs: this.timing.qrsMs + preexcitedOffset,
+          tStart: this.timing.tStart + preexcitedOffset,
+          qtMs: this.timing.qtMs + preexcitedOffset
+        };
         this.ventricles.push(beat);
         this.schedule(t + 15, "rv", { ventricular: beat, delayed: s.bundle === "rbbb" });
         this.schedule(t + 15, "lv", { ventricular: beat, delayed: s.bundle === "lbbb" });
         if (s.bundle !== "none") {
           this.schedule(t + 95, "myocardial", { ventricular: beat, side: s.bundle === "rbbb" ? "rv" : "lv" });
         }
-        this.schedule(t + this.timing.tStart, "repolarization", { ventricular: beat });
+        this.schedule(t + beat.tStart, "repolarization", { ventricular: beat });
       }
       this.events.push(event);
     }
@@ -201,43 +279,59 @@
 
     chamberOpacity(time, chamber) {
       if (chamber === "atria") {
-        const pEnd = this.morphology.waves[0].duration;
-        // Atrial recovery is schematic and remains independent of AV conduction.
-        return this.atria.reduce((alpha, beat) =>
-          Math.max(alpha, activationOpacity(time - beat.time, 0, pEnd, pEnd + 200)), 0);
+        if (this.settings.rhythm === "afib") {
+          const phase = time / 37;
+          const modulation = (1 + Math.sin(phase * 0.73) * Math.sin(phase * 1.17)) / 2;
+          return 0.06 + 0.44 * modulation;
+        }
+        return this.atria.reduce((alpha, beat) => {
+          const pEnd = beat.pWave?.duration || this.morphology.waves[0].duration;
+          return Math.max(alpha, activationOpacity(time - beat.time, 0, pEnd, pEnd + 200));
+        }, 0);
       }
       if (chamber !== "rv" && chamber !== "lv") throw new Error(`Unknown chamber: ${chamber}`);
-      const { qrsMs, qtMs } = this.timing;
       return this.ventricles.reduce((alpha, beat) => {
         const delayed = (chamber === "rv" && beat.bundle === "rbbb") ||
           (chamber === "lv" && beat.bundle === "lbbb");
-        const onset = Math.min(delayed ? 95 : 15, qrsMs - 1);
-        return Math.max(alpha, activationOpacity(time - beat.time, onset, qrsMs, qtMs));
+        const onset = Math.min(delayed ? 95 : 15, beat.qrsMs - 1);
+        return Math.max(alpha, activationOpacity(time - beat.time, onset, beat.qrsMs, beat.qtMs));
       }, 0);
     }
 
     signalAt(time) {
       let value = 0;
       const waves = this.morphology.waves;
+      if (this.settings.rhythm === "flutter") {
+        const phase = ((time * this.settings.atrialRate / 60000) % 1 + 1) % 1;
+        value += 0.08 * (1 - 2 * phase);
+      } else if (this.settings.rhythm === "afib") {
+        value += [0.038, 0.027, 0.019, 0.013].reduce((sum, amplitude, index) =>
+          sum + amplitude * Math.sin(time / 1000 * [7.1, 9.7, 12.4, 15.3][index] + index * 1.7), 0);
+      }
       for (const beat of this.atria) {
-        value += sampleWave(time - beat.time, waves[0]);
-        if (beat.conducted) {
-          value += segmentOffset(time - beat.time, waves[0].duration, beat.pr,
+        if (beat.pWave) value += sampleWave(time - beat.time, beat.pWave);
+        if (beat.conducted && beat.pWave) {
+          value += segmentOffset(time - beat.time, beat.pWave.duration, beat.pr,
             this.morphology.segments?.pr);
         }
       }
       for (const beat of this.ventricles) {
-        let cursor = beat.time;
+        if (beat.preexcited) {
+          value += sampleWave(time - beat.time, {
+            amplitude: 0.18, duration: 40, orientation: 0.78, topRadius: 8
+          });
+        }
+        let cursor = beat.time + (beat.preexcited ? 40 : 0);
         for (const item of waves.slice(1)) {
           value += sampleWave(time - cursor, item);
           cursor += item.duration + item.gap;
         }
-        value += segmentOffset(time - beat.time, this.timing.qrsMs, this.timing.tStart,
+        value += segmentOffset(time - beat.time, beat.qrsMs, beat.tStart,
           this.morphology.segments?.st);
       }
       return value;
     }
   }
 
-  window.Conduction = { Simulation, templates, defaults, morphologyTiming, validateMorphology, clone };
+  window.Conduction = { Simulation, templates, rhythms, defaults, morphologyTiming, validateMorphology, clone };
 })();

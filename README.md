@@ -17,14 +17,17 @@ because the anatomy geometry is loaded from `sketch-data.json`.
 
 ## Teaching controls
 
-- Choose normal AV conduction, first-degree block, Mobitz I, Mobitz II, or
-  third-degree block.
-- Independently choose normal bundles, RBBB, or LBBB. All 15 combinations work.
+- Choose normal sinus rhythm, wandering pacemaker, atrial premature beats
+  (APB/PAC), PSVT, WPW, atrial tachycardia, atrial flutter, atrial fibrillation,
+  or junctional tachycardia.
+- Independently choose normal AV conduction, first-degree block, Mobitz I,
+  Mobitz II, or third-degree block, and normal bundles, RBBB, or LBBB.
 - Scenario-specific controls set PR prolongation, Wenckebach progression,
-  conducted beats before a dropped impulse, or junctional escape rate.
-- Pause/resume playback or change its speed beside Atrial rate in the top bar.
-- The strip is centered on the current instant: 2.5 seconds of history to the
-  left and 2.5 seconds of upcoming activity to the right. The ECG column matches
+  conducted beats before a dropped impulse, junctional escape rate, or the
+  rhythm-specific rate. Selecting a rhythm sets its representative starting rate.
+- Pause/resume playback or change its speed beside the rhythm rate in the top bar.
+- The strip is centered on the current instant: 1.5 seconds of history to the
+  left and 1.5 seconds of upcoming activity to the right. The ECG column matches
   the anatomy panel's height on wide screens, with waveform amplitude scaled
   to the taller canvas. On smaller screens the panels stack. The yellow center
   playhead is the current instant on the anatomy. A separate deterministic
@@ -50,15 +53,18 @@ position steps. The dot and ECG animations share the simulation's playback
 clock, including when paused or changing speed. Chamber
 overlays are red: ventricular opacity rises smoothly from transparent at
 activation onset to 50% at QRS end, then fades smoothly to transparent at T end.
-The affected ventricle begins its rise later with a bundle block. Atrial opacity
-reaches 50% at P end, followed by a schematic 200 ms recovery fade, independently
-of AV conduction. There are no yellow chamber fills or nodal halos.
+The affected ventricle begins its rise later with a bundle block. In organized
+atrial rhythms, opacity reaches 50% at P end, followed by a schematic 200 ms
+recovery fade, independently of AV conduction. A Fib uses a fluctuating atrial
+opacity that reaches 50%.
+There are no yellow chamber fills or nodal halos.
 
 The shared event model in `conduction.js` drives the anatomy and ECG.
-Blocked atrial impulses generate P waves but no associated ventricular
-activation, QRS, or T wave. Third-degree block has independent atrial and
-junctional/His escape clocks. A blocked bundle does not conduct antegradely:
-the affected ventricle activates later through schematic transseptal myocardium.
+In AV-block rhythms, blocked atrial impulses generate P waves but no associated
+ventricular activation, QRS, or T wave. Third-degree block has independent
+atrial and junctional/His escape clocks. A blocked bundle does not conduct
+antegradely: the affected ventricle activates later through schematic
+transseptal myocardium.
 
 ## Waveform authoring and saved data
 
@@ -69,7 +75,8 @@ The component durations determine QRS and QT; changing a segment offset does
 not change conduction timing.
 
 Automatic morphology follows the selected bundle block. A custom morphology
-overrides the ECG appearance, including QRS width, but not the selected
+replaces the component waveform but not rhythm-level signatures such as WPW
+pre-excitation or the flutter/fibrillation baseline, and it does not change
 conduction rules; a warning identifies this teaching limitation.
 
 **Save waveform** saves the custom library in this browser under the existing
@@ -93,22 +100,27 @@ biophysical tissue simulation. Activation is not contraction. V1 templates are
 illustrative, and complete-block location and escape focus are simplified.
 Wenckebach uses a configurable initial PR increment, halving subsequent increments
 to illustrate shortening conducted R-R intervals, and a repeating drop pattern;
-Mobitz II uses a fixed conducted PR and a repeating drop pattern. Atrial rates
-are limited to 40–120 bpm for these teaching examples. A 2:1 AV pattern cannot
-be classified as Mobitz I or II from that pattern alone.
+Mobitz II uses a fixed conducted PR and a repeating drop pattern. Rate ranges
+are bounded for each rhythm. Wandering pacemaker and PAC timing repeat
+deterministic teaching patterns; flutter uses 2:1 conduction; atrial fibrillation
+uses a fibrillatory baseline and deterministic irregular ventricular response.
+PSVT and junctional tachycardia use regular simplified circuits with retrograde
+P waves. WPW pre-excitation bypasses the selected AV block and uses a short PR
+and widened, slurred QRS; the accessory pathway itself is not drawn on the anatomy.
+A 2:1 AV pattern cannot be classified as Mobitz I or II from that pattern alone.
 
-There is no full 12-lead projection, ischemia model, retrograde capture, or
-general refractory/reentry model. In particular, future territorial ischemia
-needs a coordinated multi-lead model, not independent changes to V1.
+There is no full 12-lead projection, ischemia model, general retrograde-capture
+or refractory/reentry model. In particular, future territorial ischemia needs a
+coordinated multi-lead model, not independent changes to V1.
 
 ## Tests
 
 With the same static server running, open <http://localhost:8000/tests.html>.
-The dependency-free tests cover all AV/bundle combinations, blocked beats,
-Wenckebach reset, AV dissociation, delayed activation, frame-independent
-timing/history, centered ECG preview, exact chamber-opacity endpoints, V1
-morphology, authoring offsets, and invalid input. Rendering tests verify
-five-second window placement, pixel-stable scrolling (allowing one channel
+The dependency-free tests cover all AV/bundle combinations, every rhythm with
+each bundle morphology, blocked beats, Wenckebach reset, AV dissociation, delayed activation,
+frame-independent timing/history, centered ECG preview, exact chamber-opacity
+endpoints, V1 morphology, authoring offsets, and invalid input. Rendering tests verify
+three-second window placement, pixel-stable scrolling (allowing one channel
 level for GPU rounding), zero signal resampling on ordinary frames, exact
 pixel preservation at cache rollover, and complete history after resizing.
 An isolated playback fixture also checks native subframe scrolling and dot

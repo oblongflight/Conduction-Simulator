@@ -13,10 +13,23 @@
         <button id="developer-toggle" aria-expanded="false" aria-controls="developer-panel">Waveform authoring</button>
       </header>
       <div id="error-message" class="notice error" role="alert" hidden></div>
-      <section class="scenario-bar" aria-label="Conduction scenario">
+      <section class="scenario-bar" aria-label="Rhythm and conduction scenario">
+        <label class="field">Rhythm
+          <select id="rhythm-pattern">
+            <option value="sinus">Normal sinus rhythm</option>
+            <option value="wandering">Wandering pacemaker</option>
+            <option value="pac">Atrial premature beats (APB/PAC)</option>
+            <option value="psvt">Paroxysmal SVT (PSVT)</option>
+            <option value="wpw">Wolff-Parkinson-White (WPW)</option>
+            <option value="atrial_tachy">Atrial tachycardia</option>
+            <option value="flutter">Atrial flutter</option>
+            <option value="afib">Atrial fibrillation (A Fib)</option>
+            <option value="junctional_tachy">Junctional tachycardia</option>
+          </select>
+        </label>
         <label class="field">AV conduction
           <select id="av-pattern">
-            <option value="normal">Normal (NSR)</option>
+            <option value="normal">Normal AV conduction</option>
             <option value="first">First-degree AV block</option>
             <option value="mobitz1">Second-degree: Mobitz I</option>
             <option value="mobitz2">Second-degree: Mobitz II</option>
@@ -30,7 +43,7 @@
             <option value="lbbb">Left bundle branch block</option>
           </select>
         </label>
-        <label class="field number-field">Atrial rate <span><input id="heart-rate" type="number" min="40" max="120" value="70" /> bpm</span></label>
+        <label class="field number-field"><span id="rate-label">Atrial rate</span> <span><input id="heart-rate" type="number" min="40" max="120" value="70" /> bpm</span></label>
         <div class="transport" role="group" aria-label="Playback controls">
           <button id="pause-button" class="primary-control" aria-pressed="false" disabled>Pause</button>
           <label class="field speed-field">Playback speed <input id="speed" type="range" min="0.1" max="2" step="0.1" value="1" /><output id="speed-value" for="speed">1.0x</output></label>
@@ -45,7 +58,9 @@
       </section>
       <section class="teaching-grid" aria-label="Synchronized anatomy and ECG">
         <div class="anatomy-panel">
-          <div class="section-heading"><span class="eyebrow">CONDUCTION MAP</span></div>
+          <div class="section-heading">
+            <span class="eyebrow">CONDUCTION MAP</span>
+          </div>
           <svg id="anatomy" viewBox="0 0 822 566" role="img" aria-labelledby="anatomy-title anatomy-description">
             <title id="anatomy-title">Cardiac conduction system</title>
             <desc id="anatomy-description">An impulse travels from the sinus node through the atria, AV node, His bundle and bundle branches. Blocked pathways are marked in red.</desc>
@@ -56,13 +71,13 @@
         <div class="rhythm-panel">
           <section class="monitor" aria-label="V1 rhythm strip">
             <div class="monitor-header"><span>LEAD V1</span><span id="monitor-status">LOADING</span></div>
-            <div id="ecg-plot" role="img" aria-label="Continuous V1 rhythm strip with the current instant at its center, 2.5 seconds of history and 2.5 seconds of upcoming activity">
+            <div id="ecg-plot" role="img" aria-label="Continuous V1 rhythm strip with the current instant at its center, 1.5 seconds of history and 1.5 seconds of upcoming activity">
               <canvas id="ecg-canvas" aria-hidden="true"></canvas>
               <div id="ecg-waveform" aria-hidden="true"><div id="ecg-trace"></div></div>
               <div class="ecg-playhead" aria-hidden="true"></div>
-              <div class="ecg-axis" aria-hidden="true"><span>-2.5 s</span><span>NOW</span><span>+2.5 s</span></div>
+              <div class="ecg-axis" aria-hidden="true"><span>-1.5 s</span><span>NOW</span><span>+1.5 s</span></div>
             </div>
-            <div class="monitor-footer"><span id="readout">A 70 bpm</span><span>5 s window · 1 mV calibration</span></div>
+            <div class="monitor-footer"><span id="readout">A 70 bpm</span><span>3 s window · 1 mV calibration</span></div>
           </section>
           <div class="measurements" aria-label="Electrical measurements">
             <div><span>PR</span><strong id="pr-readout">160 ms</strong></div>

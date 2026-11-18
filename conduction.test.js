@@ -99,6 +99,89 @@
     close(direct.signalAt(1200), unchanged, "Advancing time rewrote an old beat");
   });
 
+  test("Wandering pacemaker and PACs have variable atrial timing and P-wave shape", () => {
+    const wandering = new Simulation({ rhythm: "wandering" });
+    wandering.advanceTo(3000);
+    const wanderingIntervals = wandering.atria.slice(1, 4).map((beat, i) => beat.time - wandering.atria[i].time);
+    assert(new Set(wanderingIntervals).size === 3, "Wandering pacemaker intervals did not vary");
+    assert(new Set(wandering.atria.slice(0, 3).map(beat => beat.pWave.amplitude)).size === 3,
+      "Wandering pacemaker P-wave morphologies did not vary");
+
+    const pac = new Simulation({ rhythm: "pac", atrialRate: 60 });
+    pac.advanceTo(5000);
+    const ectopic = pac.atria.findIndex(beat => beat.origin === "PAC");
+    assert(ectopic > 0, "No premature atrial beat was generated");
+    const coupling = pac.atria[ectopic].time - pac.atria[ectopic - 1].time;
+    const pause = pac.atria[ectopic + 1].time - pac.atria[ectopic].time;
+    assert(coupling < 1000 && pause > 1000, "PAC coupling interval and pause were not premature");
+    assert(pac.atria[ectopic].pWave.amplitude < 0, "PAC did not use an ectopic P-wave shape");
+  });
+
+  test("Tachycardia, pre-excitation, flutter, and fibrillation have distinct timing", () => {
+    const psvt = new Simulation({ rhythm: "psvt" });
+    psvt.advanceTo(1100);
+    close(psvt.ventricles[1].time - psvt.ventricles[0].time, 60000 / 180, "PSVT interval");
+    assert(psvt.atria[0].retrograde, "PSVT did not produce a retrograde P wave");
+
+    const wpw = new Simulation({ rhythm: "wpw" });
+    wpw.advanceTo(500);
+    close(wpw.ventricles[0].time - wpw.atria[0].time, 100, "WPW PR interval");
+    assert(wpw.ventricles[0].preexcited && wpw.ventricles[0].qrsMs > wpw.timing.qrsMs,
+      "WPW did not produce pre-excitation and a widened QRS");
+    const bypass = new Simulation({ rhythm: "wpw", av: "third" });
+    bypass.advanceTo(150);
+    assert(bypass.ventricles.some(beat => beat.origin === "preexcited"),
+      "WPW did not bypass complete AV block");
+
+    const atrialTachy = new Simulation({ rhythm: "atrial_tachy" });
+    atrialTachy.advanceTo(900);
+    close(atrialTachy.atria[1].time - atrialTachy.atria[0].time, 400, "Atrial tachycardia interval");
+
+    const flutter = new Simulation({ rhythm: "flutter" });
+    flutter.advanceTo(1000);
+    assert(flutter.atria.length === 6 && flutter.atria[0].conducted && !flutter.atria[1].conducted,
+      "Atrial flutter did not use a 2:1 conduction pattern");
+    close(flutter.signalAt(0), 0.08, "Atrial flutter sawtooth height");
+    assert(Math.abs(flutter.signalAt(20) - flutter.signalAt(120)) > 0.05,
+      "Atrial flutter lacks a repeating sawtooth baseline");
+
+    const afib = new Simulation({ rhythm: "afib" });
+    afib.advanceTo(3000);
+    assert(afib.atria.length === 0, "A Fib generated organized P waves");
+    assert(new Set(afib.ventricles.slice(1).map((beat, i) =>
+      beat.time - afib.ventricles[i].time)).size > 1, "A Fib ventricular response was regular");
+    assert(afib.chamberOpacity(1000, "atria") > 0, "A Fib did not animate atrial activity");
+    const phase = 1000 / 37;
+    const expectedOpacity = 0.06 + 0.44 *
+      (1 + Math.sin(phase * 0.73) * Math.sin(phase * 1.17)) / 2;
+    close(afib.chamberOpacity(1000, "atria"), expectedOpacity, "A Fib opacity fluctuation pattern");
+    let peakOpacity = 0;
+    for (let time = 0; time < 30000; time += 25) {
+      peakOpacity = Math.max(peakOpacity, afib.chamberOpacity(time, "atria"));
+    }
+    assert(peakOpacity > 0.49 && peakOpacity <= 0.5, "A Fib atrial opacity did not reach 50%");
+  });
+
+  test("Junctional tachycardia has regular QRS complexes and retrograde atrial activation", () => {
+    const simulation = new Simulation({ rhythm: "junctional_tachy" });
+    simulation.advanceTo(1200);
+    close(simulation.ventricles[1].time - simulation.ventricles[0].time, 60000 / 130, "Junctional interval");
+    assert(simulation.atria[0].retrograde, "Junctional tachycardia lacks retrograde atrial activation");
+  });
+
+  test("Every rhythm composes with each bundle morphology", () => {
+    for (const rhythm of Object.keys(window.Conduction.rhythms)) {
+      for (const bundle of ["none", "rbbb", "lbbb"]) {
+        const simulation = new Simulation({ rhythm, bundle });
+        simulation.advanceTo(3000);
+        assert(simulation.ventricles.length > 0, `${rhythm}/${bundle} produced no ventricular activity`);
+        for (let time = 0; time <= 3000; time += 37) {
+          assert(Number.isFinite(simulation.signalAt(time)), `${rhythm}/${bundle} produced a non-finite ECG`);
+        }
+      }
+    }
+  });
+
   test("Step visits the next timestamp and processes simultaneous chamber events together", () => {
     const simulation = new Simulation();
     assert(simulation.now === 0, "Initial time");
@@ -107,6 +190,17 @@
     while (simulation.now < 175) simulation.step();
     const events = simulation.events.filter(event => event.time === 175);
     assert(events.some(event => event.type === "rv") && events.some(event => event.type === "lv"), "Simultaneous chamber activations split");
+  });
+
+  test("His bundle activation follows AV-nodal release and precedes the QRS", () => {
+    const simulation = new Simulation();
+    simulation.advanceTo(200);
+    const release = simulation.events.find(event => event.type === "av-release");
+    const his = simulation.events.find(event => event.type === "his" && event.beat?.conducted);
+    const qrs = simulation.events.find(event => event.type === "ventricular" && event.origin === "conducted");
+    assert(release && his && qrs, "The conduction sequence is incomplete");
+    assert(release.time < his.time && his.time < qrs.time, "His activation is in the wrong conduction order");
+    close(qrs.time - his.time, 20, "His-to-QRS conduction time");
   });
 
   test("V1 bundle templates produce a delayed positive R prime for RBBB and broad negative LBBB", () => {
@@ -136,6 +230,8 @@
       () => new Simulation({ conductedBeats: 2.5 }),
       () => new Simulation({ atrialRate: NaN }),
       () => new Simulation({ bundle: "unknown" }),
+      () => new Simulation({ rhythm: "unknown" }),
+      () => new Simulation({ rhythm: "flutter", atrialRate: 70 }),
       () => validateMorphology({ name: "bad", waves: [] }),
       () => validateMorphology({ ...clone(templates.none), waves: templates.none.waves.map(w => ({ ...w, duration: -1 })) })
     ];
@@ -217,7 +313,7 @@
     }
   });
 
-  test("The centered five-second strip places events at the correct horizontal positions", () => {
+  test("The centered three-second strip places events at the correct horizontal positions", () => {
     const canvas = document.createElement("canvas");
     canvas.width = 300;
     canvas.height = 140;
@@ -226,7 +322,7 @@
     const strip = new window.EcgStrip(new Simulation());
     const original = Simulation.prototype.signalAt;
     Simulation.prototype.signalAt = time =>
-      Math.max(...[7500, 8750, 10000, 11250, 12500].map(event => Math.max(0, 1 - Math.abs(time - event) / 30)));
+      Math.max(...[8500, 9250, 10000, 10750, 11500].map(event => Math.max(0, 1 - Math.abs(time - event) / 30)));
     try {
       renderStrip(strip, context, 10000, viewport);
       for (const x of [44, 97, 150, 203, 255]) {
@@ -259,7 +355,7 @@
       assert(sampled > 0, "Offscreen strip was not generated");
       const before = context.getImageData(0, 0, canvas.width, canvas.height).data;
       context.clearRect(0, 0, 300, 140);
-      renderStrip(strip, context, 2000 + 5000 / 424, viewport);
+      renderStrip(strip, context, 2000 + 3000 / 424, viewport);
       const after = context.getImageData(0, 0, canvas.width, canvas.height).data;
       assert(samples === sampled && strip.image === image, "Scrolling regenerated waveform geometry");
       let visiblePixels = 0;
@@ -292,7 +388,9 @@
     const viewport = { left: 44, right: 256, baseline: 74, amplitude: 68, height: 140 };
     const strip = new window.EcgStrip(new Simulation({ av: "third", bundle: "lbbb" }));
     renderStrip(strip, context, 2490, viewport);
-    const previous = strip.image.getContext("2d").getImageData(265, 0, 530, 175).data;
+    const tileWidth = strip.image.width / 3;
+    assert(tileWidth === Math.round(212 * 5 / 3 * 1.25), "The viewport is not zoomed to a three-second window");
+    const previous = strip.image.getContext("2d").getImageData(tileWidth, 0, 2 * tileWidth, 175).data;
     const paint = strip.paintTile;
     const painted = [];
     strip.paintTile = function(ctx, tile, offset, geometry) {
@@ -301,9 +399,9 @@
     };
     renderStrip(strip, context, 2510, viewport);
     assert(painted.length === 1 && painted[0] === 2, "Cache rollover repainted retained segments");
-    const retained = strip.image.getContext("2d").getImageData(0, 0, 530, 175).data;
+    const retained = strip.image.getContext("2d").getImageData(0, 0, 2 * tileWidth, 175).data;
     assert(previous.every((value, i) => value === retained[i]), "Retained pixels changed at a cache boundary");
-    assert(strip.image.width === 795 && strip.image.height === 175, "Cache grew beyond its fixed 15-second buffer");
+    assert(strip.image.width === 3 * tileWidth && strip.image.height === 175, "Cache grew beyond its fixed 15-second buffer");
   });
 
   test("Resizing rebuilds the strip from complete history rather than a pruned preview", () => {
@@ -318,8 +416,8 @@
     renderStrip(strip, context, 25000, viewport);
     const reference = new window.EcgStrip(new Simulation(settings));
     renderStrip(reference, context, 25000, viewport);
-    const actual = strip.image.getContext("2d").getImageData(0, 0, 936, 140).data;
-    const expected = reference.image.getContext("2d").getImageData(0, 0, 936, 140).data;
+    const actual = strip.image.getContext("2d").getImageData(0, 0, strip.image.width, 140).data;
+    const expected = reference.image.getContext("2d").getImageData(0, 0, reference.image.width, 140).data;
     assert(actual.some(value => value > 0), "Resized waveform is blank");
     assert(actual.every((value, i) => value === expected[i]), "Resize lost or changed historical beats");
   });
@@ -347,10 +445,26 @@
     }
     if (pause.textContent === "Pause") pause.click();
     doc.querySelector("#av-pattern").dispatchEvent(new win.Event("change", { bubbles: true }));
+    test("Rhythm selector updates the rate control for the selected rhythm", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      rhythm.value = "flutter";
+      rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+      assert(doc.querySelector("#heart-rate").value === "300", "Flutter did not select its representative atrial rate");
+      assert(doc.querySelector("#heart-rate").max === "360", "Flutter rate range is incorrect");
+      assert(doc.querySelector("#rate-label").textContent === "Atrial rate", "Flutter rate label is incorrect");
+      rhythm.value = "sinus";
+      rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+    });
+    test("His bundle animation and pathway-highlighting control are omitted", () => {
+      assert(!doc.querySelector("#highlight-pathways"), "Pathway-highlighting checkbox is still shown");
+      assert(!doc.querySelector("#pathway-legend"), "Pathway color legend is still shown");
+      assert(!doc.querySelector('[data-conduction-path="His bundle"]'), "His bundle path is still shown");
+      assert(!doc.querySelector('[data-path="His bundle"]'), "His bundle activation dots are still shown");
+    });
     const trace = doc.querySelector("#ecg-trace");
     const animation = trace.getAnimations()[0];
 
-    test("Native ECG scrolling interpolates at subframe positions across the five-second window", () => {
+    test("Native ECG scrolling interpolates at subframe positions across the three-second window", () => {
       const originalTime = animation.currentTime;
       const width = doc.querySelector("#ecg-waveform").getBoundingClientRect().width;
       try {
@@ -358,7 +472,7 @@
         const first = new win.DOMMatrix(win.getComputedStyle(trace).transform).m41;
         animation.currentTime = 5012.5;
         const second = new win.DOMMatrix(win.getComputedStyle(trace).transform).m41;
-        assert(Math.abs(second - first + width * 12.5 / 5000) < 0.001, "Native scroll does not track fractional simulation time");
+        assert(Math.abs(second - first + width * 12.5 / 3000) < 0.002, "Native scroll does not track fractional simulation time");
       } finally {
         animation.currentTime = originalTime;
       }

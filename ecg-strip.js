@@ -4,6 +4,7 @@
   const { Simulation } = window.Conduction;
   const TILE_MS = 5000;
   const TILE_COUNT = 3;
+  const VIEW_WINDOW_MS = 3000;
 
   class EcgStrip {
     static windowMs = TILE_MS;
@@ -70,7 +71,7 @@
     prepare(time, viewport, ratio) {
       const { left, right, baseline, amplitude, height } = viewport;
       const geometry = {
-        tileWidth: Math.round((right - left) * ratio),
+        tileWidth: Math.round((right - left) * TILE_MS / VIEW_WINDOW_MS * ratio),
         height: Math.round(height * ratio), ratio,
         baseline: baseline * ratio, amplitude: amplitude * ratio
       };

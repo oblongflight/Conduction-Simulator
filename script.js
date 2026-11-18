@@ -1,7 +1,7 @@
 "use strict";
 
 (() => {
-  const { Simulation, templates, defaults, morphologyTiming, validateMorphology, clone } = window.Conduction;
+  const { Simulation, templates, rhythms, defaults, morphologyTiming, validateMorphology, clone } = window.Conduction;
   const KEY = "ecg-lecture-lab.waveforms.v1";
   const $ = selector => document.querySelector(selector);
   const canvas = $("#ecg-canvas");
@@ -30,7 +30,6 @@
   let library = [];
   let anatomyItems = [];
   let blockMarkers = [];
-  let hisPath;
   let crossPath;
   let sinusDots;
   let avDots;
@@ -89,6 +88,12 @@
   }
 
   function updateScenario() {
+    const rhythm = rhythms[settings.rhythm];
+    $("#rhythm-pattern").value = settings.rhythm;
+    $("#rate-label").textContent = rhythm.rateLabel;
+    $("#heart-rate").min = rhythm.minRate;
+    $("#heart-rate").max = rhythm.maxRate;
+    $("#heart-rate").value = settings.atrialRate;
     $("#pr-field").hidden = settings.av !== "first";
     $("#wenckebach-field").hidden = settings.av !== "mobitz1";
     $("#pr-step-field").hidden = settings.av !== "mobitz1";
@@ -328,7 +333,8 @@
       const path = svgElement("path", {
         d: d + (item.type === "shape" ? " Z" : ""), fill: "none",
         stroke: item.type === "path" ? "#b59f3c" : "none", "stroke-width": 2,
-        "stroke-opacity": 0.35, "stroke-linejoin": "round"
+        "stroke-opacity": 0.35, "stroke-linejoin": "round",
+        ...(item.type === "path" ? { "data-conduction-path": item.name } : {})
       });
       const title = svgElement("title");
       title.textContent = item.name;
@@ -345,9 +351,6 @@
     if (!required.every(name => anatomyItems.some(item => item.name === name))) {
       throw new Error("The saved anatomy is missing a required chamber or conduction structure.");
     }
-    const his = svgElement("path", { d: "M 374 307 Q 396 317 402 345", fill: "none", stroke: "#a38d31", "stroke-width": 3, "stroke-opacity": 0.4 });
-    parent.append(his);
-    hisPath = addImpulse(parent, his, "His bundle");
     const cross = svgElement("path", { d: "M 483 447 Q 452 419 411 444", fill: "none", stroke: "#c27b00", "stroke-width": 3, "stroke-dasharray": "6 5" });
     const crossTitle = svgElement("title");
     crossTitle.textContent = "Delayed transseptal myocardial conduction";
@@ -388,25 +391,27 @@
       if (item.type === "path") {
         const bundle = item.name === "Right Bundle" ? "rbbb" : item.name === "Left Bundle" ? "lbbb" : null;
         const elapsed = bundle ? vTime : aTime;
-        const duration = bundle ? Math.min(90, simulation.timing.qrsMs) : simulation.morphology.waves[0].duration;
+        const duration = bundle ? Math.min(90, simulation.timing.qrsMs) :
+          atrial?.pWave?.duration || simulation.morphology.waves[0].duration;
         const blocked = bundle && settings.bundle === bundle;
         const beat = bundle ? ventricular : atrial;
-        pulsePath(item.impulse, blocked || !Number.isFinite(elapsed) ? null : beat.time, duration);
+        pulsePath(item.impulse, blocked || !Number.isFinite(elapsed) ? null : beat.time, duration, !!beat?.retrograde);
       } else {
         const chamber = item.name.includes("Atrium") ? "atria" :
           item.name === "Right Ventricle" ? "rv" : item.name === "Left Ventricle" ? "lv" : null;
         if (chamber) setAttribute(item.path, "fill-opacity", simulation.chamberOpacity(now, chamber) * 2);
       }
     }
-    nodeOpacity(sinusDots, aTime < 55 ? 1 - aTime / 55 : 0);
+    const sinusDriven = ["sinus", "wpw"].includes(settings.rhythm) ||
+      (settings.rhythm === "pac" && atrial?.origin !== "PAC");
+    nodeOpacity(sinusDots, sinusDriven && atrial && !atrial.retrograde && aTime < 55 ? 1 - aTime / 55 : 0);
     const avEnd = atrial ? (atrial.pr === null ? 110 : atrial.pr - 35) : 0;
-    nodeOpacity(avDots, aTime >= 80 && aTime <= avEnd ? 1 : 0);
-    const escape = simulation.events.findLast(event => event.type === "escape");
-    const escapeAge = escape ? now - escape.time : Infinity;
+    const retrogradeAtAv = atrial?.retrograde && aTime >= 0 && aTime <= 55;
+    nodeOpacity(avDots, retrogradeAtAv || (!atrial?.retrograde && aTime >= 80 && aTime <= avEnd) ? 1 : 0);
+    const escapeFocus = simulation.events.findLast(event => event.type === "escape" ||
+      (event.type === "tachy" && settings.rhythm === "junctional_tachy"));
+    const escapeAge = escapeFocus ? now - escapeFocus.time : Infinity;
     nodeOpacity(escapeDots, escapeAge < 80 ? 1 - escapeAge / 80 : 0);
-    const his = simulation.events.findLast(event => event.type === "av-release" || (event.type === "his" && event.origin === "escape"));
-    const hisBlocked = his && latestBlock?.site === "his" && latestBlock.time >= his.time && latestBlock.time <= now;
-    pulsePath(hisPath, his && !hisBlocked ? his.time : null, 35);
     const crossVisible = settings.bundle !== "none" && vTime >= 35 && vTime <= 105;
     const crossDisplay = crossVisible ? "" : "none";
     if (crossPath.path.style.display !== crossDisplay) crossPath.path.style.display = crossDisplay;
@@ -428,13 +433,28 @@
     if (!force && now - lastReadout < 100) return;
     lastReadout = now;
     const s = simulation.settings;
-    const ventricularRate = s.av === "third" ? s.escapeRate :
-      ["mobitz1", "mobitz2"].includes(s.av) ? s.atrialRate * s.conductedBeats / (s.conductedBeats + 1) : s.atrialRate;
-    setReadout("readout", `A ${s.atrialRate} · V ${Number(ventricularRate.toFixed(1))} bpm${["mobitz1", "mobitz2"].includes(s.av) ? " (mean)" : ""}`);
+    function measuredRate(beats, fallback) {
+      if (beats.length < 2) return fallback;
+      const recent = beats.slice(-6);
+      const duration = recent.at(-1).time - recent[0].time;
+      return duration > 0 ? 60000 * (recent.length - 1) / duration : fallback;
+    }
+    const fallbackVRate = s.av === "third" && s.rhythm !== "junctional_tachy" ? s.escapeRate :
+      s.rhythm === "flutter" ? s.atrialRate / 2 : s.atrialRate;
+    const ventricularRate = measuredRate(simulation.ventricles, fallbackVRate);
+    const atrialRate = s.rhythm === "afib" ? "Fib" :
+      ["psvt", "junctional_tachy"].includes(s.rhythm) ? "retrograde" :
+      Math.round(measuredRate(simulation.atria.filter(beat => !beat.retrograde), s.atrialRate));
+    const meanRate = ["mobitz1", "mobitz2"].includes(s.av) ||
+      ["wandering", "pac", "afib"].includes(s.rhythm);
+    setReadout("readout", `A ${atrialRate} · V ${Math.round(ventricularRate)} bpm${meanRate ? " (mean)" : ""}`);
     const lastAtrial = simulation.atria[simulation.atria.length - 1];
-    setReadout("pr-readout", s.av === "third" ? "Dissociated" :
+    setReadout("pr-readout", s.rhythm === "afib" ? "No P waves" :
+      ["psvt", "junctional_tachy"].includes(s.rhythm) ? "Retrograde" :
+      s.av === "third" && s.rhythm !== "wpw" ? "Dissociated" :
       lastAtrial && !lastAtrial.conducted ? "Blocked" : `${lastAtrial.pr} ms`);
-    setReadout("qrs-readout", `${simulation.timing.qrsMs} ms`);
+    const latestVentricular = simulation.ventricles.at(-1);
+    setReadout("qrs-readout", `${latestVentricular?.qrsMs || simulation.timing.qrsMs} ms`);
     setReadout("time-readout", `${(simulation.now / 1000).toFixed(2)} s`);
   }
 
@@ -530,6 +550,25 @@
         }
       });
     }
+    $("#rhythm-pattern").addEventListener("change", event => {
+      const input = event.target;
+      const previousRhythm = settings.rhythm;
+      const previousRate = settings.atrialRate;
+      const rhythm = input.value;
+      const atrialRate = rhythms[rhythm]?.defaultRate;
+      try {
+        if (!Number.isFinite(atrialRate)) throw new Error("Please choose a valid rhythm.");
+        new Simulation({ ...settings, rhythm, atrialRate }, activeId === "automatic" ? undefined : currentMorphology());
+        settings.rhythm = rhythm;
+        settings.atrialRate = atrialRate;
+        updateScenario();
+        restart();
+      } catch (error) {
+        input.value = previousRhythm;
+        settings.atrialRate = previousRate;
+        reportError(error);
+      }
+    });
     $("#pause-button").onclick = () => setPaused(!paused);
     $("#speed").oninput = event => {
       advanceClock();
