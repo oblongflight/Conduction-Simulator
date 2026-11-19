@@ -2,6 +2,9 @@
 
 (() => {
   const { Simulation, templates, rhythms, defaults, morphologyTiming, validateMorphology, clone } = window.Conduction;
+  const { EcgStrip } = window;
+  const TILE_MS = EcgStrip.tileMs;
+  const ECG_LOOKAHEAD_MS = 2000;
   const KEY = "ecg-lecture-lab.waveforms.v1";
   const $ = selector => document.querySelector(selector);
   const canvas = $("#ecg-canvas");
@@ -22,9 +25,8 @@
   let lastReadout = -Infinity;
   const animations = new Map();
   const impulses = [];
-  let stripImage;
-  let stripAnimation;
-  let nextStripTime = 0;
+  const ecgTiles = new Map();
+  let prefetchPending = false;
   let ecgViewport;
   let activeId = "automatic";
   let library = [];
@@ -150,13 +152,12 @@
   }
 
   function restart() {
+    clearEcgTiles();
     for (const animation of animations.keys()) animation.cancel();
     animations.clear();
     for (const impulse of impulses) { impulse.key = null; impulse.animations = []; }
     simulation = new Simulation(settings, currentMorphology());
-    ecgStrip = new window.EcgStrip(new Simulation(settings, currentMorphology()));
-    stripImage = null;
-    stripAnimation = null;
+    ecgStrip = new EcgStrip(new Simulation(settings, currentMorphology()));
     anchorClock();
     updateScenario();
     draw(true);
@@ -229,22 +230,51 @@
     ctx.fillText("1 mV", 5, baseline - scale - 9);
   }
 
+  function removeEcgTile(index, { image, animation }) {
+    cancelAnimation(animation);
+    image.remove();
+    ecgTiles.delete(index);
+  }
+
+  function clearEcgTiles() {
+    for (const [index, tile] of ecgTiles) removeEcgTile(index, tile);
+  }
+
+  function syncEcgTiles(lookahead) {
+    const half = ecgStrip.halfWindowMs;
+    const first = Math.max(0, Math.floor((simulation.now - half) / TILE_MS));
+    const last = Math.floor((simulation.now + half + lookahead) / TILE_MS);
+    for (const [index, tile] of ecgTiles) {
+      if (index < first) removeEcgTile(index, tile);
+    }
+    for (let index = first; index <= last; index++) {
+      if (ecgTiles.has(index)) continue;
+      const image = ecgStrip.renderTile(index);
+      image.dataset.ecgTile = index;
+      image.style.width = `${ecgStrip.tileWidth}px`;
+      image.style.height = `${image.height / ecgStrip.geometry.ratio}px`;
+      trace.append(image);
+      // Each tile crosses the same clipped viewport on the common playback clock.
+      const animation = registerAnimation(image, [
+        { transform: `translate3d(${ecgViewport.right - ecgViewport.left}px, 0, 0)` },
+        { transform: `translate3d(${-ecgStrip.tileWidth}px, 0, 0)` }
+      ], { duration: TILE_MS + 2 * half, fill: "both" }, index * TILE_MS - half);
+      ecgTiles.set(index, { image, animation });
+    }
+  }
+
   function updateEcg(force) {
-    if (!force && stripImage && simulation.now < nextStripTime) return;
-    const ratio = ctx.getTransform().a;
-    const image = ecgStrip.prepare(simulation.now, ecgViewport, ratio);
-    nextStripTime = (ecgStrip.firstTile + 1.5) * window.EcgStrip.windowMs;
-    if (image === stripImage) return;
-    cancelAnimation(stripAnimation);
-    stripImage = image;
-    image.style.width = `${image.width / ratio}px`;
-    image.style.height = `${image.height / ratio}px`;
-    trace.replaceChildren(image);
-    const start = ecgStrip.firstTile * window.EcgStrip.windowMs;
-    const duration = 3 * window.EcgStrip.windowMs;
-    stripAnimation = registerAnimation(trace, [start, start + duration].map(time => ({
-      transform: `translate3d(${ecgStrip.positionAt(time) - ecgViewport.left}px, 0, 0)`
-    })), { duration, fill: "both" }, start);
+    if (force && ecgStrip.configure(ecgViewport, ctx.getTransform().a)) clearEcgTiles();
+    syncEcgTiles(0);
+    const next = Math.floor((simulation.now + ecgStrip.halfWindowMs + ECG_LOOKAHEAD_MS) / TILE_MS);
+    if (paused || suspended || prefetchPending || ecgTiles.has(next)) return;
+    prefetchPending = true;
+    const prefetch = () => {
+      prefetchPending = false;
+      if (!paused && !suspended) syncEcgTiles(ECG_LOOKAHEAD_MS);
+    };
+    if (window.requestIdleCallback) window.requestIdleCallback(prefetch);
+    else setTimeout(prefetch, 0);
   }
 
   function svgElement(tag, attributes = {}) {

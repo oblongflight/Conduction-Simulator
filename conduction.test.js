@@ -14,14 +14,15 @@
     catch (error) { results.push({ name, passed: false, error: error.message }); }
   }
 
-  function renderStrip(strip, context, time, viewport) {
+  function drawTile(strip, image, index, context, time, viewport) {
     const ratio = context.getTransform().a;
-    const image = strip.prepare(time, viewport, ratio);
+    const left = (viewport.left + viewport.right) / 2 +
+      (index - time / window.EcgStrip.tileMs) * strip.tileWidth;
     context.save();
     context.beginPath();
     context.rect(viewport.left, 0, viewport.right - viewport.left, viewport.height);
     context.clip();
-    context.drawImage(image, strip.positionAt(time), 0, image.width / ratio, image.height / ratio);
+    context.drawImage(image, left, 0, strip.tileWidth, image.height / ratio);
     context.restore();
   }
 
@@ -324,11 +325,12 @@
     Simulation.prototype.signalAt = time =>
       Math.max(...[8500, 9250, 10000, 10750, 11500].map(event => Math.max(0, 1 - Math.abs(time - event) / 30)));
     try {
-      renderStrip(strip, context, 10000, viewport);
+      strip.configure(viewport, 1);
+      for (const index of [1, 2]) drawTile(strip, strip.renderTile(index), index, context, 10000, viewport);
       for (const x of [44, 97, 150, 203, 255]) {
         const pixels = context.getImageData(x, 3, 1, 8).data;
         assert(pixels.some((value, index) => index % 4 === 3 && value > 0),
-          `An event was not drawn at its expected five-second-window position (${x})`);
+          `An event was not drawn at its expected three-second-window position (${x})`);
       }
       const gap = context.getImageData(123, 3, 1, 8).data;
       assert(!gap.some(value => value > 0), "Events are compressed into a longer time window");
@@ -349,15 +351,16 @@
     let samples = 0;
     Simulation.prototype.signalAt = function(time) { samples++; return original.call(this, time); };
     try {
-      renderStrip(strip, context, 2000, viewport);
-      const image = strip.image;
+      strip.configure(viewport, 2);
+      const image = strip.renderTile(0);
+      drawTile(strip, image, 0, context, 2000, viewport);
       const sampled = samples;
       assert(sampled > 0, "Offscreen strip was not generated");
       const before = context.getImageData(0, 0, canvas.width, canvas.height).data;
       context.clearRect(0, 0, 300, 140);
-      renderStrip(strip, context, 2000 + 3000 / 424, viewport);
+      drawTile(strip, image, 0, context, 2000 + 5000 / image.width, viewport);
       const after = context.getImageData(0, 0, canvas.width, canvas.height).data;
-      assert(samples === sampled && strip.image === image, "Scrolling regenerated waveform geometry");
+      assert(samples === sampled, "Scrolling regenerated waveform geometry");
       let visiblePixels = 0;
       for (let y = 0; y < canvas.height; y++) {
         for (let x = 92; x < 508; x++) {
@@ -372,52 +375,25 @@
         }
       }
       assert(visiblePixels > 100, "Pixel comparison did not include a visible waveform");
-      for (let t = 2100; t < 2400; t += 33) renderStrip(strip, context, t, viewport);
+      for (let t = 2100; t < 2400; t += 33) drawTile(strip, image, 0, context, t, viewport);
       assert(samples === sampled, "Ordinary animation frames sampled the signal");
     } finally {
       Simulation.prototype.signalAt = original;
     }
   });
 
-  test("Offscreen cache rollover preserves old pixels and only paints the new segment", () => {
-    const canvas = document.createElement("canvas");
-    canvas.width = 375;
-    canvas.height = 175;
-    const context = canvas.getContext("2d");
-    context.setTransform(1.25, 0, 0, 1.25, 0, 0);
-    const viewport = { left: 44, right: 256, baseline: 74, amplitude: 68, height: 140 };
-    const strip = new window.EcgStrip(new Simulation({ av: "third", bundle: "lbbb" }));
-    renderStrip(strip, context, 2490, viewport);
-    const tileWidth = strip.image.width / 3;
-    assert(tileWidth === Math.round(212 * 5 / 3 * 1.25), "The viewport is not zoomed to a three-second window");
-    const previous = strip.image.getContext("2d").getImageData(tileWidth, 0, 2 * tileWidth, 175).data;
-    const paint = strip.paintTile;
-    const painted = [];
-    strip.paintTile = function(ctx, tile, offset, geometry) {
-      painted.push(tile);
-      return paint.call(this, ctx, tile, offset, geometry);
-    };
-    renderStrip(strip, context, 2510, viewport);
-    assert(painted.length === 1 && painted[0] === 2, "Cache rollover repainted retained segments");
-    const retained = strip.image.getContext("2d").getImageData(0, 0, 2 * tileWidth, 175).data;
-    assert(previous.every((value, i) => value === retained[i]), "Retained pixels changed at a cache boundary");
-    assert(strip.image.width === 3 * tileWidth && strip.image.height === 175, "Cache grew beyond its fixed 15-second buffer");
-  });
-
   test("Resizing rebuilds the strip from complete history rather than a pruned preview", () => {
-    const canvas = document.createElement("canvas");
-    canvas.width = 400;
-    canvas.height = 140;
-    const context = canvas.getContext("2d");
     const viewport = { left: 44, right: 356, baseline: 74, amplitude: 68, height: 140 };
     const settings = { av: "mobitz2", bundle: "lbbb" };
     const strip = new window.EcgStrip(new Simulation(settings));
-    renderStrip(strip, context, 25000, { ...viewport, right: 256 });
-    renderStrip(strip, context, 25000, viewport);
+    strip.configure({ ...viewport, right: 256 }, 1);
+    strip.renderTile(7);
+    strip.configure(viewport, 1);
     const reference = new window.EcgStrip(new Simulation(settings));
-    renderStrip(reference, context, 25000, viewport);
-    const actual = strip.image.getContext("2d").getImageData(0, 0, strip.image.width, 140).data;
-    const expected = reference.image.getContext("2d").getImageData(0, 0, reference.image.width, 140).data;
+    reference.configure(viewport, 1);
+    const pixels = image => image.getContext("2d").getImageData(0, 0, image.width, image.height).data;
+    const actual = pixels(strip.renderTile(6));
+    const expected = pixels(reference.renderTile(6));
     assert(actual.some(value => value > 0), "Resized waveform is blank");
     assert(actual.every((value, i) => value === expected[i]), "Resize lost or changed historical beats");
   });
@@ -443,6 +419,8 @@
       if (!error.hidden || performance.now() > deadline) throw new Error(error.textContent || "Playback initialization timed out");
       await new Promise(resolve => setTimeout(resolve, 10));
     }
+    Object.defineProperty(doc, "hidden", { configurable: true, value: false });
+    doc.dispatchEvent(new win.Event("visibilitychange"));
     if (pause.textContent === "Pause") pause.click();
     doc.querySelector("#av-pattern").dispatchEvent(new win.Event("change", { bubbles: true }));
     test("Rhythm selector updates the rate control for the selected rhythm", () => {
@@ -462,16 +440,17 @@
       assert(!doc.querySelector('[data-path="His bundle"]'), "His bundle activation dots are still shown");
     });
     const trace = doc.querySelector("#ecg-trace");
-    const animation = trace.getAnimations()[0];
+    const initialTile = trace.querySelector("canvas");
+    const animation = initialTile.getAnimations()[0];
 
     test("Native ECG scrolling interpolates at subframe positions across the three-second window", () => {
       const originalTime = animation.currentTime;
       const width = doc.querySelector("#ecg-waveform").getBoundingClientRect().width;
       try {
         animation.currentTime = 5000;
-        const first = new win.DOMMatrix(win.getComputedStyle(trace).transform).m41;
+        const first = new win.DOMMatrix(win.getComputedStyle(initialTile).transform).m41;
         animation.currentTime = 5012.5;
-        const second = new win.DOMMatrix(win.getComputedStyle(trace).transform).m41;
+        const second = new win.DOMMatrix(win.getComputedStyle(initialTile).transform).m41;
         assert(Math.abs(second - first + width * 12.5 / 3000) < 0.002, "Native scroll does not track fractional simulation time");
       } finally {
         animation.currentTime = originalTime;
@@ -517,6 +496,40 @@
       assert(animation.playState === "paused" && animation.currentTime === before, "Changing speed moved a paused waveform");
       assert(animation.playbackRate === 0.5, "Native animation did not adopt the new playback speed");
       assert(requests === 0, "Paused playback still requests frames");
+    });
+
+    test("ECG handoff mounts the next tile early without replacing the visible animation", () => {
+      let frameCallback, idleCallback;
+      const start = doc.timeline.currentTime;
+      let now = start;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = callback => { frameCallback = callback; return 1; };
+      win.requestIdleCallback = callback => { idleCallback = callback; return 1; };
+      try {
+        speed.value = "1";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        pause.click();
+        const getTile = index => trace.querySelector(`[data-ecg-tile="${index}"]`);
+        const runFrame = elapsed => frameCallback(now = start + elapsed);
+        runFrame(1800);
+        assert(!getTile(1) && idleCallback, "An offscreen tile was not deferred to idle time");
+        idleCallback();
+        const nextTile = getTile(1);
+        assert(nextTile, "The next tile was not ready before entering the viewport");
+        const nextAnimation = nextTile.getAnimations()[0];
+        runFrame(5000);
+        assert(getTile(0) === initialTile && initialTile.getAnimations()[0] === animation,
+          "Adding a tile replaced or restarted the visible waveform");
+        assert(getTile(1) === nextTile && nextTile.getAnimations()[0] === nextAnimation,
+          "Entering the viewport replaced the prefetched tile");
+        close(nextAnimation.startTime - animation.startTime, 5000, "Tile animations are not on the same clock");
+        runFrame(8800); // Skip idle time at this handoff.
+        assert(!getTile(0) && getTile(1) === nextTile && getTile(2), "Tiles were not recycled safely when idle time was unavailable");
+        assert(trace.childElementCount === 2, "Retired ECG tiles remained mounted");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        delete doc.timeline.currentTime;
+      }
     });
   } catch (error) {
     test("Playback regression fixture initializes", () => { throw error; });

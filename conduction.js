@@ -54,6 +54,9 @@
   };
   const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
   const clone = value => JSON.parse(JSON.stringify(value));
+  const deltaWave = { amplitude: 0.18, duration: 40, orientation: 0.78, topRadius: 8 };
+  const fibrillationAmplitudes = [0.038, 0.027, 0.019, 0.013];
+  const fibrillationFrequencies = [7.1, 9.7, 12.4, 15.3];
 
   function validateMorphology(value) {
     if (!value || typeof value.name !== "string" || !value.name.trim() ||
@@ -116,6 +119,17 @@
     return 0.5 * (1 - smoothStep((elapsed - peak) / (end - peak)));
   }
 
+  function firstBeatInRange(beats, time, maxAge) {
+    let low = 0;
+    let high = beats.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (time - beats[mid].time > maxAge) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  }
+
   class Simulation {
     constructor(settings = {}, morphology) {
       this.settings = { ...defaults, ...settings };
@@ -140,6 +154,7 @@
       }
       this.morphology = clone(validateMorphology(morphology || templates[s.bundle]));
       this.timing = morphologyTiming(this.morphology);
+      this.ventricularWaves = this.morphology.waves.slice(1);
       this.now = 0;
       this.queue = [];
       this.events = [];
@@ -245,7 +260,7 @@
         this.schedule(t, "his", { origin: "escape" });
         this.schedule(t + 20, "ventricular", { origin: "escape" });
       } else if (event.type === "ventricular") {
-        const preexcitedOffset = event.preexcited ? 40 : 0;
+        const preexcitedOffset = event.preexcited ? deltaWave.duration : 0;
         const beat = {
           time: t, origin: event.origin, bundle: s.bundle, preexcited: !!event.preexcited,
           qrsMs: this.timing.qrsMs + preexcitedOffset,
@@ -268,9 +283,9 @@
       while (this.queue.length && this.queue[0].time <= time) this.process(this.queue.shift());
       this.now = time;
       const cutoff = time - 11000 - Math.max(this.timing.qtMs, this.morphology.waves[0].duration, 500);
-      this.events = this.events.filter(event => event.time >= cutoff);
-      this.atria = this.atria.filter(beat => beat.time >= cutoff);
-      this.ventricles = this.ventricles.filter(beat => beat.time >= cutoff);
+      if (this.events[0]?.time < cutoff) this.events = this.events.filter(event => event.time >= cutoff);
+      if (this.atria[0]?.time < cutoff) this.atria = this.atria.filter(beat => beat.time >= cutoff);
+      if (this.ventricles[0]?.time < cutoff) this.ventricles = this.ventricles.filter(beat => beat.time >= cutoff);
     }
 
     step() {
@@ -300,34 +315,39 @@
 
     signalAt(time) {
       let value = 0;
-      const waves = this.morphology.waves;
+      const { atria, ventricles, ventricularWaves } = this;
+      const segments = this.morphology.segments;
       if (this.settings.rhythm === "flutter") {
         const phase = ((time * this.settings.atrialRate / 60000) % 1 + 1) % 1;
         value += 0.08 * (1 - 2 * phase);
       } else if (this.settings.rhythm === "afib") {
-        value += [0.038, 0.027, 0.019, 0.013].reduce((sum, amplitude, index) =>
-          sum + amplitude * Math.sin(time / 1000 * [7.1, 9.7, 12.4, 15.3][index] + index * 1.7), 0);
-      }
-      for (const beat of this.atria) {
-        if (beat.pWave) value += sampleWave(time - beat.time, beat.pWave);
-        if (beat.conducted && beat.pWave) {
-          value += segmentOffset(time - beat.time, beat.pWave.duration, beat.pr,
-            this.morphology.segments?.pr);
+        const seconds = time / 1000;
+        for (let i = 0; i < fibrillationAmplitudes.length; i++) {
+          value += fibrillationAmplitudes[i] * Math.sin(seconds * fibrillationFrequencies[i] + i * 1.7);
         }
       }
-      for (const beat of this.ventricles) {
-        if (beat.preexcited) {
-          value += sampleWave(time - beat.time, {
-            amplitude: 0.18, duration: 40, orientation: 0.78, topRadius: 8
-          });
-        }
-        let cursor = beat.time + (beat.preexcited ? 40 : 0);
-        for (const item of waves.slice(1)) {
+      // Include the longest legal P/PR interval and the 12 ms segment taper.
+      for (let i = firstBeatInRange(atria, time, 400 + 12); i < atria.length; i++) {
+        const beat = atria[i];
+        const elapsed = time - beat.time;
+        if (elapsed < 0) break;
+        if (!beat.pWave) continue;
+        value += sampleWave(elapsed, beat.pWave);
+        if (beat.conducted) value += segmentOffset(elapsed, beat.pWave.duration, beat.pr, segments?.pr);
+      }
+      const maxVentricularAge = this.timing.qtMs + deltaWave.duration + 12;
+      for (let i = firstBeatInRange(ventricles, time, maxVentricularAge); i < ventricles.length; i++) {
+        const beat = ventricles[i];
+        const elapsed = time - beat.time;
+        if (elapsed < 0) break;
+        if (elapsed > beat.qtMs + 12) continue;
+        if (beat.preexcited) value += sampleWave(elapsed, deltaWave);
+        let cursor = beat.time + (beat.preexcited ? deltaWave.duration : 0);
+        for (const item of ventricularWaves) {
           value += sampleWave(time - cursor, item);
           cursor += item.duration + item.gap;
         }
-        value += segmentOffset(time - beat.time, beat.qrsMs, beat.tStart,
-          this.morphology.segments?.st);
+        value += segmentOffset(elapsed, beat.qrsMs, beat.tStart, segments?.st);
       }
       return value;
     }

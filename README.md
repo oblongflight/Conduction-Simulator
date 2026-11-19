@@ -32,12 +32,14 @@ because the anatomy geometry is loaded from `sketch-data.json`.
   to the taller canvas. On smaller screens the panels stack. The yellow center
   playhead is the current instant on the anatomy. A separate deterministic
   instance of the same event model previews the waveform without advancing the
-  anatomy clock. `ecg-strip.js` renders a static, 15-second offscreen strip at
-  fixed sample positions. A native browser transform animation scrolls that image
-  on its own compositing layer; JavaScript does not repaint it each frame.
+  anatomy clock. `ecg-strip.js` renders static five-second tiles at fixed sample
+  positions. Native browser transforms scroll those tiles on the same playback
+  clock; JavaScript does not repaint them each frame.
   The grid, calibration, playhead, and time labels are separate static layers.
-  As playback advances, cached pixels
-  are retained exactly and only the newly exposed five-second segment is generated.
+  Upcoming tiles are prepared beyond the visible edge during browser idle time.
+  A tile stays mounted with its original animation until it has scrolled out of
+  view. Each sample visits only beats close enough to contribute, including
+  overlapping waves and segment offsets.
   Resizing or editing a scenario/morphology rebuilds the cache.
   Playback speed changes neither physiological
   intervals nor the displayed rates. Scenario or morphology edits restart the
