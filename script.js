@@ -1,11 +1,27 @@
 "use strict";
 
 (() => {
-  const { Simulation, templates, rhythms, defaults, morphologyTiming, validateMorphology, clone } = window.Conduction;
+  const { Simulation, templates, rhythms, defaults, atrialFoci, atrialFocusPatterns, morphologyTiming, validateMorphology, clone } = window.Conduction;
   const { EcgStrip } = window;
   const TILE_MS = EcgStrip.tileMs;
   const ECG_LOOKAHEAD_MS = 2000;
+  const AV_BLOCK_MARKER_MS = 100;
   const KEY = "ecg-lecture-lab.waveforms.v1";
+  const REENTRY_CIRCUITS = [{
+    rhythm: "flutter",
+    label: "Atrial flutter reentry circuit",
+    path: "M 322.91 298.24 C 331.12 305.63 321.30 329.92 300.97 352.50 C 280.64 375.07 257.52 387.37 249.31 379.98 C 241.10 372.60 250.92 348.30 271.25 325.73 C 291.58 303.16 314.71 290.85 322.91 298.24 Z"
+  }, {
+    rhythm: "avnrt",
+    label: "AVNRT: schematic slow and fast AV nodal pathways",
+    dotLimit: 12,
+    path: "M 370 302 C 360 299 347 309 341 323 C 332 342 331 359 337 365 C 343 371 353 365 359 357 L 356 355 L 362 354 L 358 352 L 364 351 L 360 348 L 366 347 L 362 344 L 368 343 L 364 340 L 370 339 L 366 336 L 372 335 L 368 332 L 374 331 L 370 328 L 376 327 L 372 324 L 378 323 L 374 320 L 380 319 L 376 316 L 381 315 L 377 312 L 380 310 C 378 307 375 304 370 302 Z"
+  }, {
+    rhythm: "avrt",
+    label: "Orthodromic AVRT: schematic left-sided accessory pathway",
+    path: "M 372 302 C 388 307 397 322 400 339 C 404 366 425 393 448 411 C 480 435 510 460 531 458 C 549 457 548 436 540 410 C 531 377 516 343 505 312 C 499 292 495 276 484 251 C 475 247 453 238 431 240 C 400 240 374 253 368 271 C 363 286 367 297 372 302 Z",
+    accessoryPath: "M 505 312 C 499 292 495 276 484 251"
+  }];
   const $ = selector => document.querySelector(selector);
   const canvas = $("#ecg-canvas");
   const ctx = canvas.getContext("2d");
@@ -25,6 +41,7 @@
   let lastReadout = -Infinity;
   const animations = new Map();
   const impulses = [];
+  const reentryCircuits = [];
   const ecgTiles = new Map();
   let prefetchPending = false;
   let ecgViewport;
@@ -32,10 +49,13 @@
   let library = [];
   let anatomyItems = [];
   let blockMarkers = [];
+  let avDelayMarker;
   let crossPath;
   let sinusDots;
   let avDots;
   let escapeDots;
+  const focusMarkers = new Map();
+  const focusRoutes = new Map();
   let canvasWidth = 0;
   let canvasHeight = 0;
 
@@ -71,6 +91,11 @@
     return activeId === "automatic" ? templates[settings.bundle] : library.find(item => item.id === activeId);
   }
 
+  function scenarioSettings(overrides = {}) {
+    const scenario = { ...settings, ...overrides };
+    return rhythms[scenario.rhythm]?.avReentry ? { ...scenario, av: "normal" } : scenario;
+  }
+
   function saveLibrary(message) {
     try {
       localStorage.setItem(KEY, JSON.stringify(library));
@@ -91,16 +116,21 @@
 
   function updateScenario() {
     const rhythm = rhythms[settings.rhythm];
+    const av = simulation.settings.av;
     $("#rhythm-pattern").value = settings.rhythm;
     $("#rate-label").textContent = rhythm.rateLabel;
     $("#heart-rate").min = rhythm.minRate;
     $("#heart-rate").max = rhythm.maxRate;
     $("#heart-rate").value = settings.atrialRate;
-    $("#pr-field").hidden = settings.av !== "first";
-    $("#wenckebach-field").hidden = settings.av !== "mobitz1";
-    $("#pr-step-field").hidden = settings.av !== "mobitz1";
-    $("#ratio-field").hidden = !["mobitz1", "mobitz2"].includes(settings.av);
-    $("#escape-field").hidden = settings.av !== "third";
+    $("#av-pattern").value = av;
+    $("#av-pattern").disabled = !!rhythm.avReentry;
+    $("#av-reentry-note").hidden = !rhythm.avReentry;
+    $("#junctional-av-note").hidden = !rhythm.junctional || av === "normal";
+    $("#pr-field").hidden = av !== "first";
+    $("#wenckebach-field").hidden = av !== "mobitz1";
+    $("#pr-step-field").hidden = av !== "mobitz1";
+    $("#ratio-field").hidden = !["mobitz1", "mobitz2"].includes(av);
+    $("#escape-field").hidden = av !== "third";
     $("#custom-warning").hidden = activeId === "automatic";
     blockMarkers.forEach(marker => {
       marker.node.style.display = marker.bundle === settings.bundle ? "" : "none";
@@ -156,10 +186,11 @@
     for (const animation of animations.keys()) animation.cancel();
     animations.clear();
     for (const impulse of impulses) { impulse.key = null; impulse.animations = []; }
-    simulation = new Simulation(settings, currentMorphology());
-    ecgStrip = new EcgStrip(new Simulation(settings, currentMorphology()));
+    simulation = new Simulation(scenarioSettings(), currentMorphology());
+    ecgStrip = new EcgStrip(new Simulation(scenarioSettings(), currentMorphology()));
     anchorClock();
     updateScenario();
+    startReentryCircuits();
     draw(true);
     scheduleFrame();
   }
@@ -307,10 +338,10 @@
     return dot;
   }
 
-  function addImpulse(parent, path, label) {
+  function addImpulse(parent, path, label, dotLimit = 24) {
     const length = path.getTotalLength();
     const group = svgElement("g", { class: "impulse-dots", "data-path": label });
-    const dots = Array.from({ length: Math.min(24, Math.ceil(length / 4)) }, (_, index) => {
+    const dots = Array.from({ length: Math.min(dotLimit, Math.ceil(length / 4)) }, (_, index) => {
       const dot = addDot(group, { r: index === 0 ? 4.5 : 3 });
       dot.style.opacity = "0";
       dot.style.offsetPath = `path("${path.getAttribute("d")}")`;
@@ -321,6 +352,47 @@
     const impulse = { path, length, group, dots, key: null, animations: [] };
     impulses.push(impulse);
     return impulse;
+  }
+
+  function addReentryCircuit(parent, definition) {
+    const group = svgElement("g", { "data-reentry-circuit": definition.rhythm });
+    const path = svgElement("path", {
+      d: definition.path, fill: "none", stroke: "#a18a20", "stroke-width": 2, "stroke-opacity": 0.8
+    });
+    const title = svgElement("title");
+    title.textContent = definition.label;
+    path.append(title);
+    group.append(path);
+    if (definition.accessoryPath) {
+      const accessory = svgElement("path", {
+        d: definition.accessoryPath, fill: "none", stroke: "#007b56", "stroke-width": 3,
+        "stroke-dasharray": "4 3", "data-accessory-path": definition.rhythm
+      });
+      const accessoryTitle = svgElement("title");
+      accessoryTitle.textContent = "Retrograde left-sided accessory pathway";
+      accessory.append(accessoryTitle);
+      group.append(accessory);
+    }
+    parent.append(group);
+    reentryCircuits.push({ ...definition, group, impulse: addImpulse(group, path, definition.label, definition.dotLimit) });
+  }
+
+  function startReentryCircuits() {
+    for (const circuit of reentryCircuits) {
+      const active = circuit.rhythm === settings.rhythm;
+      circuit.group.style.display = active ? "" : "none";
+      if (!active) continue;
+      const duration = 60000 / settings.atrialRate;
+      circuit.impulse.dots.forEach((dot, index) => {
+        const trailing = index * 4 / circuit.impulse.length;
+        const opacity = 1 - index * 0.023;
+        const animation = registerAnimation(dot, [
+          { offsetDistance: "0%", opacity },
+          { offsetDistance: "100%", opacity }
+        ], { duration, delay: index ? -duration * (1 - trailing) : 0, iterations: Infinity }, 0);
+        circuit.impulse.animations.push(animation);
+      });
+    }
   }
 
   function addNodeDots(parent, x, y, label) {
@@ -337,10 +409,79 @@
     return group;
   }
 
-  function addBlock(parent, x, y, label) {
-    const group = svgElement("g", { transform: `translate(${x} ${y})` });
+  function addFocusMarker(parent, id, focus) {
+    const group = svgElement("g", {
+      "data-atrial-focus": id, transform: `translate(${focus.x * 822} ${focus.y * 566})`
+    });
+    const title = svgElement("title");
+    title.textContent = focus.label;
+    const ring = svgElement("circle", { fill: "none", stroke: "#e07000", "stroke-width": 3 });
+    const circle = svgElement("circle", { r: 6, stroke: "#8b5900", "stroke-width": 2 });
+    group.append(title, ring, circle);
+    parent.append(group);
+    focusMarkers.set(id, { group, circle, ring });
+  }
+
+  function closestPointOnPath(points, target) {
+    let closest = null;
+    for (let i = 0; i < points.length - 1; i++) {
+      const start = points[i];
+      const end = points[i + 1];
+      const dx = end.x - start.x;
+      const dy = end.y - start.y;
+      const lengthSquared = dx * dx + dy * dy;
+      const fraction = lengthSquared ?
+        Math.max(0, Math.min(1, ((target.x - start.x) * dx + (target.y - start.y) * dy) / lengthSquared)) : 0;
+      const point = { x: start.x + fraction * dx, y: start.y + fraction * dy };
+      const distance = Math.hypot(target.x - point.x, target.y - point.y);
+      if (!closest || distance < closest.distance) closest = { point, segment: i, distance };
+    }
+    return closest;
+  }
+
+  function pointsBetween(points, from, to) {
+    const vertices = from.segment <= to.segment ?
+      points.slice(from.segment + 1, to.segment + 1) :
+      points.slice(to.segment + 1, from.segment + 1).reverse();
+    return [from.point, ...vertices, to.point];
+  }
+
+  function addFocusRoute(parent, id, focus, atrialPaths) {
+    const origin = { x: focus.x * 822, y: focus.y * 566 };
+    const candidates = atrialPaths.map(item => ({ item, nearest: closestPointOnPath(item.points, origin) }));
+    const { item, nearest } = candidates.reduce((best, candidate) =>
+      candidate.nearest.distance < best.nearest.distance ? candidate : best);
+    const avNode = { x: 0.451 * 822, y: 0.53 * 566 };
+    const branch = item.name === "Atria3" ? atrialPaths.find(path => path.name === "Atria4") : null;
+    const endpoint = branch ? closestPointOnPath(item.points, branch.points[0]) : {
+      point: item.points.at(-1), segment: item.points.length - 2
+    };
+    const points = [origin, ...pointsBetween(item.points, nearest, endpoint),
+      ...(branch ? branch.points : []), avNode];
+    const group = svgElement("g", { "data-atrial-focus-route": id, "data-via-path": item.name });
+    const path = svgElement("path", {
+      d: points.map((point, index) => `${index ? "L" : "M"} ${point.x} ${point.y}`).join(" "),
+      fill: "none", stroke: "#c27b00", "stroke-width": 2.5, "stroke-linejoin": "round"
+    });
+    const title = svgElement("title");
+    title.textContent = `${focus.label} to AV node via ${item.name}`;
+    path.append(title);
+    group.append(path);
+    parent.append(group);
+    focusRoutes.set(id, { group, impulse: addImpulse(group, path, title.textContent) });
+  }
+
+  function addBlock(parent, x, y, label, delayed = false) {
+    const group = svgElement("g", {
+      transform: `translate(${x} ${y})`, "data-conduction-marker": delayed ? "delay" : "block"
+    });
     group.append(svgElement("circle", { r: 12, fill: "white", stroke: "#b42318", "stroke-width": 2 }));
-    group.append(svgElement("path", { d: "M -5 -5 L 5 5 M 5 -5 L -5 5", stroke: "#b42318", "stroke-width": 3, fill: "none" }));
+    group.append(svgElement("path", {
+      d: delayed ? "M -5 -7 H 5 V -5 L -5 5 V 7 H 5 V 5 L -5 -5 Z" :
+        "M -5 -5 L 5 5 M 5 -5 L -5 5",
+      stroke: "#b42318", "stroke-width": delayed ? 2 : 3, fill: "none",
+      "stroke-linejoin": "round"
+    }));
     const title = svgElement("title");
     title.textContent = label;
     group.append(title);
@@ -375,9 +516,12 @@
         path.setAttribute("fill-opacity", 0);
       }
       (isChamber ? chamberLayer : parent).append(path);
-      return { name: item.name, type: item.type, path, impulse: item.type === "path" ? addImpulse(parent, path, item.name) : null };
+      return { name: item.name, type: item.type, path,
+        points: item.points.map(point => ({ x: point.x * 822, y: point.y * 566 })),
+        impulse: item.type === "path" ? addImpulse(parent, path, item.name) : null };
     });
-    const required = ["SA Node", "AV Node", "Right Atrium", "Left Atrium", "Right Ventricle", "Left Ventricle", "Right Bundle", "Left Bundle"];
+    const required = ["SA Node", "AV Node", "Right Atrium", "Left Atrium", "Right Ventricle", "Left Ventricle",
+      "Right Bundle", "Left Bundle", "Atria1", "Atria2", "Atria3", "Atria4"];
     if (!required.every(name => anatomyItems.some(item => item.name === name))) {
       throw new Error("The saved anatomy is missing a required chamber or conduction structure.");
     }
@@ -387,9 +531,18 @@
     cross.append(crossTitle);
     parent.append(cross);
     crossPath = addImpulse(parent, cross, "Transseptal myocardium");
+    REENTRY_CIRCUITS.forEach(circuit => addReentryCircuit(parent, circuit));
+    const atrialPaths = anatomyItems.filter(item => /^Atria[1-4]$/.test(item.name) && item.type === "path");
+    if (!["Atria1", "Atria2", "Atria3", "Atria4"].every(name => atrialPaths.some(path => path.name === name))) {
+      throw new Error("The saved anatomy is missing an atrial conduction pathway.");
+    }
+    for (const [id, focus] of Object.entries(atrialFoci)) {
+      if (id !== "sinus") addFocusRoute(parent, id, focus, atrialPaths);
+    }
     sinusDots = addNodeDots(parent, 0.347, 0.414, "SA node firing");
     avDots = addNodeDots(parent, 0.451, 0.53, "AV nodal transit");
     escapeDots = addNodeDots(parent, 0.478, 0.577, "Independent junctional/His escape focus");
+    for (const [id, focus] of Object.entries(atrialFoci)) addFocusMarker(parent, id, focus);
     blockMarkers = ["rbbb", "lbbb"].map(bundle => {
       const item = anatomyItems.find(candidate => candidate.name === (bundle === "rbbb" ? "Right Bundle" : "Left Bundle"));
       const p = item.path.getPointAtLength(item.path.getTotalLength() * 0.14);
@@ -397,6 +550,7 @@
     });
     blockMarkers.push({ bundle: "av", node: addBlock(parent, 372, 305, "Atrial impulse fails to conduct") });
     blockMarkers.push({ bundle: "his", node: addBlock(parent, 398, 335, "His-Purkinje conduction fails") });
+    avDelayMarker = addBlock(parent, 372, 305, "Delayed AV nodal conduction", true);
   }
 
   function nodeOpacity(group, amount) {
@@ -417,29 +571,72 @@
     const ventricular = simulation.ventricles[simulation.ventricles.length - 1];
     const vTime = ventricular ? now - ventricular.time : Infinity;
     const latestBlock = simulation.events.findLast(event => event.type === "block");
+    const sinus = settings.rhythm === "flutter" ?
+      simulation.events.findLast(event => event.type === "sinus-firing") : atrial;
+    const sinusTime = sinus ? now - sinus.time : Infinity;
     for (const item of anatomyItems) {
       if (item.type === "path") {
         const bundle = item.name === "Right Bundle" ? "rbbb" : item.name === "Left Bundle" ? "lbbb" : null;
-        const elapsed = bundle ? vTime : aTime;
+        const beat = bundle ? ventricular : settings.rhythm === "flutter" ? sinus : atrial;
         const duration = bundle ? Math.min(90, simulation.timing.qrsMs) :
-          atrial?.pWave?.duration || simulation.morphology.waves[0].duration;
+          beat?.pWave?.duration || simulation.morphology.waves[0].duration;
         const blocked = bundle && settings.bundle === bundle;
-        const beat = bundle ? ventricular : atrial;
-        pulsePath(item.impulse, blocked || !Number.isFinite(elapsed) ? null : beat.time, duration, !!beat?.retrograde);
+        const ectopic = !bundle && beat?.focus && beat.focus !== "sinus";
+        pulsePath(item.impulse, blocked || !beat || ectopic ? null : beat.time, duration, !!beat?.retrograde);
       } else {
         const chamber = item.name.includes("Atrium") ? "atria" :
           item.name === "Right Ventricle" ? "rv" : item.name === "Left Ventricle" ? "lv" : null;
         if (chamber) setAttribute(item.path, "fill-opacity", simulation.chamberOpacity(now, chamber) * 2);
       }
     }
-    const sinusDriven = ["sinus", "wpw"].includes(settings.rhythm) ||
+    const sinusDriven = ["sinus", "wpw", "flutter"].includes(settings.rhythm) ||
       (settings.rhythm === "pac" && atrial?.origin !== "PAC");
-    nodeOpacity(sinusDots, sinusDriven && atrial && !atrial.retrograde && aTime < 55 ? 1 - aTime / 55 : 0);
-    const avEnd = atrial ? (atrial.pr === null ? 110 : atrial.pr - 35) : 0;
-    const retrogradeAtAv = atrial?.retrograde && aTime >= 0 && aTime <= 55;
-    nodeOpacity(avDots, retrogradeAtAv || (!atrial?.retrograde && aTime >= 80 && aTime <= avEnd) ? 1 : 0);
+    nodeOpacity(sinusDots, sinusDriven && sinus && !sinus.retrograde && sinusTime < 55 ? 1 - sinusTime / 55 : 0);
+    const focusPattern = atrialFocusPatterns[settings.rhythm];
+    for (const [id, route] of focusRoutes) {
+      const current = focusPattern && atrial?.focus === id;
+      route.group.style.display = current ? "" : "none";
+      pulsePath(route.impulse, current ? atrial.time : null, 80);
+    }
+    for (const [id, marker] of focusMarkers) {
+      const visible = focusPattern?.sequence.includes(id);
+      const current = visible && atrial?.focus === id;
+      const activating = current && aTime >= 0 && aTime < atrial.pWave.duration;
+      const progress = activating ? aTime / atrial.pWave.duration : 0;
+      marker.group.style.display = visible ? "" : "none";
+      setAttribute(marker.group, "opacity", current ? 1 : 0.6);
+      setAttribute(marker.group, "data-current", String(!!current));
+      setAttribute(marker.group, "data-activating", String(!!activating));
+      setAttribute(marker.circle, "r", activating ? 9 : 6);
+      setAttribute(marker.circle, "fill", activating ? "#ffea54" : current ? "#fff2bd" : "white");
+      setAttribute(marker.ring, "r", 11 + 16 * progress);
+      setAttribute(marker.ring, "opacity", activating ? 1 - progress : 0);
+    }
+    const focusReadout = $("#atrial-focus-readout");
+    focusReadout.hidden = !focusPattern || !atrial?.focus;
+    if (!focusReadout.hidden) {
+      const focus = atrialFoci[atrial.focus];
+      focusReadout.textContent = `Focus: ${focus.label}`;
+    }
+    const avAtrial = simulation.atria.findLast(beat => {
+      const age = now - beat.time;
+      const end = beat.pr === null ? 110 : beat.pr - 35;
+      return !beat.retrograde && !(settings.rhythm === "wpw" && simulation.settings.av === "third") &&
+        age >= 80 && age <= end &&
+        !simulation.events.some(event => event.type === "block" && event.site === "av" && event.beat === beat);
+    });
+    const tachy = rhythms[settings.rhythm].avReentry ?
+      simulation.events.findLast(event => event.type === "tachy") : null;
+    const reentryAtAv = tachy && now - tachy.time < 55;
+    const retrogradeAtAv = settings.rhythm !== "avrt" && atrial?.retrograde && aTime >= 0 && aTime <= 55;
+    const delayedAtAv = avAtrial?.conducted &&
+      (simulation.settings.av === "first" || (simulation.settings.av === "mobitz1" && avAtrial.pr > settings.wenckebachPr)) &&
+      settings.rhythm !== "wpw";
+    const delayDisplay = delayedAtAv ? "" : "none";
+    if (avDelayMarker.style.display !== delayDisplay) avDelayMarker.style.display = delayDisplay;
+    nodeOpacity(avDots, reentryAtAv || retrogradeAtAv || avAtrial ? 1 : 0);
     const escapeFocus = simulation.events.findLast(event => event.type === "escape" ||
-      (event.type === "tachy" && settings.rhythm === "junctional_tachy"));
+      (event.type === "tachy" && rhythms[settings.rhythm].junctional));
     const escapeAge = escapeFocus ? now - escapeFocus.time : Infinity;
     nodeOpacity(escapeDots, escapeAge < 80 ? 1 - escapeAge / 80 : 0);
     const crossVisible = settings.bundle !== "none" && vTime >= 35 && vTime <= 105;
@@ -447,8 +644,12 @@
     if (crossPath.path.style.display !== crossDisplay) crossPath.path.style.display = crossDisplay;
     pulsePath(crossPath, crossVisible ? ventricular.time + 35 : null, 70, settings.bundle === "lbbb");
     for (const marker of blockMarkers.filter(item => item.bundle === "av" || item.bundle === "his")) {
-      const visible = (settings.av === "third" && marker.bundle === "av") ||
-        (latestBlock && latestBlock.site === marker.bundle && now - latestBlock.time < 350);
+      const conductedDuringBlock = marker.bundle === "av" && latestBlock && simulation.atria.some(beat =>
+        (beat.conducted || beat.blockSite === "his") && !beat.retrograde && beat.time + 80 <= now &&
+        beat.time + beat.pr - 35 >= latestBlock.time);
+      const visible = (simulation.settings.av === "third" && marker.bundle === "av") ||
+        (latestBlock && latestBlock.site === marker.bundle && !conductedDuringBlock &&
+          now - latestBlock.time < (marker.bundle === "av" ? AV_BLOCK_MARKER_MS : 350));
       const display = visible ? "" : "none";
       if (marker.node.style.display !== display) marker.node.style.display = display;
     }
@@ -469,18 +670,18 @@
       const duration = recent.at(-1).time - recent[0].time;
       return duration > 0 ? 60000 * (recent.length - 1) / duration : fallback;
     }
-    const fallbackVRate = s.av === "third" && s.rhythm !== "junctional_tachy" ? s.escapeRate :
+    const fallbackVRate = s.av === "third" && !rhythms[s.rhythm].junctional ? s.escapeRate :
       s.rhythm === "flutter" ? s.atrialRate / 2 : s.atrialRate;
     const ventricularRate = measuredRate(simulation.ventricles, fallbackVRate);
     const atrialRate = s.rhythm === "afib" ? "Fib" :
-      ["psvt", "junctional_tachy"].includes(s.rhythm) ? "retrograde" :
+      (rhythms[s.rhythm].avReentry || rhythms[s.rhythm].junctional) ? "retrograde" :
       Math.round(measuredRate(simulation.atria.filter(beat => !beat.retrograde), s.atrialRate));
     const meanRate = ["mobitz1", "mobitz2"].includes(s.av) ||
-      ["wandering", "pac", "afib"].includes(s.rhythm);
+      ["wandering", "pac", "afib", "multifocal_atrial_tachy"].includes(s.rhythm);
     setReadout("readout", `A ${atrialRate} · V ${Math.round(ventricularRate)} bpm${meanRate ? " (mean)" : ""}`);
     const lastAtrial = simulation.atria[simulation.atria.length - 1];
     setReadout("pr-readout", s.rhythm === "afib" ? "No P waves" :
-      ["psvt", "junctional_tachy"].includes(s.rhythm) ? "Retrograde" :
+      (rhythms[s.rhythm].avReentry || rhythms[s.rhythm].junctional) ? "Retrograde" :
       s.av === "third" && s.rhythm !== "wpw" ? "Dissociated" :
       lastAtrial && !lastAtrial.conducted ? "Blocked" : `${lastAtrial.pr} ms`);
     const latestVentricular = simulation.ventricles.at(-1);
@@ -570,7 +771,7 @@
         const previous = settings[key];
         try {
           if (!input.checkValidity() || input.value === "") throw new Error(`Please enter a valid ${input.closest("label").firstChild.textContent.trim()}.`);
-          new Simulation({ ...settings, [key]: value }, activeId === "automatic" ? undefined : currentMorphology());
+          new Simulation(scenarioSettings({ [key]: value }), activeId === "automatic" ? undefined : currentMorphology());
           settings[key] = value;
           restart();
           if (activeId === "automatic") buildEditor();
@@ -588,10 +789,9 @@
       const atrialRate = rhythms[rhythm]?.defaultRate;
       try {
         if (!Number.isFinite(atrialRate)) throw new Error("Please choose a valid rhythm.");
-        new Simulation({ ...settings, rhythm, atrialRate }, activeId === "automatic" ? undefined : currentMorphology());
+        new Simulation(scenarioSettings({ rhythm, atrialRate }), activeId === "automatic" ? undefined : currentMorphology());
         settings.rhythm = rhythm;
         settings.atrialRate = atrialRate;
-        updateScenario();
         restart();
       } catch (error) {
         input.value = previousRhythm;

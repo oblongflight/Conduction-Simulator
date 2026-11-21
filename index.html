@@ -19,22 +19,27 @@
             <option value="sinus">Normal sinus rhythm</option>
             <option value="wandering">Wandering pacemaker</option>
             <option value="pac">Atrial premature beats (APB/PAC)</option>
-            <option value="psvt">Paroxysmal SVT (PSVT)</option>
+            <option value="avnrt">AV nodal reentrant tachycardia (AVNRT)</option>
+            <option value="avrt">AV reentrant tachycardia (AVRT)</option>
             <option value="wpw">Wolff-Parkinson-White (WPW)</option>
-            <option value="atrial_tachy">Atrial tachycardia</option>
+            <option value="atrial_tachy">Focal atrial tachycardia</option>
+            <option value="multifocal_atrial_tachy">Multifocal atrial tachycardia (MAT)</option>
             <option value="flutter">Atrial flutter</option>
             <option value="afib">Atrial fibrillation (A Fib)</option>
+            <option value="junctional">Junctional rhythm</option>
             <option value="junctional_tachy">Junctional tachycardia</option>
           </select>
         </label>
         <label class="field">AV conduction
-          <select id="av-pattern">
+          <select id="av-pattern" aria-describedby="av-reentry-note junctional-av-note">
             <option value="normal">Normal AV conduction</option>
             <option value="first">First-degree AV block</option>
             <option value="mobitz1">Second-degree: Mobitz I</option>
             <option value="mobitz2">Second-degree: Mobitz II</option>
             <option value="third">Third-degree AV block</option>
           </select>
+          <small id="av-reentry-note" hidden>AV block controls are unavailable for these schematic reentry rhythms.</small>
+          <small id="junctional-av-note" hidden>AV block settings do not change junctional or retrograde timing in this simplified model, even in complete block.</small>
         </label>
         <label class="field">Bundle conduction
           <select id="bundle-pattern">
@@ -60,10 +65,11 @@
         <div class="anatomy-panel">
           <div class="section-heading">
             <span class="eyebrow">CONDUCTION MAP</span>
+            <span id="atrial-focus-readout" class="small-note" hidden></span>
           </div>
           <svg id="anatomy" viewBox="0 0 822 566" role="img" aria-labelledby="anatomy-title anatomy-description">
             <title id="anatomy-title">Cardiac conduction system</title>
-            <desc id="anatomy-description">An impulse travels from the sinus node through the atria, AV node, His bundle and bundle branches. Blocked pathways are marked in red.</desc>
+            <desc id="anatomy-description">Electrical impulses travel through the heart's conduction pathways. Circles mark atrial pacemaker sites, with a pulse showing the firing site and dots traveling toward the AV node. Schematic loops show reentry during flutter, AVNRT, and AVRT. The AVRT accessory pathway is dashed green; blocked pathways are marked in red.</desc>
             <image href="CCS.png" width="822" height="566" />
             <g id="anatomy-overlays"></g>
           </svg>
@@ -88,7 +94,7 @@
       </section>
       <aside id="developer-panel" class="developer-panel" hidden aria-labelledby="authoring-title">
         <div class="panel-header"><div><p class="eyebrow">AUTHORING · SEPARATE FROM CONDUCTION RULES</p><h2 id="authoring-title">V1 waveform constructor</h2></div><button id="developer-close">Close authoring</button></div>
-        <p class="small-note">Automatic morphology follows the selected bundle pattern. Custom morphology overrides the drawing of the ECG, not the conduction mechanism. PR comes from the scenario; QT and component durations come from this editor. Editing restarts the recording.</p>
+        <p class="small-note">Automatic morphology follows the selected bundle pattern. Custom morphology changes the ECG, not the conduction mechanism; rhythm-specific P-wave shapes still apply. PR comes from the scenario; QT and ventricular component durations come from this editor. Editing restarts the recording.</p>
         <div class="constructor-summary">
           <label class="field">Morphology <select id="waveform-select"><option value="automatic">Automatic V1</option></select></label>
           <button id="duplicate-waveform">Duplicate to edit</button>

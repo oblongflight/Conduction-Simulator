@@ -18,10 +18,18 @@ because the anatomy geometry is loaded from `sketch-data.json`.
 ## Teaching controls
 
 - Choose normal sinus rhythm, wandering pacemaker, atrial premature beats
-  (APB/PAC), PSVT, WPW, atrial tachycardia, atrial flutter, atrial fibrillation,
+  (APB/PAC), AVNRT, AVRT, WPW, focal atrial tachycardia, multifocal atrial
+  tachycardia (MAT), atrial flutter, atrial fibrillation, junctional rhythm,
   or junctional tachycardia.
 - Independently choose normal AV conduction, first-degree block, Mobitz I,
   Mobitz II, or third-degree block, and normal bundles, RBBB, or LBBB.
+  AVNRT and AVRT temporarily use normal AV conduction and disable the AV-block
+  controls; the previous AV selection returns when another rhythm is selected.
+- A circled hourglass marks AV nodal transit during first-degree block and
+  progressively delayed conducted beats of Mobitz I. Circled X markers remain
+  reserved for failed conduction, including blocked bundle branches. An
+  intermittent AV-node X briefly marks the failed impulse and clears for
+  conducted AV transit; complete AV block retains a persistent X.
 - Scenario-specific controls set PR prolongation, Wenckebach progression,
   conducted beats before a dropped impulse, junctional escape rate, or the
   rhythm-specific rate. Selecting a rhythm sets its representative starting rate.
@@ -62,9 +70,39 @@ opacity that reaches 50%.
 There are no yellow chamber fills or nodal halos.
 
 The shared event model in `conduction.js` drives the anatomy and ECG.
-In AV-block rhythms, blocked atrial impulses generate P waves but no associated
-ventricular activation, QRS, or T wave. Third-degree block has independent
-atrial and junctional/His escape clocks. A blocked bundle does not conduct
+Wandering pacemaker alternates among the SA node and two atrial sites. Focal
+atrial tachycardia uses a left atrial focus; MAT alternates irregularly among
+three atrial foci. Circles identify the available sites, and an expanding pulse
+marks the focus during its P wave; the map readout names the current focus.
+For an ectopic beat, dots travel from the focus to its nearest saved atrial
+pathway and along it toward the AV node, arriving at the model's 80 ms AV-arrival
+time. The left atrial route follows the upper atrial pathway to its junction
+with the pathway descending to the AV node. These paths are schematic, not a
+model of conduction velocity. Sinus-origin pathway animations are not triggered
+by ectopic beats. Each focus has a consistent schematic V1 P-wave shape; these
+shapes illustrate differences between foci, but V1 alone cannot definitively
+localize an atrial focus.
+During atrial flutter, a schematic elliptical reentry circuit appears at the
+marked location on the anatomy. Its circulating dots complete one lap per
+atrial beat and share the playback clock. The circuit definitions in `script.js`
+can be extended for other rhythms; these loops illustrate rather than simulate
+reentrant tissue. An independent, schematic 60 bpm sinus clock activates the
+SA node and atrial pathway dots; flutter activations instead drive the atrial
+chamber overlay, ECG and AV response at the selected flutter rate. Sinus
+firings do not add separate atrial or ventricular beats to this simplified
+model. Typical atrial flutter is usually described as a right atrial
+circuit around the tricuspid valve, not the pulmonary valve.
+AVNRT shows a small loop below the AV node with a zigzag nodal limb.
+AVRT shows an orthodromic loop through the AV node, left ventricle and a
+schematic left-sided accessory pathway, highlighted with a dashed green line.
+Both rotate once per tachycardia cycle and use simplified tachycardia timing
+with retrograde atrial activation; the
+diagrams do not model conduction velocity or refractory behavior along each
+limb. AVRT is distinct from the separate WPW pre-excitation scenario.
+In rhythms driven by an antegrade atrial clock, blocked atrial impulses generate
+P waves but no associated ventricular activation, QRS, or T wave. Third-degree
+block has independent atrial and junctional/His escape clocks, except for the
+WPW and junctional rhythm simplifications described below. A blocked bundle does not conduct
 antegradely: the affected ventricle activates later through schematic
 transseptal myocardium.
 
@@ -78,8 +116,10 @@ not change conduction timing.
 
 Automatic morphology follows the selected bundle block. A custom morphology
 replaces the component waveform but not rhythm-level signatures such as WPW
-pre-excitation or the flutter/fibrillation baseline, and it does not change
-conduction rules; a warning identifies this teaching limitation.
+pre-excitation, focus-specific P-wave shapes, or the flutter/fibrillation
+baseline, and it does not change conduction rules. Focus-specific P waves use
+the magnitude of the custom P amplitude; setting it to zero hides them. A
+warning identifies the limitations of custom morphology.
 
 **Save waveform** saves the custom library in this browser under the existing
 `ecg-lecture-lab.waveforms.v1` key. Existing five-component Lecture Lab libraries
@@ -103,11 +143,14 @@ illustrative, and complete-block location and escape focus are simplified.
 Wenckebach uses a configurable initial PR increment, halving subsequent increments
 to illustrate shortening conducted R-R intervals, and a repeating drop pattern;
 Mobitz II uses a fixed conducted PR and a repeating drop pattern. Rate ranges
-are bounded for each rhythm. Wandering pacemaker and PAC timing repeat
+are bounded for each rhythm. Wandering pacemaker, MAT, and PAC timing repeat
 deterministic teaching patterns; flutter uses 2:1 conduction; atrial fibrillation
 uses a fibrillatory baseline and deterministic irregular ventricular response.
-PSVT and junctional tachycardia use regular simplified circuits with retrograde
-P waves. WPW pre-excitation bypasses the selected AV block and uses a short PR
+AVNRT, AVRT, junctional rhythm, and junctional tachycardia use simplified timing
+with retrograde P waves. As in the original junctional tachycardia model, selected
+AV-block settings do not alter junctional or retrograde timing; even complete
+block is not modeled as independent atrial activity for junctional rhythms.
+WPW pre-excitation bypasses the selected AV block and uses a short PR
 and widened, slurred QRS; the accessory pathway itself is not drawn on the anatomy.
 A 2:1 AV pattern cannot be classified as Mobitz I or II from that pattern alone.
 

@@ -1,7 +1,7 @@
 "use strict";
 
 (async () => {
-  const { Simulation, templates, clone, validateMorphology } = window.Conduction;
+  const { Simulation, templates, atrialFoci, clone, validateMorphology } = window.Conduction;
   const results = [];
   function assert(condition, message) {
     if (!condition) throw new Error(message);
@@ -76,6 +76,41 @@
     assert(simulation.events.find(event => event.type === "block").site === "his", "Block site is not infranodal");
   });
 
+  test("Blocked impulses stop at their modeled AV or His-Purkinje site", () => {
+    for (const av of ["normal", "first", "mobitz1", "mobitz2"]) {
+      const simulation = new Simulation({ rhythm: "flutter", av });
+      simulation.advanceTo(600);
+      const beat = simulation.atria[1];
+      const events = simulation.events.filter(event => event.beat === beat);
+      assert(events.some(event => event.type === "block" && event.site === "av" && event.time === 280),
+        `${av}: flutter impulse did not block on arrival at the AV node`);
+      assert(!events.some(event => ["av-release", "his", "ventricular"].includes(event.type)),
+        `${av}: AV-blocked flutter impulse traveled beyond the node`);
+      assert(simulation.ventricles.some(ventricle => ventricle.time === simulation.atria[0].pr),
+        `${av}: a conducted flutter impulse was lost`);
+    }
+    for (const av of ["mobitz1", "mobitz2", "third"]) {
+      const simulation = new Simulation({ av, atrialRate: 60, conductedBeats: 2 });
+      simulation.advanceTo(2500);
+      const beat = simulation.atria[av === "third" ? 0 : 2];
+      const events = simulation.events.filter(event => event.beat === beat);
+      const block = events.find(event => event.type === "block");
+      assert(block?.site === (av === "mobitz2" ? "his" : "av"), `${av}: wrong block site`);
+      assert(events.some(event => event.type === "av-arrival"), `${av}: AV arrival is missing`);
+      const release = events.find(event => event.type === "av-release");
+      const his = events.find(event => event.type === "his");
+      assert(av === "mobitz2" ? release && his && his.time < block.time : !release && !his,
+        `${av}: blocked impulse crossed the wrong structure`);
+      assert(!events.some(event => event.type === "ventricular"), `${av}: blocked impulse produced a QRS`);
+    }
+    const mixed = new Simulation({ rhythm: "flutter", av: "mobitz2", conductedBeats: 2 });
+    mixed.advanceTo(600);
+    const flutterBlock = mixed.events.find(event => event.type === "block" && event.beat === mixed.atria[1]);
+    const hisBlock = mixed.events.find(event => event.type === "block" && event.beat === mixed.atria[2]);
+    assert(flutterBlock?.site === "av" && hisBlock?.site === "his",
+      "Flutter and Mobitz II drops were not attributed to their respective sites");
+  });
+
   test("Complete block escape clock is independent of atrial rate", () => {
     const a = new Simulation({ av: "third", atrialRate: 60, escapeRate: 40 });
     const b = new Simulation({ av: "third", atrialRate: 95, escapeRate: 40 });
@@ -119,11 +154,6 @@
   });
 
   test("Tachycardia, pre-excitation, flutter, and fibrillation have distinct timing", () => {
-    const psvt = new Simulation({ rhythm: "psvt" });
-    psvt.advanceTo(1100);
-    close(psvt.ventricles[1].time - psvt.ventricles[0].time, 60000 / 180, "PSVT interval");
-    assert(psvt.atria[0].retrograde, "PSVT did not produce a retrograde P wave");
-
     const wpw = new Simulation({ rhythm: "wpw" });
     wpw.advanceTo(500);
     close(wpw.ventricles[0].time - wpw.atria[0].time, 100, "WPW PR interval");
@@ -163,11 +193,102 @@
     assert(peakOpacity > 0.49 && peakOpacity <= 0.5, "A Fib atrial opacity did not reach 50%");
   });
 
-  test("Junctional tachycardia has regular QRS complexes and retrograde atrial activation", () => {
-    const simulation = new Simulation({ rhythm: "junctional_tachy" });
-    simulation.advanceTo(1200);
-    close(simulation.ventricles[1].time - simulation.ventricles[0].time, 60000 / 130, "Junctional interval");
-    assert(simulation.atria[0].retrograde, "Junctional tachycardia lacks retrograde atrial activation");
+  test("Atrial foci consistently determine the sampled P wave across rhythms", () => {
+    const morphology = clone(templates.none);
+    morphology.waves[0].amplitude = 0.2;
+    morphology.waves.slice(1).forEach(item => { item.amplitude = 0; });
+    const shapes = new Map();
+    for (const rhythm of ["wandering", "atrial_tachy", "multifocal_atrial_tachy"]) {
+      const actual = new Simulation({ rhythm }, morphology);
+      const preview = new Simulation({ rhythm }, morphology);
+      preview.advanceTo(5000);
+      actual.advanceTo(3000);
+      for (const beat of actual.atria) {
+        const focus = atrialFoci[beat.focus];
+        assert(focus, `${rhythm} beat has no mapped focus`);
+        const shape = JSON.stringify(beat.pWave);
+        if (shapes.has(beat.focus)) assert(shapes.get(beat.focus) === shape, "A focus changed its P-wave shape");
+        shapes.set(beat.focus, shape);
+        const peak = beat.time + beat.pWave.duration * beat.pWave.orientation;
+        close(actual.signalAt(peak), 0.2 * focus.amplitude, "P-wave peak does not match the firing focus");
+        close(preview.signalAt(peak), actual.signalAt(peak), "ECG preview differs from live focus activation");
+      }
+      if (rhythm === "atrial_tachy") {
+        assert(actual.atria.every(beat => beat.focus === "left" && beat.pWave.amplitude < 0),
+          "Focal atrial tachycardia is not consistently left atrial with an ectopic P wave");
+      } else {
+        assert(new Set(actual.atria.map(beat => beat.focus)).size === 3, `${rhythm} did not use three sites`);
+        const intervals = actual.atria.slice(1).map((beat, i) => beat.time - actual.atria[i].time);
+        assert(new Set(intervals.map(interval => interval.toFixed(3))).size >= 3, `${rhythm} is not irregular`);
+      }
+    }
+    assert(new Set(["rightHigh", "rightLow", "left"].map(id => shapes.get(id))).size === 3,
+      "MAT foci do not have three distinct P-wave morphologies");
+  });
+
+  test("Focal atrial rhythms retain AV-block conduction rules", () => {
+    for (const rhythm of ["wandering", "atrial_tachy", "multifocal_atrial_tachy"]) {
+      for (const av of ["normal", "first", "mobitz1", "mobitz2", "third"]) {
+        const simulation = new Simulation({ rhythm, av, conductedBeats: 2 });
+        simulation.advanceTo(3500);
+        assert(simulation.atria.every(beat => beat.focus && beat.pWave), `${rhythm}/${av} lost atrial foci`);
+        for (const beat of simulation.atria) {
+          const events = simulation.events.filter(event => event.beat === beat);
+          if (beat.time + (beat.pr ?? 110) <= simulation.now) {
+            assert(events.some(event => event.type === "ventricular") === beat.conducted,
+              `${rhythm}/${av} conducted a blocked beat or lost a conducted beat`);
+          }
+        }
+        if (av === "mobitz2") {
+          assert(simulation.atria.every(beat => beat.pr === 160), `${rhythm} changed Mobitz II PR`);
+        }
+      }
+    }
+  });
+
+  test("Flutter maintains independent sinus and reentry clocks without extra beats", () => {
+    for (const atrialRate of [300, 320]) {
+      const simulation = new Simulation({ rhythm: "flutter", atrialRate });
+      simulation.advanceTo(2100);
+      const sinus = simulation.events.filter(event => event.type === "sinus-firing");
+      assert(sinus.map(event => event.time).join(",") === "0,1000,2000", "Sinus clock did not fire at 60 bpm");
+      simulation.atria.forEach((beat, index) => {
+        close(beat.time, index * 60000 / atrialRate, "Flutter activation time");
+        assert(beat.origin === "flutter", "Sinus firing added a separate atrial beat");
+      });
+      const expectedVentricles = simulation.atria.filter(beat => beat.conducted && beat.time + beat.pr <= 2100);
+      assert(simulation.ventricles.length === expectedVentricles.length, "Sinus firing added a ventricular beat");
+    }
+    const sinus = new Simulation({ rhythm: "sinus", atrialRate: 60 });
+    sinus.advanceTo(2100);
+    assert(!sinus.events.some(event => event.type === "sinus-firing"), "Flutter sinus clock leaked into another rhythm");
+  });
+
+  test("Junctional rhythms have rate-appropriate QRS complexes and retrograde atrial activation", () => {
+    for (const [rhythm, rate] of [["junctional", 50], ["junctional_tachy", 130]]) {
+      for (const av of ["normal", "first", "mobitz1", "mobitz2", "third"]) {
+        const simulation = new Simulation({ rhythm, av });
+        simulation.advanceTo(3000);
+        close(simulation.ventricles[1].time - simulation.ventricles[0].time, 60000 / rate, "Junctional interval");
+        assert(simulation.ventricles.every(beat => beat.origin === "junctional"), "Wrong junctional origin");
+        assert(simulation.atria.every(beat => beat.retrograde && beat.origin === "junctional"),
+          `${rhythm}/${av} lacks its modeled retrograde atrial activation`);
+        close(simulation.atria[0].time - simulation.ventricles[0].time, 30, "Retrograde timing");
+      }
+    }
+  });
+
+  test("AVNRT and AVRT use regular reentry timing without pre-excitation", () => {
+    for (const rhythm of ["avnrt", "avrt"]) {
+      const simulation = new Simulation({ rhythm });
+      simulation.advanceTo(1100);
+      close(simulation.ventricles[1].time - simulation.ventricles[0].time, 60000 / 180, `${rhythm} interval`);
+      assert(simulation.ventricles.every(beat => beat.origin === rhythm && !beat.preexcited),
+        `${rhythm} did not use an orthodromic ventricular response`);
+      assert(simulation.atria.every(beat => beat.retrograde && beat.origin === rhythm),
+        `${rhythm} did not produce retrograde atrial activations`);
+      close(simulation.atria[0].time - simulation.ventricles[0].time, 30, `${rhythm} retrograde timing`);
+    }
   });
 
   test("Every rhythm composes with each bundle morphology", () => {
@@ -232,7 +353,10 @@
       () => new Simulation({ atrialRate: NaN }),
       () => new Simulation({ bundle: "unknown" }),
       () => new Simulation({ rhythm: "unknown" }),
+      () => new Simulation({ rhythm: "psvt" }),
       () => new Simulation({ rhythm: "flutter", atrialRate: 70 }),
+      () => new Simulation({ rhythm: "avnrt", av: "third" }),
+      () => new Simulation({ rhythm: "avrt", av: "mobitz2" }),
       () => validateMorphology({ name: "bad", waves: [] }),
       () => validateMorphology({ ...clone(templates.none), waves: templates.none.waves.map(w => ({ ...w, duration: -1 })) })
     ];
@@ -433,6 +557,401 @@
       rhythm.value = "sinus";
       rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
     });
+    test("Atrial focus markers follow each beat and match the atrial anatomy", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const pathwayDot = doc.querySelector('[data-path="Atria1"] circle');
+      const markers = Object.fromEntries(Object.keys(atrialFoci).map(id =>
+        [id, doc.querySelector(`[data-atrial-focus="${id}"]`)]));
+      const routes = Object.fromEntries(["rightHigh", "rightLow", "left"].map(id =>
+        [id, doc.querySelector(`[data-atrial-focus-route="${id}"]`)]));
+      const chamber = name => [...doc.querySelectorAll("#anatomy-overlays path")]
+        .find(node => node.querySelector("title")?.textContent === name);
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const change = value => {
+        rhythm.value = value;
+        rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        for (const [id, chamberName] of [["rightHigh", "Right Atrium"], ["rightLow", "Right Atrium"], ["left", "Left Atrium"]]) {
+          const focus = atrialFoci[id];
+          assert(chamber(chamberName).isPointInFill(new win.DOMPoint(focus.x * 822, focus.y * 566)),
+            `${id} marker is outside its atrium`);
+          assert(!markers[id].querySelector("text"), `${id} focus is still numbered`);
+          const route = routes[id];
+          const path = route.querySelector("path");
+          const first = path.getPointAtLength(0);
+          const last = path.getPointAtLength(path.getTotalLength());
+          assert(Math.hypot(first.x - focus.x * 822, first.y - focus.y * 566) < 0.01,
+            `${id} route does not start at the focus`);
+          assert(Math.hypot(last.x - 0.451 * 822, last.y - 0.53 * 566) < 0.01,
+            `${id} route does not end at the AV node`);
+          const atrialPaths = [...doc.querySelectorAll('[data-conduction-path^="Atria"]')];
+          const distance = candidate => {
+            let nearest = Infinity;
+            const length = candidate.getTotalLength();
+            for (let i = 0; i <= Math.ceil(length); i++) {
+              const point = candidate.getPointAtLength(Math.min(i, length));
+              nearest = Math.min(nearest, Math.hypot(first.x - point.x, first.y - point.y));
+            }
+            return nearest;
+          };
+          const closest = atrialPaths.reduce((best, candidate) =>
+            distance(candidate) < distance(best) ? candidate : best);
+          assert(route.dataset.viaPath === closest.dataset.conductionPath, `${id} does not use its nearest atrial pathway`);
+          const entry = path.getPointAtLength(distance(closest));
+          assert(distanceToPath(entry, closest) < 1, `${id} route does not join that pathway`);
+        }
+        function distanceToPath(point, path) {
+          let nearest = Infinity;
+          const length = path.getTotalLength();
+          for (let i = 0; i <= Math.ceil(length); i++) {
+            const candidate = path.getPointAtLength(Math.min(i, length));
+            nearest = Math.min(nearest, Math.hypot(point.x - candidate.x, point.y - candidate.y));
+          }
+          return nearest;
+        }
+        for (const name of ["wandering", "atrial_tachy", "multifocal_atrial_tachy"]) {
+          change(name);
+          const start = now;
+          const expected = new win.Conduction.Simulation({ rhythm: name });
+          expected.advanceTo(2000);
+          const focusIds = new Set(win.Conduction.atrialFocusPatterns[name].sequence);
+          for (const [id, marker] of Object.entries(markers)) {
+            assert((marker.style.display !== "none") === focusIds.has(id), `${name} shows the wrong focus markers`);
+          }
+          for (const beat of expected.atria.slice(0, 3)) {
+            step(start + beat.time + 10);
+            assert(markers[beat.focus].getAttribute("data-current") === "true", `${name} did not highlight its firing focus`);
+            assert(markers[beat.focus].getAttribute("data-activating") === "true" &&
+              Number(markers[beat.focus].querySelector("circle").getAttribute("opacity")) > 0,
+            `${name} focus did not visibly pulse during depolarization`);
+            assert(doc.querySelector("#atrial-focus-readout").textContent.includes(atrialFoci[beat.focus].label),
+              `${name} focus readout disagrees with the beat`);
+            if (beat.focus !== "sinus") {
+              assert(pathwayDot.getAnimations().length === 0, `${name} ectopic beat activated a sinus pathway`);
+              const route = routes[beat.focus];
+              assert(route.style.display !== "none", `${name} did not show the firing focus route`);
+              const movement = route.querySelector("circle").getAnimations()[0];
+              assert(movement?.playState === "paused", `${name} route did not follow paused playback`);
+              close(movement.effect.getTiming().duration, 80, `${name} route does not reach the AV node at AV arrival`);
+              close(movement.currentTime, 10, `${name} route is not synchronized to the atrial beat`);
+              const originalTime = movement.currentTime;
+              movement.currentTime = 40;
+              const dot = route.querySelector("circle");
+              const path = route.querySelector("path");
+              const point = path.getPointAtLength(path.getTotalLength() / 2);
+              const actual = new win.DOMPoint(0, 0).matrixTransform(dot.getCTM());
+              const expected = new win.DOMPoint(point.x, point.y).matrixTransform(doc.querySelector("#anatomy").getCTM());
+              assert(Math.hypot(actual.x - expected.x, actual.y - expected.y) < 0.05, "Focus impulse left its route");
+              movement.currentTime = originalTime;
+            }
+            for (const [id, route] of Object.entries(routes)) {
+              assert((route.style.display !== "none") === (beat.focus === id), `${name} showed a route for the wrong focus`);
+            }
+            const ring = markers[beat.focus].querySelector("circle");
+            const initialRadius = Number(ring.getAttribute("r"));
+            step(start + beat.time + beat.pWave.duration / 2);
+            assert(Number(ring.getAttribute("r")) > initialRadius, "Focus pulse did not expand during depolarization");
+            step(start + beat.time + beat.pWave.duration + 1);
+            assert(markers[beat.focus].getAttribute("data-activating") === "false", "Focus pulse outlasted the P wave");
+          }
+        }
+        change("sinus");
+        assert(Object.values(markers).every(marker => marker.style.display === "none"), "Focus markers leaked into sinus rhythm");
+        assert(Object.values(routes).every(route => route.style.display === "none"), "Focus routes leaked into sinus rhythm");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        change("sinus");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
+    test("Junctional rhythm controls and focus match their selected rates", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const av = doc.querySelector("#av-pattern");
+      const junctionalFocus = doc.querySelector('[data-node="Independent junctional/His escape focus"]');
+      try {
+        assert(!rhythm.querySelector('option[value="psvt"]'), "Generic PSVT remains selectable");
+        for (const [name, rate] of [["junctional", "50"], ["junctional_tachy", "130"]]) {
+          rhythm.value = name;
+          rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+          assert(doc.querySelector("#heart-rate").value === rate, `${name} selected the wrong rate`);
+          assert(doc.querySelector("#rate-label").textContent === "Junctional rate", "Wrong junctional rate label");
+          assert(doc.querySelector("#pr-readout").textContent === "Retrograde", "Wrong junctional PR readout");
+          assert(junctionalFocus.style.display !== "none", "Junctional focus did not fire");
+          av.value = "third";
+          av.dispatchEvent(new win.Event("change", { bubbles: true }));
+          assert(!av.disabled && !doc.querySelector("#junctional-av-note").hidden,
+            "Junctional AV-block simplification was not disclosed");
+          av.value = "normal";
+          av.dispatchEvent(new win.Event("change", { bubbles: true }));
+        }
+      } finally {
+        av.value = "normal";
+        av.dispatchEvent(new win.Event("change", { bubbles: true }));
+        rhythm.value = "sinus";
+        rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+      }
+    });
+    test("AVNRT and AVRT show distinct synchronized circuits and preserve AV settings", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const av = doc.querySelector("#av-pattern");
+      const rate = doc.querySelector("#heart-rate");
+      const note = doc.querySelector("#av-reentry-note");
+      const circuits = Object.fromEntries(["flutter", "avnrt", "avrt"].map(name =>
+        [name, doc.querySelector(`[data-reentry-circuit="${name}"]`)]));
+      const avBlock = [...doc.querySelectorAll('[data-conduction-marker="block"]')]
+        .find(node => node.querySelector("title").textContent === "Atrial impulse fails to conduct");
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      try {
+        change(av, "third");
+        for (const name of ["avnrt", "avrt"]) {
+          change(rhythm, name);
+          assert(!note.hidden && av.disabled && av.value === "normal", `${name} did not disclose its AV restriction`);
+          assert(avBlock.style.display === "none", `${name} displayed a complete AV block`);
+          assert(rate.value === "180" && doc.querySelector("#pr-readout").textContent === "Retrograde",
+            `${name} did not select tachycardia timing`);
+          for (const [other, circuit] of Object.entries(circuits)) {
+            assert((circuit.style.display !== "none") === (other === name), `${name} showed the wrong circuit`);
+          }
+          const movement = circuits[name].querySelector("circle").getAnimations()[0];
+          close(movement.effect.getTiming().duration, 60000 / 180, `${name} circuit period`);
+          assert(movement.effect.getTiming().iterations === Infinity, `${name} circuit does not repeat`);
+          change(rate, "200");
+          close(circuits[name].querySelector("circle").getAnimations()[0].effect.getTiming().duration,
+            300, `${name} circuit did not follow the rate`);
+        }
+        assert(circuits.avrt.querySelector("path").getTotalLength() >
+          2 * circuits.avnrt.querySelector("path").getTotalLength(), "AVRT and AVNRT circuits are not anatomically distinct");
+        const nodalPath = circuits.avnrt.querySelector("path");
+        const nodalBounds = nodalPath.getBBox();
+        const nodalStart = nodalPath.getPointAtLength(0);
+        const nodalOutbound = nodalPath.getPointAtLength(nodalPath.getTotalLength() * 0.1);
+        assert(nodalStart.x > 365 && nodalStart.x < 380 && nodalBounds.y + nodalBounds.height > 355 &&
+          nodalOutbound.y > nodalStart.y && nodalOutbound.x < nodalStart.x,
+        "AVNRT loop does not descend below the AV node");
+        const avrtPath = circuits.avrt.querySelector("path");
+        const avrtStart = avrtPath.getPointAtLength(0);
+        assert(Math.hypot(avrtStart.x - 372, avrtStart.y - 302) < 3, "AVRT does not start at the AV node");
+        const chamber = name => [...doc.querySelectorAll("#anatomy-overlays path")]
+          .find(node => node.querySelector("title")?.textContent === name);
+        const leftVentricle = chamber("Left Ventricle");
+        const leftAtrium = chamber("Left Atrium");
+        const accessory = circuits.avrt.querySelector('[data-accessory-path="avrt"]');
+        const accessoryStart = accessory.getPointAtLength(0);
+        const accessoryEnd = accessory.getPointAtLength(accessory.getTotalLength());
+        assert(leftVentricle.isPointInFill(accessoryStart) && leftAtrium.isPointInFill(accessoryEnd),
+          "AVRT accessory pathway does not ascend from the left ventricle to the left atrium");
+        change(rhythm, "sinus");
+        assert(!av.disabled && av.value === "third" && note.hidden && avBlock.style.display !== "none",
+          "Previous AV block selection was not restored");
+      } finally {
+        change(rhythm, "sinus");
+        change(av, "normal");
+      }
+    });
+    test("Flutter reentry loops at the atrial rate and follows playback controls", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const rate = doc.querySelector("#heart-rate");
+      const speedControl = doc.querySelector("#speed");
+      const circuit = doc.querySelector('[data-reentry-circuit="flutter"]');
+      const selectRhythm = value => {
+        rhythm.value = value;
+        rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      try {
+        assert(circuit.style.display === "none", "Flutter circuit appears in sinus rhythm");
+        selectRhythm("flutter");
+        assert(circuit.style.display !== "none", "Flutter circuit is hidden");
+        const path = circuit.querySelector("path");
+        const length = path.getTotalLength();
+        const first = path.getPointAtLength(0);
+        const opposite = path.getPointAtLength(length / 2);
+        const angle = Math.atan2(first.y - opposite.y, first.x - opposite.x) * 180 / Math.PI;
+        assert(Math.abs(angle + 48) < 0.2, "Circuit was not rotated 10 degrees counterclockwise");
+        const atrium = [...doc.querySelectorAll("#anatomy-overlays path")]
+          .find(node => node.querySelector("title")?.textContent === "Right Atrium");
+        const boundary = [];
+        for (let i = 0; i <= 500; i++) {
+          const point = atrium.getPointAtLength(atrium.getTotalLength() * i / 500);
+          if (point.x > 285 && point.x < 305 && point.y > 345 && point.y < 370) boundary.push(point);
+        }
+        let nearest = Infinity;
+        let inside = 0;
+        for (let i = 0; i < 500; i++) {
+          const point = path.getPointAtLength(length * i / 500);
+          if (atrium.isPointInFill(point)) inside++;
+          for (const edge of boundary) nearest = Math.min(nearest, Math.hypot(point.x - edge.x, point.y - edge.y));
+        }
+        assert(nearest < 1 && inside >= 490, "Circuit's southeast edge is not aligned inside the right atrium");
+        const dots = circuit.querySelectorAll("circle");
+        assert(dots.length > 1, "Circuit has no circulating dot trail");
+        const movement = dots[0].getAnimations()[0];
+        const trailing = dots[1].getAnimations()[0];
+        close(movement.effect.getTiming().duration, 200, "Flutter lap duration");
+        assert(movement.effect.getTiming().iterations === Infinity, "Circuit does not repeat");
+        assert(trailing.effect.getTiming().delay < 0, "Trail does not wrap around the closed loop");
+        const position = time => {
+          movement.currentTime = time;
+          return new win.DOMPoint(0, 0).matrixTransform(dots[0].getCTM());
+        };
+        const start = position(0);
+        const quarter = position(50);
+        const lap = position(200);
+        assert(Math.hypot(start.x - quarter.x, start.y - quarter.y) > 5, "Circuit dot does not move");
+        const pathPoint = path.getPointAtLength(path.getTotalLength() / 4);
+        const expected = new win.DOMPoint(pathPoint.x, pathPoint.y).matrixTransform(path.getCTM());
+        assert(Math.hypot(quarter.x - expected.x, quarter.y - expected.y) < 0.05, "Circuit dot left the loop");
+        assert(Math.hypot(start.x - lap.x, start.y - lap.y) < 0.05, "Circuit does not close after one beat");
+        movement.currentTime = 0;
+        speedControl.value = "0.5";
+        speedControl.dispatchEvent(new win.Event("input", { bubbles: true }));
+        assert(movement.playState === "paused" && movement.currentTime === 0 && movement.playbackRate === 0.5,
+          "Paused circuit did not preserve its phase or playback speed");
+        rate.value = "360";
+        rate.dispatchEvent(new win.Event("change", { bubbles: true }));
+        close(dots[0].getAnimations()[0].effect.getTiming().duration, 60000 / 360, "Updated flutter lap duration");
+        selectRhythm("sinus");
+        assert(circuit.style.display === "none" && dots[0].getAnimations().length === 0,
+          "Circuit remains active after leaving flutter");
+      } finally {
+        speedControl.value = "1";
+        speedControl.dispatchEvent(new win.Event("input", { bubbles: true }));
+        selectRhythm("sinus");
+      }
+    });
+    test("Flutter pathway dots follow the independent sinus clock, not flutter beats", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const rate = doc.querySelector("#heart-rate");
+      const dot = doc.querySelector('[data-path="Atria1"] circle');
+      const sinusNode = doc.querySelector('[data-node="SA node firing"]');
+      const atrium = doc.querySelector('#anatomy-overlays path[fill="#ff0000"]');
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const select = value => {
+        rhythm.value = value;
+        rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        select("flutter");
+        const start = now;
+        assert(sinusNode.style.display !== "none", "Sinus node did not fire at startup");
+        step(start + 50);
+        assert(Number(win.getComputedStyle(dot).opacity) > 0, "Sinus firing did not activate atrial pathways");
+        const firstOpacity = Number(atrium.getAttribute("fill-opacity"));
+        step(start + 250);
+        assert(sinusNode.style.display === "none", "Flutter beat fired the sinus node");
+        assert(Number(win.getComputedStyle(dot).opacity) === 0, "Flutter beat activated atrial pathways");
+        close(Number(atrium.getAttribute("fill-opacity")), firstOpacity, "Atrial activation did not repeat with flutter");
+        step(start + 1001);
+        assert(sinusNode.style.display !== "none" && Number(win.getComputedStyle(dot).opacity) > 0,
+          "Sinus firing did not recur at 60 bpm");
+        rate.value = "320";
+        rate.dispatchEvent(new win.Event("change", { bubbles: true }));
+        const newStart = now;
+        step(newStart + 1001);
+        assert(sinusNode.style.display !== "none" && Number(win.getComputedStyle(dot).opacity) > 0,
+          "Changing the flutter rate changed the sinus clock");
+        step(newStart + 1125);
+        assert(sinusNode.style.display === "none" && Number(win.getComputedStyle(dot).opacity) === 0,
+          "A noncoincident flutter activation fired the sinus pathways");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        select("sinus");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
+    test("AV block marker follows failed impulses without covering conducted transit", () => {
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const av = doc.querySelector("#av-pattern");
+      const rate = doc.querySelector("#heart-rate");
+      const pr = doc.querySelector("#pr-interval");
+      const originalPr = pr.value;
+      const block = [...doc.querySelectorAll('[data-conduction-marker="block"]')]
+        .find(node => node.querySelector("title").textContent === "Atrial impulse fails to conduct");
+      const delay = doc.querySelector('[data-conduction-marker="delay"]');
+      const avNode = doc.querySelector('[data-node="AV nodal transit"]');
+      const visible = node => node.style.display !== "none";
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        change(rhythm, "flutter");
+        let start = now;
+        step(start + 279);
+        assert(!visible(block), "Block appeared before the flutter impulse reached the AV node");
+        step(start + 281);
+        assert(visible(block) && !visible(avNode), "Blocked flutter impulse did not stop at the AV node");
+        step(start + 350);
+        assert(visible(block), "Blocked impulse was not marked");
+        step(start + 381);
+        assert(!visible(block), "Intermittent block marker did not expire");
+        step(start + 481);
+        assert(!visible(block) && visible(avNode), "AV block marker covered the next conducted impulse");
+        step(start + 560);
+        assert(!visible(block), "Block marker remained during the conducted QRS");
+        step(start + 681);
+        assert(visible(block), "Next blocked flutter impulse was not marked");
+
+        change(av, "first");
+        change(pr, "380");
+        change(rate, "360");
+        start = now;
+        step(start + 250);
+        assert(!visible(block) && visible(avNode) && visible(delay),
+          "A blocked impulse obscured overlapping conducted AV transit");
+        step(start + 330);
+        assert(!visible(block) && visible(avNode), "AV block marker reappeared during conducted transit");
+
+        change(av, "third");
+        start = now;
+        step(start + 1600);
+        assert(visible(block), "Complete AV block did not retain its marker");
+        change(rhythm, "wpw");
+        start = now;
+        step(start + 90);
+        assert(visible(block) && !visible(avNode), "Pre-excitation appeared to cross the completely blocked AV node");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        change(av, "normal");
+        change(pr, originalPr);
+        change(rhythm, "sinus");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
     test("His bundle animation and pathway-highlighting control are omitted", () => {
       assert(!doc.querySelector("#highlight-pathways"), "Pathway-highlighting checkbox is still shown");
       assert(!doc.querySelector("#pathway-legend"), "Pathway color legend is still shown");
@@ -526,6 +1045,48 @@
         runFrame(8800); // Skip idle time at this handoff.
         assert(!getTile(0) && getTile(1) === nextTile && getTile(2), "Tiles were not recycled safely when idle time was unavailable");
         assert(trace.childElementCount === 2, "Retired ECG tiles remained mounted");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        delete doc.timeline.currentTime;
+      }
+    });
+    test("Hourglass distinguishes delayed AV transit from failed conduction", () => {
+      let callback;
+      let now = doc.timeline.currentTime;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const hourglass = doc.querySelector('[data-conduction-marker="delay"]');
+      const avBlock = [...doc.querySelectorAll('[data-conduction-marker="block"]')]
+        .find(node => node.querySelector("title").textContent === "Atrial impulse fails to conduct");
+      const visible = node => node.style.display !== "none";
+      const setScenario = av => {
+        if (pause.textContent === "Pause") pause.click();
+        const select = doc.querySelector("#av-pattern");
+        select.value = av;
+        select.dispatchEvent(new win.Event("change", { bubbles: true }));
+        pause.click();
+        return now;
+      };
+      const step = time => callback(now = time);
+      try {
+        let start = setScenario("normal");
+        step(start + 100);
+        assert(!visible(hourglass) && !visible(avBlock), "Normal AV transit shows a delay or block");
+        start = setScenario("first");
+        step(start + 100);
+        assert(visible(hourglass) && !visible(avBlock), "First-degree delay is not marked with an hourglass");
+        step(start + 300);
+        assert(!visible(hourglass), "Hourglass remains after the impulse leaves the AV node");
+        start = setScenario("mobitz1");
+        step(start + 100);
+        assert(!visible(hourglass), "Initial Wenckebach beat is marked as progressively delayed");
+        step(start + 60000 / Number(doc.querySelector("#heart-rate").value) + 100);
+        assert(visible(hourglass) && !visible(avBlock), "Progressive Wenckebach delay is not marked");
+        step(start + 3 * 60000 / Number(doc.querySelector("#heart-rate").value) + 250);
+        assert(!visible(hourglass) && visible(avBlock), "Dropped Wenckebach impulse is not marked with X");
+        start = setScenario("third");
+        step(start + 100);
+        assert(!visible(hourglass) && visible(avBlock), "Complete block shows an hourglass instead of X");
       } finally {
         if (pause.textContent === "Pause") pause.click();
         delete doc.timeline.currentTime;

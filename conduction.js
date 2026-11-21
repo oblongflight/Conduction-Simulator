@@ -41,12 +41,32 @@
     sinus: { rateLabel: "Atrial rate", defaultRate: 70, minRate: 40, maxRate: 120 },
     wandering: { rateLabel: "Atrial rate", defaultRate: 80, minRate: 40, maxRate: 90 },
     pac: { rateLabel: "Atrial rate", defaultRate: 70, minRate: 40, maxRate: 120 },
-    psvt: { rateLabel: "Tachycardia rate", defaultRate: 180, minRate: 140, maxRate: 250 },
+    avnrt: { rateLabel: "Tachycardia rate", defaultRate: 180, minRate: 140, maxRate: 250, avReentry: true },
+    avrt: { rateLabel: "Tachycardia rate", defaultRate: 180, minRate: 140, maxRate: 250, avReentry: true },
     wpw: { rateLabel: "Atrial rate", defaultRate: 70, minRate: 40, maxRate: 120 },
     atrial_tachy: { rateLabel: "Atrial rate", defaultRate: 150, minRate: 100, maxRate: 250 },
+    multifocal_atrial_tachy: { rateLabel: "Atrial rate", defaultRate: 120, minRate: 100, maxRate: 180 },
     flutter: { rateLabel: "Atrial rate", defaultRate: 300, minRate: 240, maxRate: 360 },
     afib: { rateLabel: "Ventricular response", defaultRate: 90, minRate: 50, maxRate: 200 },
-    junctional_tachy: { rateLabel: "Junctional rate", defaultRate: 130, minRate: 100, maxRate: 180 }
+    junctional: { rateLabel: "Junctional rate", defaultRate: 50, minRate: 40, maxRate: 60, junctional: true },
+    junctional_tachy: { rateLabel: "Junctional rate", defaultRate: 130, minRate: 100, maxRate: 180, junctional: true }
+  };
+  const atrialFoci = {
+    sinus: { label: "SA node", x: 0.347, y: 0.414, amplitude: 1, duration: 75, orientation: 0.5, pr: 130 },
+    rightHigh: { label: "High right atrium", x: 265 / 822, y: 286 / 566, amplitude: 0.8, duration: 75, orientation: 0.38, pr: 140 },
+    rightLow: { label: "Low right atrium", x: 276 / 822, y: 342 / 566, amplitude: 0.55, duration: 110, orientation: 0.68, pr: 180 },
+    left: { label: "Left atrium", x: 450 / 822, y: 245 / 566, amplitude: -0.65, duration: 95, orientation: 0.34, pr: 160 }
+  };
+  const atrialFocusPatterns = {
+    wandering: {
+      sequence: ["sinus", "rightHigh", "left", "rightHigh", "sinus", "left", "rightHigh", "left"],
+      intervals: [0.9, 1.08, 1.02]
+    },
+    atrial_tachy: { sequence: ["left"], intervals: [1] },
+    multifocal_atrial_tachy: {
+      sequence: ["rightHigh", "left", "rightLow", "left", "rightHigh", "rightLow", "rightHigh", "left"],
+      intervals: [0.86, 1.14, 0.96, 1.21, 0.78, 1.07, 0.91, 1.07]
+    }
   };
   const defaults = {
     rhythm: "sinus", av: "normal", bundle: "none", atrialRate: 70, escapeRate: 40,
@@ -57,6 +77,7 @@
   const deltaWave = { amplitude: 0.18, duration: 40, orientation: 0.78, topRadius: 8 };
   const fibrillationAmplitudes = [0.038, 0.027, 0.019, 0.013];
   const fibrillationFrequencies = [7.1, 9.7, 12.4, 15.3];
+  const flutterSinusInterval = 1000;
 
   function validateMorphology(value) {
     if (!value || typeof value.name !== "string" || !value.name.trim() ||
@@ -142,6 +163,9 @@
           !["none", "rbbb", "lbbb"].includes(s.bundle)) {
         throw new Error("Unknown rhythm, AV, or bundle conduction pattern.");
       }
+      if (rhythms[s.rhythm].avReentry && s.av !== "normal") {
+        throw new Error("AVNRT and AVRT require normal AV conduction in this simplified model.");
+      }
       for (const [key, min, max] of [
         ["atrialRate", rhythms[s.rhythm].minRate, rhythms[s.rhythm].maxRate],
         ["escapeRate", 20, 60], ["pr", 220, 380],
@@ -162,14 +186,15 @@
       this.ventricles = [];
       this.serial = 0;
       this.beatIndex = 0;
-      if (s.rhythm === "psvt" || s.rhythm === "junctional_tachy") {
+      if (rhythms[s.rhythm].junctional || rhythms[s.rhythm].avReentry) {
         this.schedule(0, "tachy");
       } else if (s.rhythm === "afib") {
         this.schedule(0, "afib");
       } else {
         this.schedule(0, "atrial");
       }
-      if (s.av === "third" && s.rhythm !== "junctional_tachy") this.schedule(350, "escape");
+      if (s.rhythm === "flutter") this.schedule(0, "sinus-firing");
+      if (s.av === "third" && !rhythms[s.rhythm].junctional) this.schedule(350, "escape");
       this.advanceTo(0);
     }
 
@@ -187,17 +212,18 @@
         const droppedByAv = (s.av === "mobitz1" || s.av === "mobitz2") && position === s.conductedBeats;
         const droppedByFlutter = s.rhythm === "flutter" && index % 2 === 1;
         const dropped = droppedByAv || droppedByFlutter;
-        const wanderingPr = [130, 180, 220][index % 3];
+        const focusPattern = atrialFocusPatterns[s.rhythm];
+        const focusId = focusPattern?.sequence[index % focusPattern.sequence.length];
+        const focus = focusId ? atrialFoci[focusId] : null;
         const basePr = s.rhythm === "wpw" ? 100 :
           s.av === "first" ? s.pr :
           s.av === "mobitz1" ? Math.round(s.wenckebachPr + 2 * s.prStep * (1 - 0.5 ** position)) :
-          s.rhythm === "wandering" ? wanderingPr :
-          s.rhythm === "atrial_tachy" ? 140 : 160;
+          s.av === "mobitz2" ? 160 : focus?.pr ?? 160;
         const pWave = { ...this.morphology.waves[0] };
-        if (s.rhythm === "wandering") {
-          pWave.amplitude *= [1, -0.65, 0.55][index % 3];
-          pWave.orientation = [0.5, 0.34, 0.68][index % 3];
-          pWave.duration = [75, 95, 110][index % 3];
+        if (focus) {
+          pWave.amplitude = Math.abs(pWave.amplitude) * focus.amplitude;
+          pWave.orientation = focus.orientation;
+          pWave.duration = focus.duration;
         } else if (event.type === "pac") {
           pWave.amplitude *= -1.35;
           pWave.orientation = 0.36;
@@ -207,15 +233,16 @@
           time: t, pr: s.av === "third" && s.rhythm !== "wpw" ? null : basePr,
           conducted: s.rhythm === "wpw" || (s.av !== "third" && !dropped),
           origin: event.type === "pac" ? "PAC" : s.rhythm,
+          ...(focusId ? { focus: focusId } : {}),
           pWave: s.rhythm === "flutter" ? null : pWave,
-          blockSite: s.av === "mobitz2" ? "his" : "av"
+          blockSite: !droppedByFlutter && s.av === "mobitz2" ? "his" : "av"
         };
         this.atria.push(beat);
         const period = 60000 / s.atrialRate;
         let nextInterval = period;
         let nextType = "atrial";
-        if (s.rhythm === "wandering") {
-          nextInterval *= [0.9, 1.08, 1.02][index % 3];
+        if (focusPattern) {
+          nextInterval *= focusPattern.intervals[index % focusPattern.intervals.length];
         } else if (s.rhythm === "pac") {
           if (event.type === "pac") nextInterval *= 1.2;
           else if ((index + 1) % 4 === 0) {
@@ -227,9 +254,12 @@
         if (s.rhythm === "wpw") {
           this.schedule(t + 100, "ventricular", { origin: "preexcited", preexcited: true, beat });
         } else if (s.av === "third") {
+          this.schedule(t + 80, "av-arrival", { beat });
           this.schedule(t + 110, "block", { beat, site: "av" });
-        } else if (dropped && s.av === "mobitz1") {
-          this.schedule(t + basePr - 35, "block", { beat, site: "av" });
+        } else if (dropped && beat.blockSite === "av") {
+          this.schedule(t + 80, "av-arrival", { beat });
+          const blockDelay = s.av === "mobitz1" && !droppedByFlutter ? basePr - 35 : 80;
+          this.schedule(t + blockDelay, "block", { beat, site: "av" });
         } else {
           this.schedule(t + 80, "av-arrival", { beat });
           this.schedule(t + basePr - 35, "av-release", { beat });
@@ -237,8 +267,10 @@
           if (dropped) this.schedule(t + basePr - 10, "block", { beat, site: beat.blockSite });
           else this.schedule(t + basePr, "ventricular", { origin: "conducted", beat });
         }
+      } else if (event.type === "sinus-firing") {
+        this.schedule(t + flutterSinusInterval, "sinus-firing");
       } else if (event.type === "tachy") {
-        const origin = s.rhythm === "psvt" ? "psvt" : "junctional";
+        const origin = rhythms[s.rhythm].junctional ? "junctional" : s.rhythm;
         const interval = 60000 / s.atrialRate;
         const beat = { time: t, origin, bundle: s.bundle };
         this.schedule(t + 20, "his", { origin });
@@ -353,5 +385,5 @@
     }
   }
 
-  window.Conduction = { Simulation, templates, rhythms, defaults, morphologyTiming, validateMorphology, clone };
+  window.Conduction = { Simulation, templates, rhythms, defaults, atrialFoci, atrialFocusPatterns, morphologyTiming, validateMorphology, clone };
 })();

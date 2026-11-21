@@ -28,6 +28,7 @@ h2 { font-size: 27px; }
 .field { display: grid; align-items: center; gap: 7px; color: var(--muted); font: 12px ui-monospace, monospace; }
 .field input, .field select { min-width: 0; max-width: 100%; min-height: 36px; border: 1px solid #b7c5bc; border-radius: 4px; background: white; color: var(--ink); padding: 5px 8px; }
 .field input[type=range] { padding: 0; accent-color: var(--green); }
+#av-reentry-note, #junctional-av-note { max-width: 230px; line-height: 1.35; }
 .number-field input { width: 76px; }
 .teaching-grid { display: grid; grid-template-columns: 1.03fr 1fr; gap: 22px; align-items: stretch; }
 .anatomy-panel { padding: 16px; background: white; border: 1px solid var(--line); border-radius: 7px; }
