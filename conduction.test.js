@@ -144,22 +144,120 @@
       "Wandering pacemaker P-wave morphologies did not vary");
 
     const pac = new Simulation({ rhythm: "pac", atrialRate: 60 });
-    pac.advanceTo(5000);
+    pac.advanceTo(8500);
     const ectopic = pac.atria.findIndex(beat => beat.origin === "PAC");
     assert(ectopic > 0, "No premature atrial beat was generated");
     const coupling = pac.atria[ectopic].time - pac.atria[ectopic - 1].time;
     const pause = pac.atria[ectopic + 1].time - pac.atria[ectopic].time;
     assert(coupling < 1000 && pause > 1000, "PAC coupling interval and pause were not premature");
     assert(pac.atria[ectopic].pWave.amplitude < 0, "PAC did not use an ectopic P-wave shape");
+    assert(pac.atria[ectopic].focus === "left" && pac.atria.filter(beat => beat.origin !== "PAC").every(beat => !beat.focus),
+      "PAC focus was not associated only with the premature beat");
+    close(pac.atria[ectopic].pr, 160, "PAC PR timing changed");
+  });
+
+  test("PAC and focal atrial tachycardia share their focus and P-wave morphology", () => {
+    for (const amplitude of [0.2, -0.15, 0]) {
+      const morphology = clone(templates.none);
+      morphology.waves[0].amplitude = amplitude;
+      morphology.waves[0].duration = 180;
+      morphology.waves.slice(1).forEach(item => { item.amplitude = 0; });
+      const pac = new Simulation({ rhythm: "pac", atrialRate: 60 }, morphology);
+      const tachy = new Simulation({ rhythm: "atrial_tachy" }, morphology);
+      pac.advanceTo(8500);
+      tachy.advanceTo(400);
+      const premature = pac.atria.find(beat => beat.origin === "PAC");
+      const focal = tachy.atria[0];
+      assert(premature.focus === focal.focus && JSON.stringify(premature.pWave) === JSON.stringify(focal.pWave),
+        "PAC and focal tachycardia do not share the same focus and P wave");
+      for (let elapsed = 0; elapsed <= focal.pWave.duration; elapsed += 5) {
+        close(pac.signalAt(premature.time + elapsed), tachy.signalAt(focal.time + elapsed),
+          "PAC and focal tachycardia ECG P-wave samples differ");
+      }
+    }
+  });
+
+  test("Seeded PACs vary their placement, coupling, and recovery while remaining premature", () => {
+    const signatures = new Set();
+    const couplings = new Set();
+    const recoveries = new Set();
+    for (const randomSeed of [1, 2, 3, 4]) {
+      const simulation = new Simulation({ rhythm: "pac", atrialRate: 60, randomSeed });
+      simulation.advanceTo(11000);
+      signatures.add(JSON.stringify(simulation.atria.map(beat => [beat.time, beat.origin])));
+      let sinusCount = 0;
+      for (let i = 0; i < simulation.atria.length - 1; i++) {
+        const beat = simulation.atria[i];
+        if (beat.origin !== "PAC") {
+          sinusCount++;
+          continue;
+        }
+        assert(sinusCount >= 2 && sinusCount <= 6, "Wrong number of sinus beats before PAC");
+        const coupling = beat.time - simulation.atria[i - 1].time;
+        const recovery = simulation.atria[i + 1].time - beat.time;
+        assert(coupling >= 500 && coupling < 750, "PAC coupling interval is not premature");
+        assert(recovery >= 1100 && recovery < 1400, "PAC recovery interval is outside its range");
+        couplings.add(coupling);
+        recoveries.add(recovery);
+        sinusCount = 0;
+      }
+    }
+    assert(signatures.size === 4, "Different seeds produced the same PAC sequence");
+    assert(couplings.size > 1 && recoveries.size > 1, "PAC coupling or recovery did not vary");
+  });
+
+  test("Wandering and MAT randomize intervals and focus order without adjacent repeats", () => {
+    for (const rhythm of ["wandering", "multifocal_atrial_tachy"]) {
+      const signatures = new Set();
+      const focusSequences = new Set();
+      for (const randomSeed of [1, 2, 3, 4]) {
+        const simulation = new Simulation({ rhythm, randomSeed });
+        simulation.advanceTo(11000);
+        const beats = simulation.atria;
+        signatures.add(JSON.stringify(beats.map(beat => [beat.time, beat.focus])));
+        focusSequences.add(beats.map(beat => beat.focus).join(","));
+        for (let i = 1; i < beats.length; i++) {
+          assert(beats[i].focus !== beats[i - 1].focus, `${rhythm} repeated an adjacent focus`);
+        }
+        for (let i = 0; i + 2 < beats.length; i += 3) {
+          assert(new Set(beats.slice(i, i + 3).map(beat => beat.focus)).size === 3,
+            `${rhythm} did not use each focus in a shuffle`);
+        }
+      }
+      assert(signatures.size === 4, `${rhythm} did not vary with the seed`);
+      assert(focusSequences.size > 1, `${rhythm} focus order did not vary with the seed`);
+    }
+  });
+
+  test("Randomized rhythms reproduce event and ECG history regardless of advance partition", () => {
+    for (const rhythm of ["pac", "wandering", "multifocal_atrial_tachy"]) {
+      const settings = { rhythm, randomSeed: 123456789, av: "mobitz2" };
+      const live = new Simulation(settings);
+      const preview = new Simulation(settings);
+      preview.advanceTo(10000);
+      for (let time = 25; time <= 9000; time += 25) live.advanceTo(time);
+      assert(JSON.stringify(live.atria) === JSON.stringify(preview.atria.filter(beat => beat.time <= 9000)),
+        `${rhythm} preview and live atrial beats differ`);
+      assert(JSON.stringify(live.events) === JSON.stringify(preview.events.filter(event => event.time <= 9000)),
+        `${rhythm} event timing depends on advance partition`);
+      for (let time = 0; time <= 9000; time += 37) {
+        close(live.signalAt(time), preview.signalAt(time), `${rhythm} preview ECG differs`);
+      }
+    }
+    for (const randomSeed of [-1, 1.5, 4294967296, NaN]) {
+      let threw = false;
+      try { new Simulation({ randomSeed }); } catch (error) { threw = /randomSeed/.test(error.message); }
+      assert(threw, `Invalid random seed ${randomSeed} was accepted`);
+    }
   });
 
   test("Tachycardia, pre-excitation, flutter, and fibrillation have distinct timing", () => {
-    const wpw = new Simulation({ rhythm: "wpw" });
+    const wpw = new Simulation({ rhythm: "sinus", wpw: true });
     wpw.advanceTo(500);
     close(wpw.ventricles[0].time - wpw.atria[0].time, 100, "WPW PR interval");
     assert(wpw.ventricles[0].preexcited && wpw.ventricles[0].qrsMs > wpw.timing.qrsMs,
       "WPW did not produce pre-excitation and a widened QRS");
-    const bypass = new Simulation({ rhythm: "wpw", av: "third" });
+    const bypass = new Simulation({ rhythm: "sinus", wpw: true, av: "third" });
     bypass.advanceTo(150);
     assert(bypass.ventricles.some(beat => beat.origin === "preexcited"),
       "WPW did not bypass complete AV block");
@@ -191,6 +289,321 @@
       peakOpacity = Math.max(peakOpacity, afib.chamberOpacity(time, "atria"));
     }
     assert(peakOpacity > 0.49 && peakOpacity <= 0.5, "A Fib atrial opacity did not reach 50%");
+  });
+
+  test("Ventricular tachycardia starts in the ventricles with a regular wide-complex rhythm", () => {
+    const simulation = new Simulation({ rhythm: "vt", atrialRate: 180, bundle: "rbbb" });
+    simulation.advanceTo(2000);
+    assert(simulation.atria.length === 0, "VT generated organized atrial activity");
+    assert(simulation.ventricles.length === 7 &&
+      simulation.ventricles.every(beat => beat.origin === "VT" && beat.qrsMs >= 160 && beat.bundle === "none"),
+    "VT did not produce regular, wide, direct ventricular activations");
+    simulation.ventricles.slice(1).forEach((beat, index) =>
+      close(beat.time - simulation.ventricles[index].time, 60000 / 180, "VT interval"));
+    assert(!simulation.events.some(event => ["av-arrival", "his", "block"].includes(event.type)),
+      "VT used the atrioventricular conduction system");
+    assert(Math.abs(simulation.signalAt(480)) > 0.01, "Wide VT waveform lost its extended repolarization");
+  });
+
+  test("PVCs interrupt but do not reset the sinus clock and have wide ventricular complexes", () => {
+    for (const [focus, expectedBundle, delayedSide, earlySide] of [
+      ["lv", "rbbb", "rv", "lv"], ["rv", "lbbb", "lv", "rv"]
+    ]) {
+      const simulation = new Simulation({ rhythm: "pvc", pvcFocus: focus, randomSeed: 123 });
+      simulation.advanceTo(12000);
+      const ectopic = simulation.ventricles.filter(beat => beat.origin === "PVC");
+      assert(ectopic.length > 0, `${focus}: no PVCs were generated`);
+      assert(simulation.atria.length > 1 && simulation.atria.every(beat => beat.origin === "pvc"),
+        `${focus}: PVCs changed or replaced the underlying sinus rhythm`);
+      assert(ectopic.every(beat => beat.qrsMs >= 160 && beat.bundle === expectedBundle),
+        `${focus}: PVC did not produce a wide complex with contralateral delay`);
+      const first = ectopic[0];
+      const precedingAtrial = simulation.atria.findLast(beat => beat.time < first.time);
+      const followingAtrial = simulation.atria.find(beat => beat.time > first.time);
+      const period = 60000 / simulation.settings.atrialRate;
+      close(first.time - precedingAtrial.time, period * 0.55, `${focus}: PVC coupling interval`);
+      close(followingAtrial.time - precedingAtrial.time, period, `${focus}: PVC sinus pause`);
+      assert(simulation.chamberOpacity(first.time + 94, earlySide) > 0 &&
+        simulation.chamberOpacity(first.time + 94, delayedSide) === 0,
+      `${focus}: focus-side depolarization did not precede the opposite ventricle`);
+      assert(simulation.chamberOpacity(first.time + 100, delayedSide) > 0 &&
+        simulation.events.some(event => event.type === "myocardial" &&
+          event.ventricular === first && event.side === delayedSide && event.time === first.time + 95),
+      `${focus}: depolarization did not propagate through the myocardium with bundle-block timing`);
+    }
+  });
+
+  test("Ventricular fibrillation has continuous activity without organized beats", () => {
+    const simulation = new Simulation({ rhythm: "vfib" });
+    simulation.advanceTo(1000);
+    assert(simulation.ventricularFibrillation && !simulation.events.length &&
+      !simulation.atria.length && !simulation.ventricles.length,
+    "VF generated discrete atrial or ventricular beats");
+    assert(simulation.signalAt(0) !== simulation.signalAt(100) &&
+      simulation.chamberOpacity(500, "rv") > 0 && simulation.chamberOpacity(500, "lv") > 0 &&
+      simulation.chamberOpacity(500, "atria") === 0,
+    "VF did not show continuous ventricular activity without atrial fibrillation");
+  });
+
+  test("WPW has one continuous slurred R upstroke and preserves QRS timing", () => {
+    const simulation = new Simulation({ rhythm: "sinus", wpw: true });
+    simulation.advanceTo(600);
+    const beat = simulation.ventricles[0];
+    const [q, r] = simulation.ventricularWaves;
+    const peak = q.duration + 40 + r.duration * r.orientation;
+    close(beat.qrsMs - simulation.timing.qrsMs, 40, "WPW QRS widening");
+    close(beat.tStart - simulation.timing.tStart, 40, "WPW T-wave timing");
+    close(beat.qtMs - simulation.timing.qtMs, 40, "WPW QT timing");
+    close(simulation.signalAt(beat.time), 0, "QRS onset");
+    let previous = 0;
+    for (let elapsed = 0.5; elapsed < peak; elapsed += 0.5) {
+      const current = simulation.signalAt(beat.time + elapsed);
+      assert(current > previous, "WPW R upstroke has a separate peak or returns to baseline");
+      previous = current;
+    }
+    close(simulation.signalAt(beat.time + peak), r.amplitude, "WPW R peak amplitude");
+    let previousSlope = Infinity;
+    for (let elapsed = 1; elapsed < peak; elapsed++) {
+      const slope = simulation.signalAt(beat.time + elapsed) - simulation.signalAt(beat.time + elapsed - 1);
+      assert(slope > 0 && slope <= previousSlope + 0.0000001, "The slurred upstroke ends before the R peak");
+      previousSlope = slope;
+    }
+    assert(simulation.signalAt(beat.time + peak + 5) < r.amplitude, "R wave does not descend after its peak");
+
+    for (const bundle of ["none", "rbbb", "lbbb"]) {
+      const normal = new Simulation({ bundle });
+      const wpw = new Simulation({ rhythm: "sinus", wpw: true, bundle });
+      normal.advanceTo(700);
+      wpw.advanceTo(700);
+      const [qWave, rWave] = normal.ventricularWaves;
+      const afterR = qWave.duration + qWave.gap + rWave.duration + rWave.gap;
+      for (let elapsed = afterR; elapsed <= normal.timing.qtMs; elapsed += 7) {
+        close(wpw.signalAt(wpw.ventricles[0].time + elapsed + 40),
+          normal.signalAt(normal.ventricles[0].time + elapsed), `${bundle} waves after R changed`);
+      }
+    }
+  });
+
+  test("WPW preserves a nonzero Q and follows custom R amplitude and polarity", () => {
+    for (const amplitude of [0.6, -0.6, 0]) {
+      const custom = clone(templates.none);
+      custom.waves[0].amplitude = 0;
+      custom.waves[1].amplitude = -0.2;
+      custom.waves[1].duration = 20;
+      custom.waves[2].amplitude = amplitude;
+      const simulation = new Simulation({ rhythm: "sinus", wpw: true }, custom);
+      simulation.advanceTo(400);
+      const start = simulation.ventricles[0].time;
+      close(simulation.signalAt(start + 10), -0.2, "Custom Q wave changed or has an extra delta deflection");
+      close(simulation.signalAt(start + 20), 0, "Q did not lead directly into the R wave");
+      const earlyR = simulation.signalAt(start + 40);
+      assert(amplitude === 0 ? earlyR === 0 : Math.sign(earlyR) === Math.sign(amplitude),
+        "WPW slur did not follow custom R polarity");
+      close(simulation.signalAt(start + 20 + 40 + custom.waves[2].duration * custom.waves[2].orientation),
+        amplitude, "Custom WPW R peak");
+    }
+  });
+
+  test("WPW pre-excites the left ventricle at QRS onset, even with AV or left bundle block", () => {
+    for (const av of ["normal", "third"]) {
+      for (const bundle of ["none", "rbbb", "lbbb"]) {
+        const simulation = new Simulation({ rhythm: "sinus", wpw: true, av, bundle });
+        simulation.advanceTo(120);
+        const beat = simulation.ventricles[0];
+        const activation = simulation.events.find(event => event.type === "accessory-ventricular");
+        assert(activation?.ventricular === beat && activation.time === beat.time,
+          `${av}/${bundle} lacks accessory-mediated ventricular activation`);
+        close(beat.time, 100, "Accessory ventricular activation time");
+        if (bundle !== "lbbb") {
+          assert(simulation.chamberOpacity(beat.time + 10, "lv") > 0,
+            `${av}/${bundle} did not begin left ventricular depolarization at QRS onset`);
+        }
+        close(simulation.chamberOpacity(beat.time + 10, "rv"), 0, "Right ventricle activated before its modeled onset");
+      }
+    }
+    const sinus = new Simulation();
+    sinus.advanceTo(200);
+    assert(!sinus.events.some(event => event.type === "accessory-ventricular"), "Accessory activation leaked into sinus rhythm");
+  });
+
+  test("WPW conducts each flutter beat 1:1 while retaining the independent sinus clock", () => {
+    for (const av of ["normal", "first", "mobitz1", "mobitz2", "third"]) {
+      const simulation = new Simulation({ rhythm: "flutter", wpw: true, av });
+      simulation.advanceTo(1100);
+      assert(simulation.atria.length === 6 && simulation.ventricles.length === 6,
+        `${av}: flutter did not conduct every atrial beat`);
+      simulation.atria.forEach((beat, i) => {
+        assert(beat.conducted && beat.pWave === null && simulation.ventricles[i].preexcited,
+          `${av}: flutter beat was not preexcited`);
+        close(simulation.ventricles[i].time - beat.time, 100, `${av}: flutter accessory delay`);
+      });
+      assert(simulation.events.filter(event => event.type === "sinus-firing").map(event => event.time).join(",") === "0,1000",
+        `${av}: flutter sinus clock changed`);
+      assert(!simulation.events.some(event => event.type === "escape"),
+        `${av}: bypass produced extra escape beats`);
+      const nodal = new Simulation({ rhythm: "flutter", av });
+      nodal.advanceTo(1100);
+      const nodeEvents = model => model.events.filter(event =>
+        event.beat && ["av-arrival", "av-release", "his", "block"].includes(event.type))
+        .map(event => [event.time, event.type, event.site]);
+      assert(JSON.stringify(nodeEvents(simulation)) === JSON.stringify(nodeEvents(nodal)),
+        `${av}: WPW changed AV nodal transit or blocking`);
+    }
+  });
+
+  test("Flutter AV refractoriness determines the conduction ratio at and between thresholds", () => {
+    for (const [avRefractory, ratio] of [[100, 1], [200, 1], [210, 2], [400, 2], [410, 3], [800, 4]]) {
+      const simulation = new Simulation({ rhythm: "flutter", avRefractory });
+      simulation.advanceTo(6000);
+      simulation.atria.forEach((beat, i) => {
+        assert(beat.conducted === (i % ratio === 0), `${avRefractory} ms: incorrect flutter conduction`);
+      });
+      simulation.ventricles.slice(1).forEach((beat, i) =>
+        close(beat.time - simulation.ventricles[i].time, ratio * 200, "Flutter R-R interval"));
+      assert(simulation.events.filter(event => event.type === "sinus-firing").length === 7,
+        "Refractoriness changed flutter's independent sinus clock");
+      const wpw = new Simulation({ rhythm: "flutter", avRefractory, wpw: true });
+      wpw.advanceTo(6000);
+      wpw.atria.forEach((beat, i) => {
+        assert(beat.avConducted === simulation.atria[i].conducted && beat.conducted,
+          `${avRefractory} ms: WPW lost AV nodal filtering or accessory conduction`);
+      });
+      assert(wpw.ventricles.length === wpw.atria.filter(beat => beat.time + 100 <= wpw.now).length,
+        `${avRefractory} ms: WPW produced missing or duplicate ventricular beats`);
+    }
+    const boundary = new Simulation({ rhythm: "flutter", atrialRate: 320, avRefractory: 375 });
+    boundary.advanceTo(3000);
+    assert(boundary.atria.every((beat, i) => beat.conducted === (i % 2 === 0)),
+      "A flutter impulse arriving exactly at recovery was blocked");
+  });
+
+  test("AF refractoriness filters a fixed irregular atrial input into ventricular responses", () => {
+    const results = [150, 350, 600, 800].map(avRefractory => {
+      const simulation = new Simulation({ rhythm: "afib", avRefractory });
+      simulation.advanceTo(10000);
+      const inputs = simulation.events.filter(event => event.type === "afib");
+      const accepted = inputs.filter(event => event.conducted);
+      const rejected = inputs.filter(event => !event.conducted);
+      assert(rejected.length > 0 && accepted.length > 2, "AF did not filter its atrial input");
+      assert(simulation.atria.length === 0 &&
+        simulation.ventricles.length === accepted.filter(event => event.time + 80 <= 10000).length,
+      "AF generated organized atrial waves or mismatched ventricular beats");
+      accepted.slice(1).forEach((event, i) => {
+        assert(event.time - accepted[i].time >= avRefractory - 0.000001,
+          "AF conducted while the AV node was refractory");
+      });
+      const intervals = simulation.ventricles.slice(1).map((beat, i) => beat.time - simulation.ventricles[i].time);
+      assert(new Set(intervals.map(interval => Math.round(interval))).size > 1, "AF response is not irregular");
+      return { inputs: inputs.map(event => event.time), count: accepted.length };
+    });
+    for (let i = 1; i < results.length; i++) {
+      assert(JSON.stringify(results[i].inputs) === JSON.stringify(results[0].inputs),
+        "Refractoriness changed the AF atrial input");
+      assert(results[i].count < results[i - 1].count, "Longer refractoriness did not reduce the AF response");
+    }
+  });
+
+  test("WPW bypasses AV refractoriness in flutter and AF", () => {
+    for (const rhythm of ["flutter", "afib"]) {
+      const fast = new Simulation({ rhythm, wpw: true, avRefractory: 100 });
+      const slow = new Simulation({ rhythm, wpw: true, avRefractory: 800 });
+      fast.advanceTo(4000);
+      slow.advanceTo(4000);
+      assert(JSON.stringify(fast.ventricles) === JSON.stringify(slow.ventricles),
+        `${rhythm}: AV refractoriness changed the WPW ventricular response`);
+      if (rhythm === "afib") {
+        assert(JSON.stringify(fast.events) === JSON.stringify(slow.events),
+          "AF with WPW unexpectedly modeled discrete AV nodal events");
+      } else {
+        assert(fast.atria.every(beat => beat.avConducted) &&
+          slow.atria.some(beat => !beat.avConducted),
+        "Flutter with WPW did not independently model AV refractoriness");
+      }
+      for (let time = 0; time <= 4000; time += 37) {
+        close(fast.signalAt(time), slow.signalAt(time), `${rhythm}: WPW waveform changed`);
+      }
+    }
+  });
+
+  test("AF and flutter refractory filtering is frame-independent and matches ECG preview", () => {
+    for (const [rhythm, wpw] of [["afib", false], ["flutter", false], ["flutter", true]]) {
+      const live = new Simulation({ rhythm, wpw, avRefractory: 410 });
+      const preview = new Simulation({ rhythm, wpw, avRefractory: 410 });
+      preview.advanceTo(6000);
+      for (let time = 25; time <= 4000; time += 25) live.advanceTo(time);
+      for (let time = 0; time <= 4000; time += 17) {
+        close(live.signalAt(time), preview.signalAt(time), `${rhythm}: ECG preview differs from live model`);
+      }
+      assert(JSON.stringify(live.ventricles) === JSON.stringify(preview.ventricles.filter(beat => beat.time <= 4000)),
+        `${rhythm}: preview and live ventricular activations differ`);
+      assert(JSON.stringify(live.events) === JSON.stringify(preview.events.filter(event => event.time <= 4000)),
+        `${rhythm}: preview and live nodal events differ`);
+    }
+  });
+
+  test("WPW preserves focal P-wave identities and bypasses AV block in atrial tachycardias", () => {
+    for (const rhythm of ["atrial_tachy", "multifocal_atrial_tachy"]) {
+      const ordinary = new Simulation({ rhythm, av: "third" });
+      const bypass = new Simulation({ rhythm, av: "third", wpw: true });
+      ordinary.advanceTo(2000);
+      bypass.advanceTo(2000);
+      assert(bypass.atria.length === ordinary.atria.length, `${rhythm}: atrial timing changed`);
+      bypass.atria.forEach((beat, i) => {
+        assert(beat.time === ordinary.atria[i].time && beat.focus === ordinary.atria[i].focus &&
+          JSON.stringify(beat.pWave) === JSON.stringify(ordinary.atria[i].pWave),
+        `${rhythm}: WPW changed the atrial focus or P morphology`);
+      });
+      assert(bypass.ventricles.length === bypass.atria.filter(beat => beat.time + 100 <= 2000).length &&
+        bypass.ventricles.every(beat => beat.preexcited), `${rhythm}: missing or extra ventricular beats`);
+      assert(!bypass.events.some(event => event.type === "escape"), `${rhythm}: unexpected escape rhythm`);
+    }
+  });
+
+  test("WPW leaves orthodromic AVRT unchanged and rejects unsupported settings", () => {
+    const avrt = new Simulation({ rhythm: "avrt" });
+    const enabled = new Simulation({ rhythm: "avrt", wpw: true });
+    avrt.advanceTo(2000);
+    enabled.advanceTo(2000);
+    assert(JSON.stringify(avrt.events) === JSON.stringify(enabled.events) &&
+      enabled.ventricles.every(beat => !beat.preexcited && beat.qrsMs === enabled.timing.qrsMs),
+    "WPW changed orthodromic AVRT conduction");
+    for (const settings of [
+      { rhythm: "wpw" }, { rhythm: "avnrt", wpw: true },
+      { rhythm: "junctional_tachy", wpw: true }, { wpw: "true" }
+    ]) {
+      let threw = false;
+      try { new Simulation(settings); } catch (error) { threw = true; }
+      assert(threw, `Invalid WPW setting accepted: ${JSON.stringify(settings)}`);
+    }
+  });
+
+  test("AF with WPW produces continuous ventricular fibrillation without organized beats", () => {
+    for (const av of ["normal", "third"]) {
+      const settings = { rhythm: "afib", wpw: true, av };
+      const live = new Simulation(settings);
+      const preview = new Simulation(settings);
+      live.advanceTo(5000);
+      for (let time = 0; time <= 5000; time += 25) preview.advanceTo(time);
+      assert(live.ventricularFibrillation && !live.events.length && !live.atria.length &&
+        !live.ventricles.length && !live.queue.length, `${av}: VF generated organized events`);
+      const samples = [];
+      for (let time = 0; time < 2000; time += 13) {
+        const signal = live.signalAt(time);
+        samples.push(signal);
+        close(signal, preview.signalAt(time), "VF preview differs from live signal");
+        for (const chamber of ["atria", "rv", "lv"]) {
+          const opacity = live.chamberOpacity(time, chamber);
+          assert(opacity >= 0.06 && opacity <= 0.5, `${av}: invalid ${chamber} fibrillation opacity`);
+        }
+      }
+      assert(Math.max(...samples) > 0.3 && Math.min(...samples) < -0.3,
+        `${av}: VF waveform does not fluctuate around baseline`);
+      assert(live.chamberOpacity(500, "rv") !== live.chamberOpacity(500, "lv"),
+        "Ventricles did not fibrillate independently");
+      let threw = false;
+      try { live.step(); } catch (error) { threw = /no discrete events/i.test(error.message); }
+      assert(threw, "Stepping an eventless VF model did not report the condition");
+    }
   });
 
   test("Atrial foci consistently determine the sampled P wave across rhythms", () => {
@@ -291,12 +704,37 @@
     }
   });
 
+  test("AVRT accessory conduction spans ventricular to retrograde atrial activation", () => {
+    for (const bundle of ["none", "rbbb", "lbbb"]) {
+      const simulation = new Simulation({ rhythm: "avrt", bundle });
+      simulation.advanceTo(1200);
+      const impulses = simulation.events.filter(event => event.type === "accessory-retrograde");
+      assert(impulses.length === simulation.ventricles.length && impulses.length === simulation.atria.length,
+        `${bundle}: AVRT pathway impulses do not match beats`);
+      impulses.forEach((event, i) => {
+        close(event.time, simulation.ventricles[i].time, "Accessory conduction onset");
+        close(event.endTime, simulation.atria[i].time, "Accessory conduction end");
+        assert(event.endTime <= simulation.ventricles[i].time + simulation.ventricles[i].qrsMs,
+          `${bundle}: accessory conduction continued past ventricular depolarization`);
+      });
+    }
+    const avnrt = new Simulation({ rhythm: "avnrt" });
+    avnrt.advanceTo(1200);
+    assert(!avnrt.events.some(event => event.type === "accessory-retrograde"),
+      "AVRT accessory events leaked into AVNRT");
+  });
+
   test("Every rhythm composes with each bundle morphology", () => {
     for (const rhythm of Object.keys(window.Conduction.rhythms)) {
       for (const bundle of ["none", "rbbb", "lbbb"]) {
         const simulation = new Simulation({ rhythm, bundle });
         simulation.advanceTo(3000);
-        assert(simulation.ventricles.length > 0, `${rhythm}/${bundle} produced no ventricular activity`);
+        if (rhythm === "vfib") {
+          assert(simulation.ventricularFibrillation && !simulation.ventricles.length,
+            `${rhythm}/${bundle} generated organized ventricular beats`);
+        } else {
+          assert(simulation.ventricles.length > 0, `${rhythm}/${bundle} produced no ventricular activity`);
+        }
         for (let time = 0; time <= 3000; time += 37) {
           assert(Number.isFinite(simulation.signalAt(time)), `${rhythm}/${bundle} produced a non-finite ECG`);
         }
@@ -355,6 +793,9 @@
       () => new Simulation({ rhythm: "unknown" }),
       () => new Simulation({ rhythm: "psvt" }),
       () => new Simulation({ rhythm: "flutter", atrialRate: 70 }),
+      () => new Simulation({ avRefractory: 99 }),
+      () => new Simulation({ avRefractory: 801 }),
+      () => new Simulation({ avRefractory: NaN }),
       () => new Simulation({ rhythm: "avnrt", av: "third" }),
       () => new Simulation({ rhythm: "avrt", av: "mobitz2" }),
       () => validateMorphology({ name: "bad", waves: [] }),
@@ -522,6 +963,50 @@
     assert(actual.every((value, i) => value === expected[i]), "Resize lost or changed historical beats");
   });
 
+  test("Resizing preserves the seeded randomized ECG history", () => {
+    const viewport = { left: 44, right: 356, baseline: 74, amplitude: 68, height: 140 };
+    const pixels = image => image.getContext("2d").getImageData(0, 0, image.width, image.height).data;
+    for (const rhythm of ["pac", "wandering", "multifocal_atrial_tachy"]) {
+      const settings = { rhythm, randomSeed: 123456789 };
+      const strip = new window.EcgStrip(new Simulation(settings));
+      strip.configure({ ...viewport, right: 256 }, 1);
+      strip.renderTile(7);
+      strip.configure(viewport, 1);
+      const reference = new window.EcgStrip(new Simulation(settings));
+      reference.configure(viewport, 1);
+      const actual = pixels(strip.renderTile(6));
+      const expected = pixels(reference.renderTile(6));
+      assert(actual.some(value => value > 0) && actual.every((value, i) => value === expected[i]),
+        `${rhythm} changed its randomized waveform on resize`);
+    }
+  });
+
+  test("Rhythm transitions retain ECG history, join continuously, and survive resize", () => {
+    const viewport = { left: 44, right: 356, baseline: 74, amplitude: 68, height: 140 };
+    const strip = new window.EcgStrip(new Simulation({ rhythm: "sinus", atrialRate: 60 }));
+    strip.configure(viewport, 1);
+    strip.renderTile(0);
+    const transition = 3180;
+    const times = [1000, 2500, transition - 0.001];
+    const history = times.map(time => strip.signalAt(time));
+    const seam = strip.signalAt(transition);
+    strip.append(new Simulation({ rhythm: "flutter" }), transition);
+    close(strip.signalAt(transition), seam, "Rhythm transition broke the trace");
+    strip.renderTile(0);
+    times.forEach((time, index) => close(strip.signalAt(time), history[index], "Rhythm transition changed ECG history"));
+    close(strip.signalAt(transition + 100), strip.model.signalAt(100), "New rhythm did not take over after the join");
+    const secondSeam = strip.signalAt(transition + 40);
+    strip.append(new Simulation({ rhythm: "afib" }), transition + 40);
+    close(strip.signalAt(transition + 40), secondSeam, "Rapid rhythm changes broke the trace");
+    strip.renderTile(0);
+    const samples = [1000, transition - 1, transition + 20, transition + 40, transition + 150]
+      .map(time => strip.signalAt(time));
+    strip.configure({ ...viewport, right: 300 }, 1);
+    strip.renderTile(0);
+    [1000, transition - 1, transition + 20, transition + 40, transition + 150]
+      .forEach((time, index) => close(strip.signalAt(time), samples[index], "Resize changed a transition"));
+  });
+
   const fixture = document.createElement("iframe");
   fixture.title = "Playback regression fixture";
   fixture.tabIndex = -1;
@@ -536,6 +1021,7 @@
     });
     const win = fixture.contentWindow;
     const doc = win.document;
+    win.Math.random = () => 0;
     const pause = doc.querySelector("#pause-button");
     const deadline = performance.now() + 5000;
     while (pause.disabled) {
@@ -547,6 +1033,381 @@
     doc.dispatchEvent(new win.Event("visibilitychange"));
     if (pause.textContent === "Pause") pause.click();
     doc.querySelector("#av-pattern").dispatchEvent(new win.Event("change", { bubbles: true }));
+    const rhythmControl = doc.querySelector("#rhythm-pattern");
+    const queuedControls = [rhythmControl, doc.querySelector("#av-pattern"),
+      doc.querySelector("#bundle-pattern"), doc.querySelector("#wpw-enabled"),
+      doc.querySelector("#heart-rate"), doc.querySelector("#av-refractory")];
+    const resetAfterSelection = () => {
+      const currentTime = doc.timeline.currentTime;
+      const descriptor = Object.getOwnPropertyDescriptor(doc.timeline, "currentTime");
+      const request = win.requestAnimationFrame;
+      let callback;
+      let time = currentTime;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => time });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      if (pause.textContent === "Pause") pause.click();
+      const tile = doc.querySelector("#ecg-trace canvas");
+      const ratio = doc.querySelector("#ecg-canvas").getContext("2d").getTransform().a;
+      const width = tile.width / ratio;
+      const viewport = Math.round((doc.querySelector("#ecg-plot").getBoundingClientRect().width - 88) * ratio) / ratio;
+      const delay = viewport * 5000 / (2 * width) + Math.ceil(4 * ratio) * 5000 / tile.width;
+      pause.click();
+      callback(time += delay / Number(doc.querySelector("#speed").value));
+      pause.click();
+      if (descriptor) Object.defineProperty(doc.timeline, "currentTime", descriptor);
+      else delete doc.timeline.currentTime;
+      win.requestAnimationFrame = request;
+      doc.querySelector("#speed").dispatchEvent(new win.Event("input", { bubbles: true }));
+    };
+    const resetSelectionsImmediately = enabled => {
+      for (const control of queuedControls) {
+        const event = control.id === "av-refractory" ? "input" : "change";
+        if (enabled) control.addEventListener(event, resetAfterSelection);
+        else control.removeEventListener(event, resetAfterSelection);
+      }
+    };
+    const assertArrowDirection = (arrow, path, fraction, reverse = false) => {
+      const length = path.getTotalLength();
+      const before = path.getPointAtLength(length * fraction - 0.1);
+      const after = path.getPointAtLength(length * fraction + 0.1);
+      const start = new win.DOMPoint(before.x, before.y).matrixTransform(path.getCTM());
+      const end = new win.DOMPoint(after.x, after.y).matrixTransform(path.getCTM());
+      const matrix = arrow.getCTM();
+      const tangentX = (end.x - start.x) * (reverse ? -1 : 1);
+      const tangentY = (end.y - start.y) * (reverse ? -1 : 1);
+      const alignment = (matrix.a * tangentX + matrix.b * tangentY) /
+        (Math.hypot(matrix.a, matrix.b) * Math.hypot(tangentX, tangentY));
+      assert(alignment > 0.99, "Arrow does not point in the direction of conduction");
+    };
+    resetSelectionsImmediately(true);
+    test("Rhythm changes enter from offscreen and reach the synchronized anatomy at the playhead", () => {
+      resetSelectionsImmediately(false);
+      const rate = doc.querySelector("#heart-rate");
+      const speed = doc.querySelector("#speed");
+      const trace = doc.querySelector("#ecg-trace");
+      const flutter = doc.querySelector('[data-reentry-circuit="flutter"]');
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const change = value => {
+        rhythmControl.value = value;
+        rhythmControl.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = elapsed => {
+        pause.click();
+        callback(now += elapsed);
+        pause.click();
+      };
+      try {
+        change("sinus");
+        rate.dispatchEvent(new win.Event("change", { bubbles: true }));
+        step(1800);
+        const oldTile = trace.querySelector('[data-ecg-tile="0"]');
+        const before = oldTile.getContext("2d").getImageData(0, 0, oldTile.width, oldTile.height).data;
+        const oldTime = doc.querySelector("#time-readout").textContent;
+        change("flutter");
+        assert(doc.querySelector("#time-readout").textContent === oldTime &&
+          flutter.style.display === "none" && doc.querySelector("#monitor-status").textContent.includes("QUEUED"),
+        "Rhythm changed at the playhead instead of being queued");
+        const newTile = trace.querySelector('[data-ecg-tile="0"]');
+        const after = newTile.getContext("2d").getImageData(0, 0, newTile.width, newTile.height).data;
+        const visibleEnd = Math.floor(newTile.width * 3300 / 5000) - 2;
+        let maxDifference = 0;
+        let changedAt = "";
+        for (let y = 0; y < newTile.height; y++) {
+          for (let x = 0; x < visibleEnd; x++) {
+            const i = (y * newTile.width + x) * 4;
+            for (let channel = 0; channel < 4; channel++) {
+              const difference = Math.abs(before[i + channel] - after[i + channel]);
+              if (difference > maxDifference) { maxDifference = difference; changedAt = `${x},${y}`; }
+            }
+          }
+        }
+        assert(maxDifference <= 4, `A queued rhythm changed the visible ECG (${changedAt}, sizes ${oldTile.width}x${oldTile.height}/${newTile.width}x${newTile.height}, maximum pixel difference ${maxDifference})`);
+        const tileAnimation = newTile.getAnimations()[0];
+        const frozenTime = tileAnimation.currentTime;
+        speed.value = "0.5";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        assert(tileAnimation.currentTime === frozenTime, "Changing speed moved the paused queued trace");
+        step(2000);
+        assert(flutter.style.display === "none" && doc.querySelector("#monitor-status").textContent.includes("QUEUED"),
+          "Anatomy changed before the new trace reached the playhead");
+        step(1200);
+        assert(flutter.style.display !== "none" && !doc.querySelector("#monitor-status").textContent.includes("QUEUED") &&
+          doc.querySelector("#readout").textContent.includes("A 300"),
+        "Queued rhythm did not reach anatomy at the playhead");
+        close(parseFloat(doc.querySelector("#time-readout").textContent) - parseFloat(oldTime), 1.6,
+          "Queued rhythm changed the playback clock");
+        assert(newTile.getAnimations()[0] === tileAnimation,
+          "The visible trace restarted when the rhythm reached the playhead");
+        close(tileAnimation.currentTime - frozenTime, 1600, "ECG scroll diverged from the playback clock");
+        speed.value = "1";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        change("afib");
+        change("junctional");
+        step(1600);
+        assert(flutter.style.display === "none" &&
+          doc.querySelector('[data-junctional-focus="junctional"]').style.display !== "none" &&
+          !doc.querySelector("#monitor-status").textContent.includes("QUEUED"),
+        "Repeated selections while paused did not apply the latest queued rhythm");
+        change("flutter");
+        step(200);
+        change("afib");
+        step(1400);
+        assert(flutter.style.display !== "none" && doc.querySelector("#monitor-status").textContent.includes("QUEUED"),
+          "A later selection replaced a rhythm already entering the strip");
+        step(250);
+        assert(doc.querySelector("#readout").textContent.includes("A Fib") &&
+          !doc.querySelector("#monitor-status").textContent.includes("QUEUED"),
+        "A later queued rhythm did not reach the playhead");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        speed.value = "1";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        change("sinus");
+        rate.dispatchEvent(new win.Event("change", { bubbles: true }));
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+        resetSelectionsImmediately(true);
+      }
+    });
+    test("AV, bundle, and WPW changes enter offscreen and follow the playhead", () => {
+      resetSelectionsImmediately(false);
+      const av = doc.querySelector("#av-pattern");
+      const bundle = doc.querySelector("#bundle-pattern");
+      const wpw = doc.querySelector("#wpw-enabled");
+      const rate = doc.querySelector("#heart-rate");
+      const rightBundle = doc.querySelector('[data-conduction-path="Right Bundle"]');
+      const accessory = doc.querySelector("[data-wpw-accessory]");
+      const pr = doc.querySelector("#pr-readout");
+      const qrs = doc.querySelector("#qrs-readout");
+      const status = doc.querySelector("#monitor-status");
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const toggleWpw = value => {
+        wpw.checked = value;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = elapsed => {
+        pause.click();
+        callback(now += elapsed);
+        pause.click();
+      };
+      try {
+        change(rhythmControl, "sinus");
+        change(av, "normal");
+        change(bundle, "none");
+        toggleWpw(false);
+        rate.dispatchEvent(new win.Event("change", { bubbles: true }));
+        step(1700);
+        const oldTime = doc.querySelector("#time-readout").textContent;
+        change(av, "first");
+        assert(pr.textContent === "160 ms" && status.textContent.includes("QUEUED") &&
+          doc.querySelector("#time-readout").textContent === oldTime,
+        "AV change altered the active recording before reaching the playhead");
+        step(1400);
+        assert(pr.textContent === "160 ms", "AV conduction changed before the playhead");
+        step(200);
+        assert(pr.textContent === "260 ms" && !status.textContent.includes("QUEUED"),
+          "Queued AV conduction did not reach the playhead");
+
+        change(bundle, "rbbb");
+        assert(qrs.textContent === "90 ms" && rightBundle.getAttribute("stroke") !== "#b42318",
+          "Bundle block appeared before reaching the playhead");
+        step(1600);
+        assert(qrs.textContent === "150 ms" && rightBundle.getAttribute("stroke") === "#b42318",
+          "Queued bundle block did not reach the playhead");
+
+        toggleWpw(true);
+        assert(accessory.style.display === "none" && pr.textContent === "260 ms",
+          "WPW appeared before reaching the playhead");
+        step(1600);
+        assert(accessory.style.display !== "none" && pr.textContent === "100 ms" && qrs.textContent === "190 ms",
+          "Queued WPW pathway did not reach the playhead");
+        toggleWpw(false);
+        assert(accessory.style.display !== "none", "WPW disappeared before reaching the playhead");
+        step(1600);
+        assert(accessory.style.display === "none" && pr.textContent === "260 ms" && qrs.textContent === "150 ms",
+          "Disabling WPW did not reach the playhead");
+
+        change(av, "normal");
+        change(bundle, "none");
+        toggleWpw(true);
+        assert(pr.textContent === "260 ms" && rightBundle.getAttribute("stroke") === "#b42318" &&
+          accessory.style.display === "none", "Paused selections changed the active scenario");
+        step(1600);
+        assert(pr.textContent === "100 ms" && qrs.textContent === "130 ms" &&
+          rightBundle.getAttribute("stroke") !== "#b42318" && accessory.style.display !== "none" &&
+          !status.textContent.includes("QUEUED"), "Paused selections did not combine in the queued scenario");
+
+        toggleWpw(false);
+        pause.click();
+        callback(now += 200);
+        change(bundle, "rbbb");
+        callback(now += 1400);
+        assert(accessory.style.display === "none" && rightBundle.getAttribute("stroke") !== "#b42318" &&
+          status.textContent.includes("QUEUED"), "A later selection replaced a change already entering the strip");
+        callback(now += 250);
+        assert(rightBundle.getAttribute("stroke") === "#b42318" && qrs.textContent === "150 ms" &&
+          !status.textContent.includes("QUEUED"), "Successive changes did not reach the playhead in order");
+        pause.click();
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        change(rhythmControl, "sinus");
+        change(av, "normal");
+        change(bundle, "none");
+        toggleWpw(false);
+        rate.dispatchEvent(new win.Event("change", { bubbles: true }));
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+        resetSelectionsImmediately(true);
+      }
+    });
+    test("Rate, refractoriness, and waveform edits preserve and queue the recording", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const rate = doc.querySelector("#heart-rate");
+      const slider = doc.querySelector("#av-refractory");
+      const readout = doc.querySelector("#readout");
+      const status = doc.querySelector("#monitor-status");
+      const qrs = doc.querySelector("#qrs-readout");
+      const timeReadout = doc.querySelector("#time-readout");
+      const change = (input, value, type = "change") => {
+        input.value = value;
+        input.dispatchEvent(new win.Event(type, { bubbles: true }));
+      };
+      change(rhythm, "flutter");
+      resetSelectionsImmediately(false);
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const step = elapsed => {
+        pause.click();
+        callback(now += elapsed);
+        pause.click();
+      };
+      const captureVisible = () => [...doc.querySelectorAll("#ecg-trace canvas")].map(tile => ({
+        index: tile.dataset.ecgTile, width: tile.width, height: tile.height,
+        visible: Math.max(0, Math.min(tile.width,
+          Math.floor(tile.width * tile.getAnimations()[0].currentTime / 5000) - 2)),
+        pixels: tile.getContext("2d").getImageData(0, 0, tile.width, tile.height).data
+      }));
+      const assertVisiblePreserved = snapshots => {
+        for (const snapshot of snapshots) {
+          const tile = doc.querySelector(`#ecg-trace canvas[data-ecg-tile="${snapshot.index}"]`);
+          assert(tile && tile.width === snapshot.width && tile.height === snapshot.height,
+            "A visible ECG tile disappeared after an edit");
+          const pixels = tile.getContext("2d").getImageData(0, 0, tile.width, tile.height).data;
+          for (let y = 0; y < snapshot.height; y++) {
+            for (let x = 0; x < snapshot.visible; x++) {
+              const offset = (y * snapshot.width + x) * 4;
+              for (let channel = 0; channel < 4; channel++) {
+                assert(Math.abs(snapshot.pixels[offset + channel] - pixels[offset + channel]) <= 4,
+                  "An edit changed pixels already visible on the ECG");
+              }
+            }
+          }
+        }
+      };
+      try {
+        const oldTime = timeReadout.textContent;
+        const oldReadout = readout.textContent;
+        const beforeScenario = captureVisible();
+        change(slider, "410", "input");
+        change(rate, "320");
+        assert(timeReadout.textContent === oldTime && readout.textContent === oldReadout &&
+          status.textContent.includes("QUEUED") && doc.querySelector("#refractory-value").textContent === "410 ms",
+        "Paused scenario edits changed the active recording");
+        assertVisiblePreserved(beforeScenario);
+        step(400);
+        change(slider, "610", "input");
+        step(1200);
+        assert(readout.textContent.includes("A 320") && readout.textContent.includes("3:1") &&
+          status.textContent.includes("QUEUED"), "First scenario did not reach the playhead in order");
+        step(400);
+        assert(readout.textContent.includes("4:1") && !status.textContent.includes("QUEUED"),
+          "Later refractory change did not reach the playhead");
+
+        doc.querySelector("#duplicate-waveform").click();
+        const qDuration = doc.querySelector('#wave-editor input[data-index="1"][data-key="duration"][type="number"]');
+        const beforeEdit = timeReadout.textContent;
+        const oldQrs = qrs.textContent;
+        const beforeWaveform = captureVisible();
+        change(qDuration, "30", "input");
+        assert(timeReadout.textContent === beforeEdit && qrs.textContent === oldQrs &&
+          status.textContent.includes("QUEUED"), "Morphology edit rewrote the current recording");
+        assertVisiblePreserved(beforeWaveform);
+        step(1600);
+        assert(qrs.textContent === "110 ms" && !status.textContent.includes("QUEUED"),
+          "Queued waveform edit did not reach the playhead");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        change(doc.querySelector("#waveform-select"), "automatic");
+        change(slider, "350", "input");
+        change(rhythm, "sinus");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+        resetSelectionsImmediately(true);
+        resetAfterSelection();
+      }
+    });
+    test("Scenario controls reserve a stable height across rhythms and AV options", () => {
+      resetSelectionsImmediately(false);
+      const av = doc.querySelector("#av-pattern");
+      const wpw = doc.querySelector("#wpw-enabled");
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      try {
+        for (const width of [320, 375, 600, 1024, 1280]) {
+          fixture.style.width = `${width}px`;
+          const positions = new Set();
+          for (const rhythm of ["sinus", "avnrt", "flutter", "afib", "junctional"]) {
+            change(rhythmControl, rhythm);
+            for (const pattern of ["normal", "first", "mobitz1", "mobitz2", "third"]) {
+              change(av, pattern);
+              for (const enabled of [false, true]) {
+                wpw.checked = enabled;
+                wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+                const grid = doc.querySelector(".teaching-grid").getBoundingClientRect();
+                const plot = doc.querySelector("#ecg-plot").getBoundingClientRect();
+                positions.add(JSON.stringify([grid.top, plot.top, plot.height]));
+              }
+            }
+          }
+          assert(positions.size === 1, `Scenario controls moved the diagram at ${width}px`);
+        }
+        fixture.style.width = "320px";
+        const plotTop = doc.querySelector("#ecg-plot").getBoundingClientRect().top;
+        resetSelectionsImmediately(false);
+        pause.click();
+        change(rhythmControl, "flutter");
+        assert(doc.querySelector("#ecg-plot").getBoundingClientRect().top === plotTop,
+          "Queued status moved the ECG on a narrow screen");
+        pause.click();
+        resetSelectionsImmediately(true);
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        resetSelectionsImmediately(false);
+        resetSelectionsImmediately(true);
+        fixture.style.width = "1280px";
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        change(rhythmControl, "sinus");
+        change(av, "normal");
+      }
+    });
     test("Rhythm selector updates the rate control for the selected rhythm", () => {
       const rhythm = doc.querySelector("#rhythm-pattern");
       rhythm.value = "flutter";
@@ -557,9 +1418,147 @@
       rhythm.value = "sinus";
       rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
     });
+    test("Ventricular rhythm controls distinguish VT, PVCs, and VF", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const av = doc.querySelector("#av-field");
+      const rate = doc.querySelector("#rate-field");
+      const wpw = doc.querySelector("#wpw-field");
+      const pvcFocusField = doc.querySelector("#pvc-focus-field");
+      const pvcFocus = doc.querySelector("#pvc-focus");
+      const focusMarker = doc.querySelector("[data-ventricular-focus]");
+      const chamber = name => [...doc.querySelectorAll("#anatomy-overlays path")]
+        .find(node => node.querySelector("title")?.textContent === name);
+      const markerInside = name => {
+        const [x, y] = focusMarker.getAttribute("transform").match(/[\d.]+/g).map(Number);
+        return chamber(name).isPointInFill(new win.DOMPoint(x, y));
+      };
+      const change = value => {
+        rhythm.value = value;
+        rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const step = elapsed => {
+        if (pause.textContent === "Pause") pause.click();
+        pause.click();
+        callback(now += elapsed);
+        pause.click();
+      };
+      resetSelectionsImmediately(true);
+      try {
+        change("vt");
+        assert(doc.querySelector("#rate-label").textContent === "Ventricular rate" &&
+          doc.querySelector("#heart-rate").value === "180" && av.hidden && !rate.hidden && wpw.hidden &&
+          focusMarker.style.display === "none",
+        "VT controls do not reflect independent ventricular activation");
+        assert(doc.querySelector("#readout").textContent === "A — · V 180 bpm" &&
+          doc.querySelector("#pr-readout").textContent === "No P waves" &&
+          doc.querySelector("#qrs-readout").textContent === "160 ms",
+        "VT readouts do not show absent atrial activity and a wide QRS");
+        change("pvc");
+        assert(doc.querySelector("#rate-label").textContent === "Sinus rate" &&
+          doc.querySelector("#heart-rate").value === "70" && !av.hidden && !rate.hidden && wpw.hidden &&
+          !pvcFocusField.hidden && pvcFocus.value === "lv" && markerInside("Left Ventricle"),
+        "PVC controls do not preserve the underlying sinus rhythm");
+        pvcFocus.value = "rv";
+        pvcFocus.dispatchEvent(new win.Event("change", { bubbles: true }));
+        step(5000);
+        assert(markerInside("Right Ventricle"), "Right-ventricular PVC focus is not in the right ventricle");
+        change("vfib");
+        assert(av.hidden && rate.hidden && wpw.hidden &&
+          pvcFocusField.hidden &&
+          doc.querySelector("#readout").textContent === "V Fib" &&
+          doc.querySelector("#qrs-readout").textContent === "Not measurable",
+        "VF controls or readouts show organized rhythm measurements");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        change("sinus");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
+    test("AF and flutter expose refractoriness instead of AV-block controls", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const av = doc.querySelector("#av-pattern");
+      const wpw = doc.querySelector("#wpw-enabled");
+      const slider = doc.querySelector("#av-refractory");
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const setRefractory = value => {
+        slider.value = value;
+        slider.dispatchEvent(new win.Event("input", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        change(av, "third");
+        change(rhythm, "flutter");
+        assert(doc.querySelector("#av-field").hidden && !doc.querySelector("#refractory-field").hidden &&
+          !slider.disabled && !doc.querySelector("#rate-field").hidden, "Flutter controls are incorrect");
+        assert(doc.querySelector("#readout").textContent.includes("2:1"), "Default flutter ratio is not shown");
+        setRefractory("410");
+        assert(doc.querySelector("#refractory-value").textContent === "410 ms" &&
+          doc.querySelector("#readout").textContent.includes("3:1"), "Flutter slider did not change the ratio");
+        const start = now;
+        step(start + 800);
+        assert(doc.querySelector("#readout").textContent.includes("V 100 bpm"),
+          "Flutter ventricular response does not match the refractory period");
+        change(rhythm, "afib");
+        assert(doc.querySelector("#av-field").hidden && !doc.querySelector("#refractory-field").hidden &&
+          doc.querySelector("#rate-field").hidden && slider.value === "410",
+        "AF controls did not retain the refractory period or hide the ventricular-rate control");
+        setRefractory("150");
+        step(now + 4000);
+        const fastResponse = Number(doc.querySelector("#readout").textContent.match(/V (\d+) bpm/)?.[1]);
+        setRefractory("600");
+        assert(doc.querySelector("#refractory-value").textContent === "600 ms", "AF slider did not update");
+        step(now + 4000);
+        const slowResponse = Number(doc.querySelector("#readout").textContent.match(/V (\d+) bpm/)?.[1]);
+        assert(Number.isFinite(fastResponse) && Number.isFinite(slowResponse) && fastResponse > slowResponse,
+          "AF slider did not reduce the displayed ventricular response");
+        wpw.checked = true;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        assert(slider.disabled && !doc.querySelector("#refractory-field").hidden &&
+          doc.querySelector("#refractory-note").textContent.includes("bypasses"),
+        "WPW did not explain why AV refractoriness is unavailable");
+        change(rhythm, "flutter");
+        assert(!slider.disabled && doc.querySelector("#readout").textContent.includes("1:1"),
+          "WPW flutter did not allow AV refractoriness adjustment or bypass the AV node");
+        setRefractory("210");
+        assert(doc.querySelector("#refractory-value").textContent === "210 ms" &&
+          doc.querySelector("#readout").textContent.includes("1:1"),
+        "WPW flutter slider changed the accessory-pathway response");
+        change(rhythm, "sinus");
+        assert(doc.querySelector("#refractory-field").hidden && !doc.querySelector("#av-field").hidden &&
+          av.value === "third", "Previous AV-block selection was not restored");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        change(rhythm, "flutter");
+        setRefractory("350");
+        change(rhythm, "sinus");
+        change(av, "normal");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
     test("Atrial focus markers follow each beat and match the atrial anatomy", () => {
       const rhythm = doc.querySelector("#rhythm-pattern");
-      const pathwayDot = doc.querySelector('[data-path="Atria1"] circle');
+      const pathwayDot = doc.querySelector('[data-path="Atria1"] polygon');
       const markers = Object.fromEntries(Object.keys(atrialFoci).map(id =>
         [id, doc.querySelector(`[data-atrial-focus="${id}"]`)]));
       const routes = Object.fromEntries(["rightHigh", "rightLow", "left"].map(id =>
@@ -634,24 +1633,23 @@
             assert(markers[beat.focus].getAttribute("data-activating") === "true" &&
               Number(markers[beat.focus].querySelector("circle").getAttribute("opacity")) > 0,
             `${name} focus did not visibly pulse during depolarization`);
-            assert(doc.querySelector("#atrial-focus-readout").textContent.includes(atrialFoci[beat.focus].label),
-              `${name} focus readout disagrees with the beat`);
             if (beat.focus !== "sinus") {
               assert(pathwayDot.getAnimations().length === 0, `${name} ectopic beat activated a sinus pathway`);
               const route = routes[beat.focus];
               assert(route.style.display !== "none", `${name} did not show the firing focus route`);
-              const movement = route.querySelector("circle").getAnimations()[0];
+              const movement = route.querySelector("polygon").getAnimations()[0];
               assert(movement?.playState === "paused", `${name} route did not follow paused playback`);
               close(movement.effect.getTiming().duration, 80, `${name} route does not reach the AV node at AV arrival`);
               close(movement.currentTime, 10, `${name} route is not synchronized to the atrial beat`);
               const originalTime = movement.currentTime;
               movement.currentTime = 40;
-              const dot = route.querySelector("circle");
+              const dot = route.querySelector("polygon");
               const path = route.querySelector("path");
               const point = path.getPointAtLength(path.getTotalLength() / 2);
               const actual = new win.DOMPoint(0, 0).matrixTransform(dot.getCTM());
               const expected = new win.DOMPoint(point.x, point.y).matrixTransform(doc.querySelector("#anatomy").getCTM());
               assert(Math.hypot(actual.x - expected.x, actual.y - expected.y) < 0.05, "Focus impulse left its route");
+              assertArrowDirection(dot, path, 0.5);
               movement.currentTime = originalTime;
             }
             for (const [id, route] of Object.entries(routes)) {
@@ -675,19 +1673,46 @@
         win.requestAnimationFrame = originalRequest;
       }
     });
+    test("A queued scenario uses one fresh seed for live anatomy and preview", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const values = [0.1, 0.9];
+      let calls = 0;
+      win.Math.random = () => values[calls++];
+      try {
+        for (const value of [0.1, 0.9]) {
+          rhythm.value = "wandering";
+          rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+          const expected = new win.Conduction.Simulation({
+            rhythm: "wandering", randomSeed: Math.floor(value * 4294967296)
+          });
+          const marker = doc.querySelector(`[data-atrial-focus="${expected.atria[0].focus}"]`);
+          assert(marker.dataset.current === "true", "Live anatomy did not use the recording seed");
+        }
+        assert(calls === 2, "A queued rhythm did not select exactly one seed for both models");
+      } finally {
+        win.Math.random = () => 0;
+        rhythm.value = "sinus";
+        rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+      }
+    });
     test("Junctional rhythm controls and focus match their selected rates", () => {
       const rhythm = doc.querySelector("#rhythm-pattern");
       const av = doc.querySelector("#av-pattern");
-      const junctionalFocus = doc.querySelector('[data-node="Independent junctional/His escape focus"]');
+      const junctionalFocus = doc.querySelector('[data-junctional-focus="junctional"]');
+      const avNode = doc.querySelector('[data-node="AV nodal transit"] circle');
       try {
         assert(!rhythm.querySelector('option[value="psvt"]'), "Generic PSVT remains selectable");
+        const [focusX, focusY] = junctionalFocus.getAttribute("transform").match(/[\d.]+/g).map(Number);
+        close(focusX, Number(avNode.getAttribute("cx")), "Junctional focus is not centered on the AV node");
+        close(focusY, Number(avNode.getAttribute("cy")), "Junctional focus is not centered on the AV node");
         for (const [name, rate] of [["junctional", "50"], ["junctional_tachy", "130"]]) {
           rhythm.value = name;
           rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
           assert(doc.querySelector("#heart-rate").value === rate, `${name} selected the wrong rate`);
           assert(doc.querySelector("#rate-label").textContent === "Junctional rate", "Wrong junctional rate label");
           assert(doc.querySelector("#pr-readout").textContent === "Retrograde", "Wrong junctional PR readout");
-          assert(junctionalFocus.style.display !== "none", "Junctional focus did not fire");
+          assert(junctionalFocus.style.display !== "none" && junctionalFocus.dataset.activating === "true",
+            "Junctional focus did not fire");
           av.value = "third";
           av.dispatchEvent(new win.Event("change", { bubbles: true }));
           assert(!av.disabled && !doc.querySelector("#junctional-av-note").hidden,
@@ -700,6 +1725,129 @@
         av.dispatchEvent(new win.Event("change", { bubbles: true }));
         rhythm.value = "sinus";
         rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+      }
+    });
+    test("PAC focus pulses and conducts to the AV node only for the premature beat", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const rate = doc.querySelector("#heart-rate");
+      const av = doc.querySelector("#av-pattern");
+      const marker = doc.querySelector('[data-atrial-focus="left"]');
+      const route = doc.querySelector('[data-atrial-focus-route="left"]');
+      const sinusNode = doc.querySelector('[data-node="SA node firing"]');
+      const sinusPathDot = doc.querySelector('[data-path="Atria1"] polygon');
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        change(rhythm, "atrial_tachy");
+        assert(marker.style.display !== "none", "Focal atrial tachycardia does not show the shared focus");
+        change(rhythm, "pac");
+        change(rate, "60");
+        for (const block of ["normal", "third"]) {
+          change(av, block);
+          const expected = new win.Conduction.Simulation({ rhythm: "pac", atrialRate: 60, av: block });
+          expected.advanceTo(8500);
+          const beat = expected.atria.find(item => item.origin === "PAC");
+          const next = expected.atria.find(item => item.time > beat.time);
+          const start = now;
+          step(start + 10);
+          assert(marker.style.display !== "none" && marker.dataset.activating === "false" &&
+            route.style.display === "none" && sinusNode.style.display !== "none",
+          `${block}: PAC focus fired during a sinus beat`);
+          step(start + beat.time + 10);
+          assert(marker.dataset.activating === "true" && marker.dataset.current === "true" &&
+            Number(marker.querySelector("circle").getAttribute("opacity")) > 0 &&
+            route.style.display !== "none", `${block}: PAC focus did not pulse and conduct`);
+          assert(doc.querySelector(".section-heading").textContent.trim() === "CONDUCTION MAP",
+            "A focus label appeared in the map header");
+          assert(sinusNode.style.display === "none" && sinusPathDot.getAnimations().length === 0,
+            `${block}: PAC falsely activated the sinus pathways`);
+          const movement = route.querySelector("polygon").getAnimations()[0];
+          close(movement.currentTime, 10, "PAC route timing");
+          close(movement.effect.getTiming().duration, 80, "PAC AV arrival timing");
+          step(start + beat.time + beat.pWave.duration + 1);
+          assert(marker.dataset.activating === "false", `${block}: PAC focus remained active after its P wave`);
+          step(start + next.time + 10);
+          assert(marker.dataset.current === "false" && route.style.display === "none" &&
+            sinusNode.style.display !== "none", `${block}: normal sinus activation did not return after PAC`);
+        }
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        change(av, "normal");
+        change(rhythm, "sinus");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
+    test("Junctional and escape beats use the shared focus marker and pulse with playback", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const av = doc.querySelector("#av-pattern");
+      const marker = doc.querySelector('[data-junctional-focus="junctional"]');
+      const atrialMarker = doc.querySelector('[data-atrial-focus="left"]');
+      const ring = marker.querySelector("circle");
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        assert(!marker.querySelector("text") &&
+          ring.getAttribute("stroke") === atrialMarker.querySelector("circle").getAttribute("stroke"),
+        "Junctional marker does not use the unnumbered atrial focus design");
+        for (const name of ["junctional", "junctional_tachy"]) {
+          change(rhythm, name);
+          const period = 60000 / Number(doc.querySelector("#heart-rate").value);
+          const start = now;
+          step(start + 10);
+          assert(marker.style.display !== "none" && marker.dataset.activating === "true",
+          `${name}: focus did not fire`);
+          assert(doc.querySelector(".section-heading").textContent.trim() === "CONDUCTION MAP",
+            "A junctional focus label appeared in the map header");
+          const initialRadius = Number(ring.getAttribute("r"));
+          step(start + 40);
+          assert(Number(ring.getAttribute("r")) > initialRadius, `${name}: focus pulse did not expand`);
+          step(start + 81);
+          assert(marker.dataset.activating === "false", `${name}: focus pulse did not end`);
+          step(start + period + 10);
+          assert(marker.dataset.activating === "true", `${name}: focus did not fire with the next beat`);
+        }
+        change(rhythm, "sinus");
+        change(av, "third");
+        const start = now;
+        assert(marker.style.display !== "none" && marker.dataset.activating === "false",
+          "Independent escape focus was not shown before its first firing");
+        step(start + 360);
+        assert(marker.dataset.activating === "true", "Independent escape beat did not pulse its focus");
+        step(start + 431);
+        assert(marker.dataset.activating === "false", "Independent escape focus did not stop pulsing");
+        change(av, "normal");
+        assert(marker.style.display === "none", "Junctional focus leaked into normal sinus rhythm");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        change(rhythm, "sinus");
+        change(av, "normal");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
       }
     });
     test("AVNRT and AVRT show distinct synchronized circuits and preserve AV settings", () => {
@@ -726,15 +1874,19 @@
           for (const [other, circuit] of Object.entries(circuits)) {
             assert((circuit.style.display !== "none") === (other === name), `${name} showed the wrong circuit`);
           }
-          const movement = circuits[name].querySelector("circle").getAnimations()[0];
-          close(movement.effect.getTiming().duration, 60000 / 180, `${name} circuit period`);
-          assert(movement.effect.getTiming().iterations === Infinity, `${name} circuit does not repeat`);
+          const movement = circuits[name].querySelector("polygon").getAnimations()[0];
+          if (name === "avnrt") {
+            close(movement.effect.getTiming().duration, 60000 / 180, `${name} circuit period`);
+            assert(movement.effect.getTiming().iterations === Infinity, `${name} circuit does not repeat`);
+          } else {
+            assert(!movement, "AVRT accessory pathway is active before ventricular depolarization");
+          }
           change(rate, "200");
-          close(circuits[name].querySelector("circle").getAnimations()[0].effect.getTiming().duration,
-            300, `${name} circuit did not follow the rate`);
+          if (name === "avnrt") {
+            close(circuits[name].querySelector("polygon").getAnimations()[0].effect.getTiming().duration,
+              300, `${name} circuit did not follow the rate`);
+          }
         }
-        assert(circuits.avrt.querySelector("path").getTotalLength() >
-          2 * circuits.avnrt.querySelector("path").getTotalLength(), "AVRT and AVNRT circuits are not anatomically distinct");
         const nodalPath = circuits.avnrt.querySelector("path");
         const nodalBounds = nodalPath.getBBox();
         const nodalStart = nodalPath.getPointAtLength(0);
@@ -742,14 +1894,14 @@
         assert(nodalStart.x > 365 && nodalStart.x < 380 && nodalBounds.y + nodalBounds.height > 355 &&
           nodalOutbound.y > nodalStart.y && nodalOutbound.x < nodalStart.x,
         "AVNRT loop does not descend below the AV node");
-        const avrtPath = circuits.avrt.querySelector("path");
-        const avrtStart = avrtPath.getPointAtLength(0);
-        assert(Math.hypot(avrtStart.x - 372, avrtStart.y - 302) < 3, "AVRT does not start at the AV node");
         const chamber = name => [...doc.querySelectorAll("#anatomy-overlays path")]
           .find(node => node.querySelector("title")?.textContent === name);
         const leftVentricle = chamber("Left Ventricle");
         const leftAtrium = chamber("Left Atrium");
         const accessory = circuits.avrt.querySelector('[data-accessory-path="avrt"]');
+        assert(circuits.avrt.querySelectorAll("path").length === 1 &&
+          accessory.getAttribute("d") === doc.querySelector('[data-accessory-path="wpw"]').getAttribute("d"),
+        "AVRT retained explicit loop connections or changed its accessory pathway");
         const accessoryStart = accessory.getPointAtLength(0);
         const accessoryEnd = accessory.getPointAtLength(accessory.getTotalLength());
         assert(leftVentricle.isPointInFill(accessoryStart) && leftAtrium.isPointInFill(accessoryEnd),
@@ -760,6 +1912,386 @@
       } finally {
         change(rhythm, "sinus");
         change(av, "normal");
+      }
+    });
+    test("Retrograde AVRT depolarizes the atria without activating nodal atrial pathways", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const accessory = doc.querySelector('[data-reentry-circuit="avrt"] polygon');
+      const atrialPaths = ["Atria1", "Atria2", "Atria3", "Atria4"]
+        .map(name => doc.querySelector(`[data-path="${name}"] polygon`));
+      const atria = ["Right Atrium", "Left Atrium"].map(name =>
+        [...doc.querySelectorAll("#anatomy-overlays path")].find(path => path.querySelector("title")?.textContent === name));
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const select = value => {
+        rhythm.value = value;
+        rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        assert(atrialPaths.every(Boolean) && atria.every(Boolean), "Atrial pathways or chambers are missing");
+        select("avrt");
+        const start = now;
+        step(start + 40);
+        assert(Number(win.getComputedStyle(accessory).opacity) > 0, "AVRT accessory conduction was suppressed");
+        step(start + 80);
+        assert(atria.every(path => Number(path.getAttribute("fill-opacity")) > 0), "AVRT did not depolarize both atria");
+        assert(atrialPaths.every(arrow => arrow.getAnimations().length === 0),
+          "AVRT incorrectly activated AV-node atrial pathways");
+        step(start + 60000 / 180 + 80);
+        assert(atria.every(path => Number(path.getAttribute("fill-opacity")) > 0) &&
+          atrialPaths.every(arrow => arrow.getAnimations().length === 0),
+        "AVRT atrial pathway arrows returned on the next beat");
+        for (const name of ["avnrt", "junctional"]) {
+          select(name);
+          const nextStart = now;
+          step(nextStart + 80);
+          assert(atria.every(path => Number(path.getAttribute("fill-opacity")) > 0),
+            `${name} did not depolarize the atria`);
+          assert(atrialPaths.every(arrow => Number(win.getComputedStyle(arrow).opacity) > 0 &&
+            win.getComputedStyle(arrow).offsetRotate.includes("180deg")),
+          `${name} did not retain reverse atrial pathway conduction`);
+        }
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        select("sinus");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
+    test("AVRT accessory dots appear only during each retrograde impulse", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const rate = doc.querySelector("#heart-rate");
+      const wpw = doc.querySelector("#wpw-enabled");
+      const speed = doc.querySelector("#speed");
+      const group = doc.querySelector('[data-reentry-circuit="avrt"]');
+      const path = group.querySelector("path");
+      const dot = group.querySelector("polygon");
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        change(rhythm, "avrt");
+        change(rate, "200");
+        for (const enabled of [false, true]) {
+          speed.value = "1";
+          speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+          wpw.checked = enabled;
+          wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+          const start = now;
+          step(start + 34);
+          assert(Number(win.getComputedStyle(dot).opacity) === 0, "Accessory dots appeared before ventricular activation");
+          step(start + 40);
+          let movement = dot.getAnimations()[0];
+          assert(movement?.playState === "paused" && Number(win.getComputedStyle(dot).opacity) > 0,
+            "Accessory impulse is not visible during ventricular depolarization");
+          close(movement.currentTime, 5, "Accessory impulse timing");
+          close(movement.effect.getTiming().duration, 30, "Accessory impulse duration");
+          for (const fraction of [0, 0.5]) {
+            movement.currentTime = fraction * movement.effect.getTiming().duration;
+            const actual = new win.DOMPoint(0, 0).matrixTransform(dot.getCTM());
+            const point = path.getPointAtLength(path.getTotalLength() * fraction);
+            const expected = new win.DOMPoint(point.x, point.y).matrixTransform(path.getCTM());
+            assert(Math.hypot(actual.x - expected.x, actual.y - expected.y) < 0.5,
+              "Accessory impulse did not travel from ventricle to atrium");
+            if (fraction === 0.5) assertArrowDirection(dot, path, fraction);
+          }
+          movement.currentTime = 5;
+          step(start + 70);
+          assert(Number(win.getComputedStyle(dot).opacity) === 0, "Accessory dots persisted after atrial activation");
+          step(start + 200);
+          assert(Number(win.getComputedStyle(dot).opacity) === 0, "Accessory dots remained visible between beats");
+          step(start + 340);
+          movement = dot.getAnimations()[0];
+          close(movement.currentTime, 5, "Next accessory impulse did not follow the tachycardia cycle");
+          speed.value = "0.5";
+          speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+          close(movement.currentTime, 5, "Changing speed moved a paused accessory impulse");
+          step(now + 20);
+          close(dot.getAnimations()[0].currentTime, 15, "Accessory impulse did not follow playback speed");
+          step(now + 40);
+          assert(Number(win.getComputedStyle(dot).opacity) === 0, "Slowed accessory impulse did not end");
+        }
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        change(rhythm, "sinus");
+        speed.value = "1";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
+    test("WPW accessory pathway conducts antegradely to the left ventricle at QRS onset", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const wpw = doc.querySelector("#wpw-enabled");
+      const av = doc.querySelector("#av-pattern");
+      const bundle = doc.querySelector("#bundle-pattern");
+      const group = doc.querySelector("[data-wpw-accessory]");
+      const path = group.querySelector('[data-accessory-path="wpw"]');
+      const dot = group.querySelector("polygon");
+      const depolarization = doc.querySelector("[data-wpw-depolarization]");
+      const chamber = name => [...doc.querySelectorAll("#anatomy-overlays path")]
+        .find(node => node.querySelector("title")?.textContent === name);
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        assert(group.style.display === "none", "WPW pathway is visible in sinus rhythm");
+        assert(path.getAttribute("d") === doc.querySelector('[data-accessory-path="avrt"]').getAttribute("d"),
+          "WPW does not use the existing left-sided pathway");
+        const ventricle = path.getPointAtLength(0);
+        const atrium = path.getPointAtLength(path.getTotalLength());
+        assert(chamber("Left Ventricle").isPointInFill(ventricle) && chamber("Left Atrium").isPointInFill(atrium),
+          "WPW pathway does not connect the left atrium and ventricle");
+        close(Number(depolarization.getAttribute("cx")), ventricle.x, "Accessory depolarization x coordinate");
+        close(Number(depolarization.getAttribute("cy")), ventricle.y, "Accessory depolarization y coordinate");
+        assert(doc.querySelector("#wpw-left-ventricle-clip path").getAttribute("d") ===
+          chamber("Left Ventricle").getAttribute("d"), "Accessory depolarization is not clipped to the left ventricle");
+        wpw.checked = true;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        assert(group.style.display !== "none" && dot.getAnimations().length > 0,
+          "WPW pathway is not active with normal AV conduction");
+        change(av, "third");
+        const start = now;
+        assert(group.style.display !== "none", "WPW accessory pathway is hidden");
+        step(start + 70);
+        close(Number(depolarization.getAttribute("fill-opacity")), 0, "Ventricle activated before the impulse arrived");
+        let movement = dot.getAnimations()[0];
+        assert(movement?.playState === "paused", "Accessory impulse did not follow playback");
+        close(movement.currentTime, 25, "Accessory impulse is not synchronized to the atrial beat");
+        close(movement.effect.getTiming().duration + 45, 100, "Accessory impulse does not reach QRS onset");
+        const originalTime = movement.currentTime;
+        movement.currentTime = 0;
+        const first = new win.DOMPoint(0, 0).matrixTransform(dot.getCTM());
+        const expected = new win.DOMPoint(atrium.x, atrium.y).matrixTransform(path.getCTM());
+        assert(Math.hypot(first.x - expected.x, first.y - expected.y) < 0.05, "WPW impulse did not start in the atrium");
+        movement.currentTime = movement.effect.getTiming().duration / 2;
+        const middle = new win.DOMPoint(0, 0).matrixTransform(dot.getCTM());
+        const halfway = path.getPointAtLength(path.getTotalLength() / 2);
+        const expectedMiddle = new win.DOMPoint(halfway.x, halfway.y).matrixTransform(path.getCTM());
+        assert(Math.hypot(middle.x - expectedMiddle.x, middle.y - expectedMiddle.y) < 0.5,
+          "WPW impulse left the accessory pathway");
+        assertArrowDirection(dot, path, 0.5, true);
+        movement.currentTime = originalTime;
+        step(start + 110);
+        assert(Number(depolarization.getAttribute("fill-opacity")) > 0 &&
+          Number(depolarization.getAttribute("r")) > 8, "Accessory arrival did not depolarize the left ventricle");
+        step(start + 211);
+        close(Number(depolarization.getAttribute("fill-opacity")), 0, "Accessory depolarization did not fade");
+        step(start + 60000 / 70 + 70);
+        movement = dot.getAnimations()[0];
+        close(movement.currentTime, 25, "Accessory impulse did not repeat with the next atrial beat");
+        step(start + 60000 / 70 + 110);
+        assert(Number(depolarization.getAttribute("fill-opacity")) > 0, "Accessory depolarization did not repeat");
+        change(bundle, "lbbb");
+        const blockedStart = now;
+        step(blockedStart + 110);
+        assert(Number(depolarization.getAttribute("fill-opacity")) > 0 &&
+          Number(chamber("Left Ventricle").getAttribute("fill-opacity")) === 0,
+        "Left bundle block suppressed early accessory-mediated depolarization");
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        assert(group.style.display === "none" && dot.getAnimations().length === 0,
+          "WPW pathway remained active after switching rhythms");
+        close(Number(depolarization.getAttribute("fill-opacity")), 0, "WPW depolarization remained in sinus rhythm");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        change(rhythm, "sinus");
+        change(av, "normal");
+        change(bundle, "none");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
+    test("WPW controls compose with rhythms, preserve selection, and display fibrillation", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const wpw = doc.querySelector("#wpw-enabled");
+      const av = doc.querySelector("#av-pattern");
+      const speed = doc.querySelector("#speed");
+      const group = doc.querySelector("[data-wpw-accessory]");
+      const avrt = doc.querySelector('[data-reentry-circuit="avrt"]');
+      const chamber = name => [...doc.querySelectorAll("#anatomy-overlays path")]
+        .find(node => node.querySelector("title")?.textContent === name);
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        assert(!rhythm.querySelector('option[value="wpw"]'), "WPW remains a selectable rhythm");
+        wpw.checked = true;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        change(av, "third");
+        assert(doc.querySelector("#escape-field").hidden, "Unused escape control is visible with pre-excitation");
+        change(rhythm, "flutter");
+        assert(group.style.display !== "none" && !doc.querySelector("#wpw-field").hidden,
+          "WPW is unavailable in flutter");
+        const start = now;
+        step(start + 670);
+        assert(doc.querySelector("#readout").textContent.includes("V 300 bpm"),
+          "Flutter with WPW does not show 1:1 ventricular rate");
+        assert(group.querySelector("polygon").getAnimations().length > 0,
+          "Flutter accessory pathway does not animate");
+        change(rhythm, "avnrt");
+        assert(doc.querySelector("#wpw-field").hidden && wpw.checked && group.style.display === "none",
+          "Unsupported rhythm did not retain but suppress WPW");
+        change(rhythm, "avrt");
+        assert(!doc.querySelector("#wpw-field").hidden && wpw.checked && group.style.display === "none" &&
+          avrt.style.display !== "none" && doc.querySelector("#qrs-readout").textContent === "90 ms" &&
+          doc.querySelector("#wpw-note").textContent.includes("without a delta wave"),
+        "AVRT did not retain its orthodromic loop and morphology");
+        change(rhythm, "afib");
+        assert(group.style.display !== "none" && group.querySelector("polygon").getAnimations().length > 0 &&
+          doc.querySelector("#rate-field").hidden && doc.querySelector("#escape-field").hidden,
+        "AF with WPW does not show pathway activity or shows unused controls");
+        assert(doc.querySelector("#readout").textContent === "A Fib · V Fib" &&
+          doc.querySelector("#qrs-readout").textContent === "Not measurable" &&
+          doc.querySelector("#pr-readout").textContent === "No P waves", "VF measurements are misleading");
+        const vfStart = now;
+        step(vfStart + 123);
+        const rv = chamber("Right Ventricle");
+        const lv = chamber("Left Ventricle");
+        assert(Number(rv.getAttribute("fill-opacity")) > 0 && Number(lv.getAttribute("fill-opacity")) > 0 &&
+          rv.getAttribute("fill-opacity") !== lv.getAttribute("fill-opacity"), "VF ventricular overlays are missing");
+        const frozen = [rv.getAttribute("fill-opacity"), lv.getAttribute("fill-opacity"), doc.querySelector("#time-readout").textContent];
+        const tileAnimation = doc.querySelector("#ecg-trace canvas").getAnimations()[0];
+        const tileTime = tileAnimation.currentTime;
+        speed.value = "0.5";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        assert(tileAnimation.currentTime === tileTime &&
+          JSON.stringify(frozen) === JSON.stringify([rv.getAttribute("fill-opacity"), lv.getAttribute("fill-opacity"),
+            doc.querySelector("#time-readout").textContent]), "Paused VF changed on speed adjustment");
+        step(now + 200);
+        const vf = new win.Conduction.Simulation({ rhythm: "afib", wpw: true, av: "third" });
+        close(Number(rv.getAttribute("fill-opacity")), 2 * vf.chamberOpacity(223, "rv"),
+          "VF ventricular opacity is out of sync after speed change");
+        close(Number(lv.getAttribute("fill-opacity")), 2 * vf.chamberOpacity(223, "lv"),
+          "VF ventricular opacity is out of sync after speed change");
+        close(Number.parseFloat(doc.querySelector("#time-readout").textContent) -
+          Number.parseFloat(frozen[2]), 0.1, "VF simulation clock did not follow playback speed");
+        change(rhythm, "junctional_tachy");
+        assert(doc.querySelector("#wpw-field").hidden && wpw.checked, "WPW was not suppressed for junctional tachycardia");
+        change(rhythm, "sinus");
+        assert(wpw.checked && !doc.querySelector("#wpw-field").hidden && group.style.display !== "none" &&
+          av.value === "third", "WPW or AV selection was not restored");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        change(rhythm, "sinus");
+        change(av, "normal");
+        speed.value = "1";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+      }
+    });
+    test("AF with WPW sends irregular antegrade pathway impulses on the playback clock", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const wpw = doc.querySelector("#wpw-enabled");
+      const speed = doc.querySelector("#speed");
+      const group = doc.querySelector("[data-wpw-accessory]");
+      const path = group.querySelector("path");
+      const dot = group.querySelector("polygon");
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        wpw.checked = true;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        rhythm.value = "afib";
+        rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+        const start = now;
+        step(start + 20);
+        let movement = dot.getAnimations()[0];
+        assert(movement?.playState === "paused", "Fibrillation pathway impulse is not paused with playback");
+        close(movement.currentTime, 20, "First fibrillation impulse timing");
+        movement.currentTime = 0;
+        const actual = new win.DOMPoint(0, 0).matrixTransform(dot.getCTM());
+        const atrium = path.getPointAtLength(path.getTotalLength());
+        const expected = new win.DOMPoint(atrium.x, atrium.y).matrixTransform(path.getCTM());
+        assert(Math.hypot(actual.x - expected.x, actual.y - expected.y) < 0.05,
+          "Fibrillation impulse does not start in the atrium");
+        movement.currentTime = 20;
+        const first = movement;
+        step(start + 170);
+        movement = dot.getAnimations()[0];
+        assert(movement && movement !== first, "A second pathway impulse was not generated");
+        close(movement.currentTime, 20, "Second fibrillation impulse timing");
+        const second = movement;
+        step(start + 380);
+        movement = dot.getAnimations()[0];
+        assert(movement && movement !== second, "An irregularly spaced pathway impulse was not generated");
+        close(movement.currentTime, 20, "Third fibrillation impulse timing");
+        speed.value = "0.5";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        assert(movement.currentTime === 20 && movement.playbackRate === 0.5,
+          "Changing speed moved a paused fibrillation impulse");
+        step(now + 40);
+        close(dot.getAnimations()[0].currentTime, 40, "Fibrillation impulse did not follow playback speed");
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        assert(group.style.display === "none" && dot.getAnimations().length === 0,
+          "Accessory pathway impulses persisted after WPW was disabled");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        rhythm.value = "sinus";
+        rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
+        speed.value = "1";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
       }
     });
     test("Flutter reentry loops at the atrial rate and follows playback controls", () => {
@@ -796,7 +2328,7 @@
           for (const edge of boundary) nearest = Math.min(nearest, Math.hypot(point.x - edge.x, point.y - edge.y));
         }
         assert(nearest < 1 && inside >= 490, "Circuit's southeast edge is not aligned inside the right atrium");
-        const dots = circuit.querySelectorAll("circle");
+        const dots = circuit.querySelectorAll("polygon");
         assert(dots.length > 1, "Circuit has no circulating dot trail");
         const movement = dots[0].getAnimations()[0];
         const trailing = dots[1].getAnimations()[0];
@@ -814,6 +2346,8 @@
         const pathPoint = path.getPointAtLength(path.getTotalLength() / 4);
         const expected = new win.DOMPoint(pathPoint.x, pathPoint.y).matrixTransform(path.getCTM());
         assert(Math.hypot(quarter.x - expected.x, quarter.y - expected.y) < 0.05, "Circuit dot left the loop");
+        movement.currentTime = 50;
+        assertArrowDirection(dots[0], path, 0.25);
         assert(Math.hypot(start.x - lap.x, start.y - lap.y) < 0.05, "Circuit does not close after one beat");
         movement.currentTime = 0;
         speedControl.value = "0.5";
@@ -835,7 +2369,7 @@
     test("Flutter pathway dots follow the independent sinus clock, not flutter beats", () => {
       const rhythm = doc.querySelector("#rhythm-pattern");
       const rate = doc.querySelector("#heart-rate");
-      const dot = doc.querySelector('[data-path="Atria1"] circle');
+      const dot = doc.querySelector('[data-path="Atria1"] polygon');
       const sinusNode = doc.querySelector('[data-node="SA node firing"]');
       const atrium = doc.querySelector('#anatomy-overlays path[fill="#ff0000"]');
       let callback;
@@ -882,7 +2416,7 @@
         win.requestAnimationFrame = originalRequest;
       }
     });
-    test("AV block marker follows failed impulses without covering conducted transit", () => {
+    test("Mobitz markers bracket dropped P waves at the AV node", () => {
       let callback;
       let now = doc.timeline.currentTime;
       const originalRequest = win.requestAnimationFrame;
@@ -891,11 +2425,110 @@
       const rhythm = doc.querySelector("#rhythm-pattern");
       const av = doc.querySelector("#av-pattern");
       const rate = doc.querySelector("#heart-rate");
-      const pr = doc.querySelector("#pr-interval");
-      const originalPr = pr.value;
+      const wpw = doc.querySelector("#wpw-enabled");
+      const markers = [...doc.querySelectorAll('[data-conduction-marker="block"]')];
+      const block = markers.find(node => node.querySelector("title").textContent === "Atrial impulse fails to conduct");
+      const hisBlock = markers.find(node => node.querySelector("title").textContent === "His-Purkinje conduction fails");
+      const visible = node => node.style.display !== "none";
+      const change = (input, value) => {
+        input.value = value;
+        input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      const step = time => {
+        pause.click();
+        callback(now = time);
+        pause.click();
+      };
+      try {
+        for (const [name, pattern, bypass] of [
+          ["sinus", "mobitz1", false], ["sinus", "mobitz2", false],
+          ["wandering", "mobitz1", false], ["pac", "mobitz2", false],
+          ["sinus", "mobitz2", true]
+        ]) {
+          change(rhythm, name);
+          change(av, pattern);
+          change(rate, "60");
+          wpw.checked = bypass;
+          wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+          const expected = new win.Conduction.Simulation({
+            rhythm: name, av: pattern, atrialRate: 60, wpw: bypass, randomSeed: 0
+          });
+          expected.advanceTo(9000);
+          const dropped = expected.atria[3];
+          const next = expected.atria[4];
+          const start = now;
+          step(start + dropped.time - 30.1);
+          assert(!visible(block) && !visible(hisBlock), `${name}/${pattern}: marker appeared too early`);
+          step(start + dropped.time - 29.9);
+          assert(visible(block) && !visible(hisBlock), `${name}/${pattern}: marker did not precede the dropped P wave`);
+          step(start + dropped.time + 80);
+          if (bypass) {
+            const dot = doc.querySelector("[data-wpw-accessory] polygon");
+            assert(visible(block) && Number(win.getComputedStyle(dot).opacity) > 0,
+              "Mobitz marker suppressed accessory-pathway conduction");
+            assert(expected.ventricles.some(beat => beat.time === dropped.time + 100 && beat.preexcited),
+              "WPW did not conduct the Mobitz-pattern beat");
+          } else {
+            assert(expected.events.some(event => event.type === "block" && event.beat === dropped &&
+              event.site === (pattern === "mobitz2" ? "his" : "av")),
+              `${name}/${pattern}: modeled block site changed`);
+          }
+          step(start + dropped.time + 200);
+          assert(visible(block) && !visible(hisBlock), `${name}/${pattern}: marker did not remain at the AV node`);
+          step(start + next.time - 30.1);
+          assert(visible(block) && !visible(hisBlock), `${name}/${pattern}: marker ended too early`);
+          step(start + next.time - 29.9);
+          assert(!visible(block) && !visible(hisBlock), `${name}/${pattern}: marker did not clear before the next P wave`);
+          step(start + next.time + 100);
+          assert(!visible(block) && !visible(hisBlock), `${name}/${pattern}: marker covered the next P wave`);
+        }
+
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        change(rhythm, "sinus");
+        change(av, "mobitz1");
+        change(rate, "60");
+        const start = now;
+        step(start + 1700);
+        const tile = doc.querySelector("#ecg-trace canvas");
+        const width = doc.querySelector("#ecg-waveform").getBoundingClientRect().width;
+        const half = width * 5000 / (2 * parseFloat(tile.style.width));
+        const padding = Math.ceil(4 * Math.min(win.devicePixelRatio || 1, 2)) * 5000 / tile.width;
+        const transition = 1700 + half + padding;
+        resetSelectionsImmediately(false);
+        change(rhythm, "atrial_tachy");
+        step(start + 3000);
+        assert(visible(block), "Queued transition hid the dropped-beat marker too early");
+        step(start + transition - 30.1);
+        assert(visible(block), "Marker did not persist until just before the queued P wave");
+        step(start + transition - 29.9);
+        assert(!visible(block), "Marker did not clear before the queued P wave");
+        step(start + transition + 100);
+        assert(!visible(block), "Marker leaked into the next scenario");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        resetSelectionsImmediately(false);
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        change(rhythm, "sinus");
+        change(av, "normal");
+        change(rate, "70");
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = originalRequest;
+        resetSelectionsImmediately(true);
+      }
+    });
+    test("AV block marker follows failed impulses without covering conducted transit", () => {
+      let callback;
+      let now = doc.timeline.currentTime;
+      const originalRequest = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const av = doc.querySelector("#av-pattern");
+      const wpw = doc.querySelector("#wpw-enabled");
       const block = [...doc.querySelectorAll('[data-conduction-marker="block"]')]
         .find(node => node.querySelector("title").textContent === "Atrial impulse fails to conduct");
-      const delay = doc.querySelector('[data-conduction-marker="delay"]');
       const avNode = doc.querySelector('[data-node="AV nodal transit"]');
       const visible = node => node.style.display !== "none";
       const change = (input, value) => {
@@ -925,28 +2558,41 @@
         step(start + 681);
         assert(visible(block), "Next blocked flutter impulse was not marked");
 
-        change(av, "first");
-        change(pr, "380");
-        change(rate, "360");
+        wpw.checked = true;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        const slider = doc.querySelector("#av-refractory");
+        slider.value = "410";
+        slider.dispatchEvent(new win.Event("input", { bubbles: true }));
         start = now;
-        step(start + 250);
-        assert(!visible(block) && visible(avNode) && visible(delay),
-          "A blocked impulse obscured overlapping conducted AV transit");
-        step(start + 330);
-        assert(!visible(block) && visible(avNode), "AV block marker reappeared during conducted transit");
-
+        step(start + 81);
+        assert(!visible(block) && visible(avNode), "WPW hid a conducted AV nodal impulse");
+        step(start + 281);
+        assert(visible(block) && !visible(avNode), "WPW hid a refractory AV nodal impulse");
+        step(start + 481);
+        assert(visible(block) && !visible(avNode), "Longer refractoriness did not block the next impulse");
+        step(start + 681);
+        assert(!visible(block) && visible(avNode), "WPW AV node did not recover at the expected beat");
+        assert(doc.querySelector("#readout").textContent.includes("1:1"),
+          "Refractory AV node blocked accessory-pathway conduction");
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        slider.value = "350";
+        slider.dispatchEvent(new win.Event("input", { bubbles: true }));
+        change(rhythm, "sinus");
         change(av, "third");
         start = now;
         step(start + 1600);
         assert(visible(block), "Complete AV block did not retain its marker");
-        change(rhythm, "wpw");
+        wpw.checked = true;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
         start = now;
         step(start + 90);
         assert(visible(block) && !visible(avNode), "Pre-excitation appeared to cross the completely blocked AV node");
       } finally {
         if (pause.textContent === "Pause") pause.click();
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
         change(av, "normal");
-        change(pr, originalPr);
         change(rhythm, "sinus");
         delete doc.timeline.currentTime;
         win.requestAnimationFrame = originalRequest;
@@ -976,21 +2622,34 @@
       }
     });
 
-    test("Electrical dots follow the saved path continuously at subframe positions", () => {
+    test("Conduction arrows follow and point along the saved path at subframe positions", () => {
       const group = doc.querySelector('[data-path="Atria1"]');
-      const dot = group.querySelector("circle");
+      const dot = group.querySelector("polygon");
       const movement = dot.getAnimations()[0];
       const path = group.previousElementSibling;
       const root = doc.querySelector("#anatomy").getCTM();
       const originalTime = movement.currentTime;
       try {
-        assert(group.querySelectorAll("circle").length === 24, "Dense dot trail is missing");
+        assert(!doc.querySelector(".arrow-controls") && !doc.querySelector("[data-arrow-setting]"),
+          "Temporary arrow controls are still visible");
+        assert(group.querySelectorAll("polygon").length > 1, "Arrow trail is missing");
+        const trailing = group.querySelectorAll("polygon")[1];
+        close(dot.getBBox().width, 23, "Leading arrow length");
+        close(dot.getBBox().height, 20, "Leading arrow width");
+        close(trailing.getBBox().width, 11.5, "Trailing arrow length");
+        close(trailing.getBBox().height, 10, "Trailing arrow width");
+        close(Number(dot.getAttribute("stroke-width")), 0.9, "Arrow outline thickness");
+        assert(dot.points.numberOfItems === 3, "Arrow tail is not flat");
+        assert(group.querySelectorAll("polygon").length === Math.min(14, Math.ceil(path.getTotalLength() / 7)),
+          "Arrow trail length or spacing is incorrect");
+        close(trailing.getAnimations()[0].effect.getTiming().delay, 90 * 7 / path.getTotalLength(), "Arrow spacing");
         for (const time of [12.5, 37.5, 62.5]) {
           movement.currentTime = time;
           const actual = new win.DOMPoint(0, 0).matrixTransform(dot.getCTM());
           const point = path.getPointAtLength(path.getTotalLength() * time / 90);
           const expected = new win.DOMPoint(point.x, point.y).matrixTransform(root);
           assert(Math.hypot(actual.x - expected.x, actual.y - expected.y) < 0.05, "Native dot left its saved conduction path");
+          assertArrowDirection(dot, path, time / 90);
         }
       } finally {
         movement.currentTime = originalTime;
@@ -1027,23 +2686,33 @@
       try {
         speed.value = "1";
         speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        const ratio = doc.querySelector("#ecg-canvas").getContext("2d").getTransform().a;
+        const viewport = Math.round((doc.querySelector("#ecg-plot").getBoundingClientRect().width - 88) * ratio) / ratio;
+        const half = viewport * 5000 / (2 * (initialTile.width / ratio));
+        const currentTime = Number(initialTile.dataset.ecgTile) * 5000 - half + animation.currentTime;
+        const index = Math.max(...[...trace.querySelectorAll("canvas")].map(tile => Number(tile.dataset.ecgTile))) + 1;
         pause.click();
         const getTile = index => trace.querySelector(`[data-ecg-tile="${index}"]`);
         const runFrame = elapsed => frameCallback(now = start + elapsed);
-        runFrame(1800);
-        assert(!getTile(1) && idleCallback, "An offscreen tile was not deferred to idle time");
+        runFrame(index * 5000 - currentTime);
+        const currentTile = getTile(index);
+        const currentAnimation = currentTile.getAnimations()[0];
+        idleCallback = null;
+        runFrame(index * 5000 + 1800 - currentTime);
+        assert(!getTile(index + 1) && idleCallback,
+          `An offscreen tile was not deferred to idle time (tile: ${!!getTile(index + 1)}, callback: ${!!idleCallback}, clock: ${doc.querySelector("#time-readout").textContent})`);
         idleCallback();
-        const nextTile = getTile(1);
+        const nextTile = getTile(index + 1);
         assert(nextTile, "The next tile was not ready before entering the viewport");
         const nextAnimation = nextTile.getAnimations()[0];
-        runFrame(5000);
-        assert(getTile(0) === initialTile && initialTile.getAnimations()[0] === animation,
+        runFrame((index + 1) * 5000 - currentTime);
+        assert(getTile(index) === currentTile && currentTile.getAnimations()[0] === currentAnimation,
           "Adding a tile replaced or restarted the visible waveform");
-        assert(getTile(1) === nextTile && nextTile.getAnimations()[0] === nextAnimation,
+        assert(getTile(index + 1) === nextTile && nextTile.getAnimations()[0] === nextAnimation,
           "Entering the viewport replaced the prefetched tile");
-        close(nextAnimation.startTime - animation.startTime, 5000, "Tile animations are not on the same clock");
-        runFrame(8800); // Skip idle time at this handoff.
-        assert(!getTile(0) && getTile(1) === nextTile && getTile(2), "Tiles were not recycled safely when idle time was unavailable");
+        close(nextAnimation.startTime - currentAnimation.startTime, 5000, "Tile animations are not on the same clock");
+        runFrame(index * 5000 + 8800 - currentTime);
+        assert(!getTile(index) && getTile(index + 1) === nextTile && getTile(index + 2), "Tiles were not recycled safely when idle time was unavailable");
         assert(trace.childElementCount === 2, "Retired ECG tiles remained mounted");
       } finally {
         if (pause.textContent === "Pause") pause.click();
@@ -1090,6 +2759,108 @@
       } finally {
         if (pause.textContent === "Pause") pause.click();
         delete doc.timeline.currentTime;
+      }
+    });
+    test("Rhythm source highlighting follows the playhead and modeled sources", () => {
+      const toggle = doc.querySelector("#highlight-source");
+      const trace = doc.querySelector("#ecg-trace");
+      const av = doc.querySelector("#av-pattern");
+      const pvcFocus = doc.querySelector("#pvc-focus");
+      const speed = doc.querySelector("#speed");
+      const visibleSources = () => [...doc.querySelectorAll("[data-source-highlight]")]
+        .filter(node => node.style.display !== "none").map(node => node.dataset.sourceHighlight).sort().join(",");
+      const change = (control, value) => {
+        control.value = value;
+        control.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      let callback;
+      let now = doc.timeline.currentTime;
+      const request = win.requestAnimationFrame;
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      win.requestAnimationFrame = fn => { callback = fn; return 1; };
+      resetSelectionsImmediately(false);
+      const step = () => {
+        pause.click();
+        callback(now += 2000);
+        pause.click();
+      };
+      const expect = (value, sources) => {
+        change(rhythmControl, value);
+        step();
+        assert(visibleSources() === sources, `${value}: expected ${sources || "no source"}, got ${visibleSources()}`);
+      };
+      try {
+        speed.value = "1";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        change(av, "normal");
+        expect("sinus", "");
+        assert(!toggle.checked && doc.querySelector("#source-description").textContent === "Highlighting off",
+          "Source highlighting should be off by default");
+        const tile = trace.querySelector("canvas");
+        const animation = tile.getAnimations()[0];
+        const animationTime = animation.currentTime;
+        const time = doc.querySelector("#time-readout").textContent;
+        toggle.click();
+        assert(visibleSources() === "sinus" && doc.querySelector("#source-description").textContent.includes("SA node"),
+          "Sinus source was not highlighted");
+        assert(trace.contains(tile) && animation.currentTime === animationTime &&
+          doc.querySelector("#time-readout").textContent === time, "Highlight toggle changed ECG playback");
+        change(rhythmControl, "flutter");
+        assert(visibleSources() === "sinus", "Queued rhythm highlighted before reaching the playhead");
+        step();
+        assert(visibleSources() === "flutter", "Highlight did not follow the rhythm at the playhead");
+        toggle.click();
+        assert(!visibleSources() && doc.querySelector("#source-description").textContent === "Highlighting off",
+          "Turning highlighting off left the source visible");
+        toggle.click();
+        expect("pac", "left,sinus");
+        expect("atrial_tachy", "left");
+        expect("junctional", "junctional");
+        expect("junctional_tachy", "junctional");
+        expect("avnrt", "avnrt");
+        expect("avrt", "avrt,junctional");
+        change(pvcFocus, "lv");
+        step();
+        expect("pvc", "sinus,ventricular");
+        const ventricular = doc.querySelector('[data-source-highlight="ventricular"]');
+        const leftX = ventricular.getAttribute("cx");
+        change(pvcFocus, "rv");
+        assert(ventricular.getAttribute("cx") === leftX, "PVC focus moved before its queued change reached the playhead");
+        step();
+        assert(ventricular.getAttribute("cx") !== leftX &&
+          doc.querySelector("#source-description").textContent.includes("Right ventricular"),
+        "PVC source did not follow the selected ventricular focus");
+        expect("sinus", "sinus");
+        change(av, "third");
+        step();
+        assert(visibleSources() === "junctional,sinus", "Complete block omitted an independent pacemaker");
+        change(av, "normal");
+        step();
+        for (const rhythm of ["wandering", "multifocal_atrial_tachy"]) {
+          change(rhythmControl, rhythm);
+          step();
+          const seen = new Set();
+          for (let i = 0; i < 4; i++) {
+            const current = doc.querySelector('[data-atrial-focus][data-current="true"]');
+            assert(current && visibleSources() === current.dataset.atrialFocus,
+              `${rhythm}: highlight does not match the current atrial focus`);
+            seen.add(visibleSources());
+            step();
+          }
+          assert(seen.size > 1, `${rhythm}: highlight did not follow changing foci`);
+        }
+        for (const rhythm of ["afib", "vfib", "vt"]) {
+          expect(rhythm, "");
+          assert(doc.querySelector("#source-description").textContent === "No discrete source modeled",
+            `${rhythm}: missing no-source explanation`);
+        }
+        toggle.click();
+        assert(!visibleSources() && doc.querySelector("#source-description").textContent === "Highlighting off",
+          "Turning highlighting off left the source visible");
+      } finally {
+        if (pause.textContent === "Pause") pause.click();
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = request;
       }
     });
   } catch (error) {

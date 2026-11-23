@@ -6,7 +6,15 @@
   const TILE_MS = EcgStrip.tileMs;
   const ECG_LOOKAHEAD_MS = 2000;
   const AV_BLOCK_MARKER_MS = 100;
+  const MOBITZ_MARKER_LEAD_MS = 30;
   const KEY = "ecg-lecture-lab.waveforms.v1";
+  const ARROW_SPACING = 7;
+  const ARROW_TRAIL = 96;
+  const LEFT_ACCESSORY_PATH = "M 505 312 C 499 292 495 276 484 251";
+  const FIBRILLATION_PATHWAY_PERIOD = 1400;
+  const FIBRILLATION_PATHWAY_STARTS = [0, 150, 360, 540, 790, 960, 1180];
+  const FIBRILLATION_PATHWAY_DURATION = 90;
+  const VENTRICULAR_FOCI = { lv: [0.637, 0.674], rv: [0.498, 0.789] };
   const REENTRY_CIRCUITS = [{
     rhythm: "flutter",
     label: "Atrial flutter reentry circuit",
@@ -19,8 +27,8 @@
   }, {
     rhythm: "avrt",
     label: "Orthodromic AVRT: schematic left-sided accessory pathway",
-    path: "M 372 302 C 388 307 397 322 400 339 C 404 366 425 393 448 411 C 480 435 510 460 531 458 C 549 457 548 436 540 410 C 531 377 516 343 505 312 C 499 292 495 276 484 251 C 475 247 453 238 431 240 C 400 240 374 253 368 271 C 363 286 367 297 372 302 Z",
-    accessoryPath: "M 505 312 C 499 292 495 276 484 251"
+    path: LEFT_ACCESSORY_PATH,
+    accessoryPath: true
   }];
   const $ = selector => document.querySelector(selector);
   const canvas = $("#ecg-canvas");
@@ -32,6 +40,8 @@
   const settings = { ...defaults };
   let simulation;
   let ecgStrip;
+  let ecgOffset = 0;
+  const pendingScenarios = [];
   let paused = false;
   let speed = 1;
   let frame = 0;
@@ -44,6 +54,7 @@
   const reentryCircuits = [];
   const ecgTiles = new Map();
   let prefetchPending = false;
+  let prefetchVersion = 0;
   let ecgViewport;
   let activeId = "automatic";
   let library = [];
@@ -51,9 +62,13 @@
   let blockMarkers = [];
   let avDelayMarker;
   let crossPath;
+  let wpwAccessory;
+  let wpwDepolarization;
   let sinusDots;
   let avDots;
-  let escapeDots;
+  let junctionalMarker;
+  let ventricularFocusMarker;
+  const sourceHighlights = new Map();
   const focusMarkers = new Map();
   const focusRoutes = new Map();
   let canvasWidth = 0;
@@ -93,7 +108,10 @@
 
   function scenarioSettings(overrides = {}) {
     const scenario = { ...settings, ...overrides };
-    return rhythms[scenario.rhythm]?.avReentry ? { ...scenario, av: "normal" } : scenario;
+    if (!rhythms[scenario.rhythm]?.wpw) scenario.wpw = false;
+    if (rhythms[scenario.rhythm]?.avReentry || rhythms[scenario.rhythm]?.independentVentricular ||
+        ["afib", "flutter"].includes(scenario.rhythm)) scenario.av = "normal";
+    return scenario;
   }
 
   function saveLibrary(message) {
@@ -116,28 +134,51 @@
 
   function updateScenario() {
     const rhythm = rhythms[settings.rhythm];
-    const av = simulation.settings.av;
+    const selected = pendingScenarios.at(-1)?.model || simulation;
+    const av = selected.settings.av;
     $("#rhythm-pattern").value = settings.rhythm;
     $("#rate-label").textContent = rhythm.rateLabel;
     $("#heart-rate").min = rhythm.minRate;
     $("#heart-rate").max = rhythm.maxRate;
     $("#heart-rate").value = settings.atrialRate;
+    $("#pvc-focus").value = settings.pvcFocus;
+    $("#pvc-focus-field").hidden = settings.rhythm !== "pvc";
+    const usesRefractoriness = ["afib", "flutter"].includes(settings.rhythm);
+    $("#rate-field").hidden = ["afib", "vfib"].includes(settings.rhythm);
+    $("#av-field").hidden = usesRefractoriness || !!rhythm.independentVentricular;
+    $("#refractory-field").hidden = !usesRefractoriness;
+    $("#av-refractory").value = settings.avRefractory;
+    $("#av-refractory").disabled = selected.settings.wpw && settings.rhythm === "afib";
+    $("#refractory-value").textContent = `${settings.avRefractory} ms`;
+    $("#refractory-note").textContent = selected.settings.wpw ?
+      settings.rhythm === "flutter" ?
+        "Adjust AV nodal conduction; the accessory pathway still conducts every flutter beat." :
+        "WPW bypasses the AV node; this setting does not affect the rhythm." :
+      "Longer refractory periods reduce AV nodal conduction.";
+    $("#wpw-field").hidden = !rhythm.wpw;
+    $("#wpw-enabled").checked = settings.wpw;
+    $("#wpw-note").textContent = settings.rhythm === "avrt" ?
+      "AVRT remains orthodromic: the accessory pathway conducts retrogradely, without a delta wave." :
+      settings.rhythm === "afib" && settings.wpw ?
+        "AF with WPW is illustrated as immediate ventricular fibrillation." :
+        "The pathway bypasses the selected AV block when conducting antegradely.";
     $("#av-pattern").value = av;
     $("#av-pattern").disabled = !!rhythm.avReentry;
-    $("#av-reentry-note").hidden = !rhythm.avReentry;
+    $("#av-reentry-note").hidden = !rhythm.avReentry && !rhythm.independentVentricular;
     $("#junctional-av-note").hidden = !rhythm.junctional || av === "normal";
-    $("#pr-field").hidden = av !== "first";
-    $("#wenckebach-field").hidden = av !== "mobitz1";
-    $("#pr-step-field").hidden = av !== "mobitz1";
-    $("#ratio-field").hidden = !["mobitz1", "mobitz2"].includes(av);
-    $("#escape-field").hidden = av !== "third";
+    const bypassesAv = selected.preexcitation || selected.ventricularFibrillation;
+    $("#pr-field").hidden = bypassesAv || av !== "first";
+    $("#wenckebach-field").hidden = bypassesAv || av !== "mobitz1";
+    $("#pr-step-field").hidden = bypassesAv || av !== "mobitz1";
+    $("#ratio-field").hidden = bypassesAv || !["mobitz1", "mobitz2"].includes(av);
+    $("#escape-field").hidden = bypassesAv || av !== "third";
     $("#custom-warning").hidden = activeId === "automatic";
     blockMarkers.forEach(marker => {
-      marker.node.style.display = marker.bundle === settings.bundle ? "" : "none";
+      marker.node.style.display = marker.bundle === simulation.settings.bundle ? "" : "none";
     });
     for (const item of anatomyItems.filter(item => item.type === "path")) {
       const bundle = item.name === "Right Bundle" ? "rbbb" : item.name === "Left Bundle" ? "lbbb" : null;
-      item.path.setAttribute("stroke", bundle && settings.bundle === bundle ? "#b42318" : "#a18a20");
+      item.path.setAttribute("stroke", bundle && simulation.settings.bundle === bundle ? "#b42318" : "#a18a20");
     }
   }
 
@@ -146,28 +187,49 @@
   }
 
   function advanceClock(now = timelineTime()) {
-    if (!paused && !suspended) simulation.advanceTo(clockSimulation + Math.max(0, now - clockTime) * speed);
+    if (paused || suspended) return;
+    const target = clockSimulation + Math.max(0, now - clockTime) * speed;
+    let changed = false;
+    while (pendingScenarios.length && pendingScenarios[0].start <= target) {
+      const next = pendingScenarios.shift();
+      simulation.advanceTo(next.start - ecgOffset);
+      simulation = next.model;
+      ecgOffset = next.start;
+      changed = true;
+    }
+    simulation.advanceTo(target - ecgOffset);
+    if (changed) {
+      const tiles = new Set([...ecgTiles.values()].map(tile => tile.animation));
+      for (const animation of animations.keys()) {
+        if (!tiles.has(animation)) cancelAnimation(animation);
+      }
+      for (const impulse of impulses) { impulse.key = null; impulse.animations = []; }
+      startReentryCircuits();
+      updateScenario();
+      updatePlaybackStatus();
+    }
   }
 
   function anchorClock() {
     clockTime = timelineTime();
-    clockSimulation = simulation.now;
+    clockSimulation = ecgOffset + simulation.now;
   }
 
   function alignAnimation(animation, start) {
     animation.pause();
     animation.playbackRate = speed;
-    animation.currentTime = simulation.now - start;
-    if (!paused && !suspended && simulation.now - start < animation.effect.getComputedTiming().endTime) {
+    animation.currentTime = ecgOffset + simulation.now - start;
+    if (!paused && !suspended && ecgOffset + simulation.now - start < animation.effect.getComputedTiming().endTime) {
       animation.play();
       animation.startTime = clockTime + (start - clockSimulation) / speed;
     }
   }
 
-  function registerAnimation(element, keyframes, timing, start) {
+  function registerAnimation(element, keyframes, timing, start, global = false) {
     const animation = element.animate(keyframes, timing);
-    animations.set(animation, start);
-    alignAnimation(animation, start);
+    const recordingStart = global ? start : ecgOffset + start;
+    animations.set(animation, recordingStart);
+    alignAnimation(animation, recordingStart);
     return animation;
   }
 
@@ -182,17 +244,51 @@
   }
 
   function restart() {
+    prefetchPending = false;
+    prefetchVersion++;
     clearEcgTiles();
     for (const animation of animations.keys()) animation.cancel();
     animations.clear();
     for (const impulse of impulses) { impulse.key = null; impulse.animations = []; }
-    simulation = new Simulation(scenarioSettings(), currentMorphology());
-    ecgStrip = new EcgStrip(new Simulation(scenarioSettings(), currentMorphology()));
+    const scenario = scenarioSettings({ randomSeed: Math.floor(Math.random() * 4294967296) });
+    simulation = new Simulation(scenario, currentMorphology());
+    ecgStrip = new EcgStrip(new Simulation(scenario, currentMorphology()));
+    ecgOffset = 0;
+    pendingScenarios.length = 0;
     anchorClock();
     updateScenario();
+    updatePlaybackStatus();
     startReentryCircuits();
     draw(true);
     scheduleFrame();
+  }
+
+  function queueScenarioChange() {
+    advanceClock();
+    const padding = Math.ceil(4 * ecgStrip.geometry.ratio) * TILE_MS / ecgStrip.geometry.tileWidth;
+    const start = Math.max(ecgOffset + simulation.now + ecgStrip.halfWindowMs + padding,
+      pendingScenarios.at(-1)?.start ?? 0);
+    const scenario = scenarioSettings({ randomSeed: Math.floor(Math.random() * 4294967296) });
+    const model = new Simulation(scenario, currentMorphology());
+    ecgStrip.append(new Simulation(scenario, currentMorphology()), start);
+    if (pendingScenarios.at(-1)?.start === start) pendingScenarios.pop();
+    pendingScenarios.push({ start, model });
+    const previousTiles = new Map();
+    for (const [index, tile] of ecgTiles) {
+      if ((index + 1) * TILE_MS + padding >= start) {
+        previousTiles.set(index, tile.image);
+        removeEcgTile(index, tile);
+      }
+    }
+    updateScenario();
+    updatePlaybackStatus();
+    syncEcgTiles(0, previousTiles, start - padding);
+    draw(true);
+    scheduleFrame();
+  }
+
+  function updatePlaybackStatus() {
+    $("#monitor-status").textContent = `${paused ? "PAUSED" : "RUNNING"}${pendingScenarios.length ? " · CHANGE QUEUED" : ""}`;
   }
 
   function setPaused(value) {
@@ -200,12 +296,12 @@
     paused = value;
     $("#pause-button").textContent = paused ? "Resume" : "Pause";
     $("#pause-button").setAttribute("aria-pressed", String(paused));
-    $("#monitor-status").textContent = paused ? "PAUSED" : "RUNNING";
+    updatePlaybackStatus();
     anchorClock();
     draw();
     for (const [animation, start] of animations) alignAnimation(animation, start);
     drawReadouts(true);
-    if (paused) { cancelAnimationFrame(frame); frame = 0; }
+    if (paused) { prefetchPending = false; prefetchVersion++; cancelAnimationFrame(frame); frame = 0; }
     else scheduleFrame();
   }
 
@@ -271,16 +367,30 @@
     for (const [index, tile] of ecgTiles) removeEcgTile(index, tile);
   }
 
-  function syncEcgTiles(lookahead) {
+  function syncEcgTiles(lookahead, previousTiles = null, preserveUntil = 0) {
     const half = ecgStrip.halfWindowMs;
-    const first = Math.max(0, Math.floor((simulation.now - half) / TILE_MS));
-    const last = Math.floor((simulation.now + half + lookahead) / TILE_MS);
+    const now = ecgOffset + simulation.now;
+    const first = Math.max(0, Math.floor((now - half) / TILE_MS));
+    const last = Math.floor((now + half + lookahead) / TILE_MS);
     for (const [index, tile] of ecgTiles) {
       if (index < first) removeEcgTile(index, tile);
     }
+    const paddingMs = Math.ceil(4 * ecgStrip.geometry.ratio) * TILE_MS / ecgStrip.geometry.tileWidth;
+    ecgStrip.discardBefore(Math.max(0, first * TILE_MS - paddingMs));
     for (let index = first; index <= last; index++) {
       if (ecgTiles.has(index)) continue;
       const image = ecgStrip.renderTile(index);
+      const previous = previousTiles?.get(index);
+      if (previous) {
+        // Preserve visible pixels: extending a canvas path can change its rasterization.
+        const width = Math.max(0, Math.min(image.width,
+          Math.floor((preserveUntil - index * TILE_MS) * image.width / TILE_MS)));
+        if (width) {
+          const context = image.getContext("2d");
+          context.clearRect(0, 0, width, image.height);
+          context.drawImage(previous, 0, 0, width, image.height, 0, 0, width, image.height);
+        }
+      }
       image.dataset.ecgTile = index;
       image.style.width = `${ecgStrip.tileWidth}px`;
       image.style.height = `${image.height / ecgStrip.geometry.ratio}px`;
@@ -289,7 +399,7 @@
       const animation = registerAnimation(image, [
         { transform: `translate3d(${ecgViewport.right - ecgViewport.left}px, 0, 0)` },
         { transform: `translate3d(${-ecgStrip.tileWidth}px, 0, 0)` }
-      ], { duration: TILE_MS + 2 * half, fill: "both" }, index * TILE_MS - half);
+      ], { duration: TILE_MS + 2 * half, fill: "both" }, index * TILE_MS - half, true);
       ecgTiles.set(index, { image, animation });
     }
   }
@@ -297,10 +407,12 @@
   function updateEcg(force) {
     if (force && ecgStrip.configure(ecgViewport, ctx.getTransform().a)) clearEcgTiles();
     syncEcgTiles(0);
-    const next = Math.floor((simulation.now + ecgStrip.halfWindowMs + ECG_LOOKAHEAD_MS) / TILE_MS);
+    const next = Math.floor((ecgOffset + simulation.now + ecgStrip.halfWindowMs + ECG_LOOKAHEAD_MS) / TILE_MS);
     if (paused || suspended || prefetchPending || ecgTiles.has(next)) return;
     prefetchPending = true;
+    const version = ++prefetchVersion;
     const prefetch = () => {
+      if (version !== prefetchVersion) return;
       prefetchPending = false;
       if (!paused && !suspended) syncEcgTiles(ECG_LOOKAHEAD_MS);
     };
@@ -322,8 +434,9 @@
     impulse.key = key;
     if (start === null || simulation.now > start + duration) return;
     impulse.dots.forEach((dot, index) => {
-      const trailing = index * 4 / impulse.length;
+      const trailing = index * ARROW_SPACING / impulse.length;
       const opacity = 1 - index * 0.023;
+      dot.style.offsetRotate = reverse ? "auto 180deg" : "auto";
       const animation = registerAnimation(dot, [
         { offsetDistance: reverse ? "100%" : "0%", opacity },
         { offsetDistance: `${(reverse ? trailing : 1 - trailing) * 100}%`, opacity }
@@ -341,11 +454,19 @@
   function addImpulse(parent, path, label, dotLimit = 24) {
     const length = path.getTotalLength();
     const group = svgElement("g", { class: "impulse-dots", "data-path": label });
-    const dots = Array.from({ length: Math.min(dotLimit, Math.ceil(length / 4)) }, (_, index) => {
-      const dot = addDot(group, { r: index === 0 ? 4.5 : 3 });
+    const count = Math.min(Math.ceil(ARROW_TRAIL * dotLimit / 24 / ARROW_SPACING), Math.ceil(length / ARROW_SPACING));
+    const dots = Array.from({ length: count }, (_, index) => {
+      const scale = index === 0 ? 2 : 1;
+      const halfLength = 11.5 * scale / 2;
+      const halfWidth = 10 * scale / 2;
+      const dot = svgElement("polygon", {
+        points: `${-halfLength},${-halfWidth} ${halfLength},0 ${-halfLength},${halfWidth}`,
+        fill: "#ffea54", stroke: "#8b5900", "stroke-width": 0.9, "stroke-linejoin": "round"
+      });
+      group.append(dot);
       dot.style.opacity = "0";
       dot.style.offsetPath = `path("${path.getAttribute("d")}")`;
-      dot.style.offsetRotate = "0deg";
+      dot.style.offsetRotate = "auto";
       return dot;
     });
     parent.append(group);
@@ -354,37 +475,45 @@
     return impulse;
   }
 
-  function addReentryCircuit(parent, definition) {
-    const group = svgElement("g", { "data-reentry-circuit": definition.rhythm });
+  function addAccessoryPath(parent, rhythm, pathData, label) {
     const path = svgElement("path", {
-      d: definition.path, fill: "none", stroke: "#a18a20", "stroke-width": 2, "stroke-opacity": 0.8
+      d: pathData, fill: "none", stroke: "#007b56", "stroke-width": 3,
+      "stroke-dasharray": "4 3", "data-accessory-path": rhythm
     });
     const title = svgElement("title");
-    title.textContent = definition.label;
+    title.textContent = label;
     path.append(title);
-    group.append(path);
+    parent.append(path);
+    return path;
+  }
+
+  function addReentryCircuit(parent, definition) {
+    const group = svgElement("g", { "data-reentry-circuit": definition.rhythm });
+    let path;
     if (definition.accessoryPath) {
-      const accessory = svgElement("path", {
-        d: definition.accessoryPath, fill: "none", stroke: "#007b56", "stroke-width": 3,
-        "stroke-dasharray": "4 3", "data-accessory-path": definition.rhythm
+      path = addAccessoryPath(group, definition.rhythm, definition.path, "Retrograde left-sided accessory pathway");
+    } else {
+      path = svgElement("path", {
+        d: definition.path, fill: "none", stroke: "#a18a20", "stroke-width": 2, "stroke-opacity": 0.8
       });
-      const accessoryTitle = svgElement("title");
-      accessoryTitle.textContent = "Retrograde left-sided accessory pathway";
-      accessory.append(accessoryTitle);
-      group.append(accessory);
+      const title = svgElement("title");
+      title.textContent = definition.label;
+      path.append(title);
+      group.append(path);
     }
     parent.append(group);
     reentryCircuits.push({ ...definition, group, impulse: addImpulse(group, path, definition.label, definition.dotLimit) });
   }
 
   function startReentryCircuits() {
+    const settings = simulation.settings;
     for (const circuit of reentryCircuits) {
       const active = circuit.rhythm === settings.rhythm;
       circuit.group.style.display = active ? "" : "none";
-      if (!active) continue;
+      if (!active || circuit.accessoryPath) continue;
       const duration = 60000 / settings.atrialRate;
       circuit.impulse.dots.forEach((dot, index) => {
-        const trailing = index * 4 / circuit.impulse.length;
+        const trailing = index * ARROW_SPACING / circuit.impulse.length;
         const opacity = 1 - index * 0.023;
         const animation = registerAnimation(dot, [
           { offsetDistance: "0%", opacity },
@@ -409,9 +538,9 @@
     return group;
   }
 
-  function addFocusMarker(parent, id, focus) {
+  function addFocusMarker(parent, id, focus, attribute = "data-atrial-focus") {
     const group = svgElement("g", {
-      "data-atrial-focus": id, transform: `translate(${focus.x * 822} ${focus.y * 566})`
+      [attribute]: id, transform: `translate(${focus.x * 822} ${focus.y * 566})`
     });
     const title = svgElement("title");
     title.textContent = focus.label;
@@ -419,7 +548,20 @@
     const circle = svgElement("circle", { r: 6, stroke: "#8b5900", "stroke-width": 2 });
     group.append(title, ring, circle);
     parent.append(group);
-    focusMarkers.set(id, { group, circle, ring });
+    return { group, circle, ring };
+  }
+
+  function updateFocusMarker(marker, visible, current, age, duration) {
+    const activating = current && age >= 0 && age < duration;
+    const progress = activating ? age / duration : 0;
+    marker.group.style.display = visible ? "" : "none";
+    setAttribute(marker.group, "opacity", current ? 1 : 0.6);
+    setAttribute(marker.group, "data-current", String(!!current));
+    setAttribute(marker.group, "data-activating", String(!!activating));
+    setAttribute(marker.circle, "r", activating ? 9 : 6);
+    setAttribute(marker.circle, "fill", activating ? "#ffea54" : current ? "#fff2bd" : "white");
+    setAttribute(marker.ring, "r", 11 + 16 * progress);
+    setAttribute(marker.ring, "opacity", activating ? 1 - progress : 0);
   }
 
   function closestPointOnPath(points, target) {
@@ -493,7 +635,8 @@
     const parent = $("#anatomy-overlays");
     // Cap the composite once so overlapping chamber outlines never exceed 50%.
     const chamberLayer = svgElement("g", { opacity: 0.5 });
-    parent.append(chamberLayer);
+    const highlights = svgElement("g", { "aria-hidden": "true", "pointer-events": "none" });
+    parent.append(chamberLayer, highlights);
     anatomyItems = items.map(item => {
       if (!item || !Array.isArray(item.points) || item.points.length < 2 ||
           !item.points.every(p => Number.isFinite(p.x) && Number.isFinite(p.y) &&
@@ -532,6 +675,24 @@
     parent.append(cross);
     crossPath = addImpulse(parent, cross, "Transseptal myocardium");
     REENTRY_CIRCUITS.forEach(circuit => addReentryCircuit(parent, circuit));
+    const accessoryGroup = svgElement("g", { "data-wpw-accessory": "" });
+    const accessoryPath = addAccessoryPath(accessoryGroup, "wpw", LEFT_ACCESSORY_PATH,
+      "Antegrade left-sided accessory pathway");
+    parent.append(accessoryGroup);
+    wpwAccessory = { group: accessoryGroup, impulse: addImpulse(accessoryGroup, accessoryPath, "WPW accessory pathway") };
+    const ventricle = anatomyItems.find(item => item.name === "Left Ventricle");
+    const clip = svgElement("clipPath", { id: "wpw-left-ventricle-clip" });
+    clip.append(svgElement("path", { d: ventricle.path.getAttribute("d") }));
+    parent.append(clip);
+    const insertion = accessoryPath.getPointAtLength(0);
+    wpwDepolarization = svgElement("circle", {
+      cx: insertion.x, cy: insertion.y, r: 8, fill: "#ff0000", "fill-opacity": 0,
+      "clip-path": "url(#wpw-left-ventricle-clip)", "data-wpw-depolarization": ""
+    });
+    const depolarizationTitle = svgElement("title");
+    depolarizationTitle.textContent = "Early left ventricular depolarization via accessory pathway";
+    wpwDepolarization.append(depolarizationTitle);
+    chamberLayer.append(wpwDepolarization);
     const atrialPaths = anatomyItems.filter(item => /^Atria[1-4]$/.test(item.name) && item.type === "path");
     if (!["Atria1", "Atria2", "Atria3", "Atria4"].every(name => atrialPaths.some(path => path.name === name))) {
       throw new Error("The saved anatomy is missing an atrial conduction pathway.");
@@ -541,8 +702,15 @@
     }
     sinusDots = addNodeDots(parent, 0.347, 0.414, "SA node firing");
     avDots = addNodeDots(parent, 0.451, 0.53, "AV nodal transit");
-    escapeDots = addNodeDots(parent, 0.478, 0.577, "Independent junctional/His escape focus");
-    for (const [id, focus] of Object.entries(atrialFoci)) addFocusMarker(parent, id, focus);
+    junctionalMarker = addFocusMarker(parent, "junctional", {
+      label: "AV nodal focus", x: 0.451, y: 0.53
+    }, "data-junctional-focus");
+    ventricularFocusMarker = addFocusMarker(parent, "ventricular", {
+      label: "Ventricular ectopic focus", x: 0.61, y: 0.73
+    }, "data-ventricular-focus");
+    for (const [id, focus] of Object.entries(atrialFoci)) {
+      focusMarkers.set(id, addFocusMarker(parent, id, focus));
+    }
     blockMarkers = ["rbbb", "lbbb"].map(bundle => {
       const item = anatomyItems.find(candidate => candidate.name === (bundle === "rbbb" ? "Right Bundle" : "Left Bundle"));
       const p = item.path.getPointAtLength(item.path.getTotalLength() * 0.14);
@@ -551,6 +719,63 @@
     blockMarkers.push({ bundle: "av", node: addBlock(parent, 372, 305, "Atrial impulse fails to conduct") });
     blockMarkers.push({ bundle: "his", node: addBlock(parent, 398, 335, "His-Purkinje conduction fails") });
     avDelayMarker = addBlock(parent, 372, 305, "Delayed AV nodal conduction", true);
+    function addHighlight(id, node) {
+      node.setAttribute("data-source-highlight", id);
+      node.setAttribute("fill", "none");
+      node.setAttribute("stroke", "#7625ab");
+      node.setAttribute("stroke-width", 7);
+      node.setAttribute("stroke-opacity", 0.8);
+      node.setAttribute("stroke-linejoin", "round");
+      node.style.display = "none";
+      highlights.append(node);
+      sourceHighlights.set(id, node);
+    }
+    for (const [id, name] of [["sinus", "SA Node"], ["junctional", "AV Node"]]) {
+      const path = anatomyItems.find(item => item.name === name).path;
+      addHighlight(id, svgElement("path", { d: path.getAttribute("d") }));
+    }
+    for (const [id, focus] of Object.entries(atrialFoci)) {
+      if (id !== "sinus") addHighlight(id, svgElement("circle", { cx: focus.x * 822, cy: focus.y * 566, r: 13 }));
+    }
+    addHighlight("ventricular", svgElement("circle", { r: 13 }));
+    for (const circuit of reentryCircuits) {
+      addHighlight(circuit.rhythm, svgElement("path", { d: circuit.path }));
+    }
+  }
+
+  function updateSourceHighlights(atrial) {
+    const active = new Map();
+    const s = simulation.settings;
+    if ($("#highlight-source").checked) {
+      const add = (id, label) => active.set(id, label);
+      if (["sinus", "pac", "pvc"].includes(s.rhythm)) add("sinus", "SA node");
+      if (s.rhythm === "pac") add("left", "PAC focus");
+      if (s.rhythm === "pvc") add("ventricular", `${s.pvcFocus === "lv" ? "Left" : "Right"} ventricular PVC focus`);
+      if (s.rhythm === "atrial_tachy") add("left", atrialFoci.left.label);
+      if (["wandering", "multifocal_atrial_tachy"].includes(s.rhythm) && atrial?.focus) {
+        add(atrial.focus, atrialFoci[atrial.focus].label);
+      }
+      if (rhythms[s.rhythm].junctional) add("junctional", "AV nodal focus");
+      if (["flutter", "avnrt", "avrt"].includes(s.rhythm)) {
+        add(s.rhythm, s.rhythm === "flutter" ? "Atrial flutter circuit" : `${s.rhythm.toUpperCase()} circuit`);
+        if (s.rhythm === "avrt") add("junctional", "AV node");
+      }
+      if (s.av === "third" && !rhythms[s.rhythm].junctional &&
+          !rhythms[s.rhythm].independentVentricular && !simulation.preexcitation && !simulation.ventricularFibrillation) {
+        add("junctional", "Junctional escape focus");
+      }
+    }
+    for (const [id, node] of sourceHighlights) {
+      const display = active.has(id) ? "" : "none";
+      if (node.style.display !== display) node.style.display = display;
+    }
+    const [x, y] = VENTRICULAR_FOCI[s.pvcFocus];
+    setAttribute(sourceHighlights.get("ventricular"), "cx", x * 822);
+    setAttribute(sourceHighlights.get("ventricular"), "cy", y * 566);
+    const description = !$("#highlight-source").checked ? "Highlighting off" :
+      active.size ? `Source: ${[...active.values()].join(" + ")}` :
+        ["wandering", "multifocal_atrial_tachy"].includes(s.rhythm) ? "Awaiting atrial focus" : "No discrete source modeled";
+    if ($("#source-description").textContent !== description) $("#source-description").textContent = description;
   }
 
   function nodeOpacity(group, amount) {
@@ -565,15 +790,45 @@
   }
 
   function drawAnatomy() {
+    const settings = simulation.settings;
     const now = simulation.now;
     const atrial = simulation.atria[simulation.atria.length - 1];
     const aTime = atrial ? now - atrial.time : Infinity;
     const ventricular = simulation.ventricles[simulation.ventricles.length - 1];
     const vTime = ventricular ? now - ventricular.time : Infinity;
     const latestBlock = simulation.events.findLast(event => event.type === "block");
+    const mobitz = ["mobitz1", "mobitz2"].includes(settings.av) &&
+      !["afib", "flutter"].includes(settings.rhythm);
+    const nextAtrial = mobitz ? simulation.queue.find(event => event.type === "atrial" || event.type === "pac") : null;
+    const transition = pendingScenarios.length ? pendingScenarios[0].start - ecgOffset : Infinity;
+    const nextTime = Math.min(nextAtrial?.time ?? Infinity, transition);
+    const nextDrop = nextAtrial && nextAtrial.time < transition && simulation.isAvPatternDrop(simulation.beatIndex);
+    const currentDrop = atrial && !atrial.retrograde && simulation.isAvPatternDrop(simulation.beatIndex - 1);
+    const mobitzMarker = mobitz && ((nextDrop && now >= nextAtrial.time - MOBITZ_MARKER_LEAD_MS) ||
+      (currentDrop && now < nextTime - MOBITZ_MARKER_LEAD_MS));
     const sinus = settings.rhythm === "flutter" ?
       simulation.events.findLast(event => event.type === "sinus-firing") : atrial;
     const sinusTime = sinus ? now - sinus.time : Infinity;
+    const avrtCircuit = reentryCircuits.find(circuit => circuit.rhythm === "avrt");
+    const retrogradeAccessory = simulation.events.findLast(event => event.type === "accessory-retrograde");
+    pulsePath(avrtCircuit.impulse, retrogradeAccessory?.time ?? null,
+      retrogradeAccessory ? retrogradeAccessory.endTime - retrogradeAccessory.time : 0);
+    const wpwBeat = simulation.preexcitation ? atrial : null;
+    const accessoryStart = wpwBeat ? Math.min((wpwBeat.pWave?.duration || simulation.morphology.waves[0].duration) / 2, wpwBeat.pr / 2) : 0;
+    const fibrillationCycle = Math.floor(now / FIBRILLATION_PATHWAY_PERIOD) * FIBRILLATION_PATHWAY_PERIOD;
+    const wpwFibrillation = simulation.ventricularFibrillation && settings.rhythm === "afib";
+    const fibrillationStart = wpwFibrillation ?
+      fibrillationCycle + FIBRILLATION_PATHWAY_STARTS.findLast(start => start <= now - fibrillationCycle) : null;
+    wpwAccessory.group.style.display = simulation.preexcitation || wpwFibrillation ? "" : "none";
+    pulsePath(wpwAccessory.impulse, wpwBeat ? wpwBeat.time + accessoryStart : fibrillationStart,
+      wpwBeat ? wpwBeat.pr - accessoryStart : FIBRILLATION_PATHWAY_DURATION, true);
+    const accessoryActivation = simulation.events.findLast(event => event.type === "accessory-ventricular");
+    const accessoryAge = accessoryActivation ? now - accessoryActivation.time : Infinity;
+    const accessoryDuration = accessoryActivation ? Math.min(110, accessoryActivation.ventricular.qrsMs) : 0;
+    const accessoryProgress = accessoryAge > 0 && accessoryAge < accessoryDuration ?
+      accessoryAge / accessoryDuration : 0;
+    setAttribute(wpwDepolarization, "r", 8 + 50 * accessoryProgress);
+    setAttribute(wpwDepolarization, "fill-opacity", Math.sin(Math.PI * accessoryProgress));
     for (const item of anatomyItems) {
       if (item.type === "path") {
         const bundle = item.name === "Right Bundle" ? "rbbb" : item.name === "Left Bundle" ? "lbbb" : null;
@@ -581,78 +836,84 @@
         const duration = bundle ? Math.min(90, simulation.timing.qrsMs) :
           beat?.pWave?.duration || simulation.morphology.waves[0].duration;
         const blocked = bundle && settings.bundle === bundle;
+        const directVentricular = bundle && ["PVC", "VT"].includes(ventricular?.origin);
         const ectopic = !bundle && beat?.focus && beat.focus !== "sinus";
-        pulsePath(item.impulse, blocked || !beat || ectopic ? null : beat.time, duration, !!beat?.retrograde);
+        const accessoryAtrial = !bundle && beat?.retrograde && beat.origin === "avrt";
+        pulsePath(item.impulse, blocked || directVentricular || !beat || ectopic || accessoryAtrial ?
+          null : beat.time, duration, !!beat?.retrograde);
       } else {
         const chamber = item.name.includes("Atrium") ? "atria" :
           item.name === "Right Ventricle" ? "rv" : item.name === "Left Ventricle" ? "lv" : null;
         if (chamber) setAttribute(item.path, "fill-opacity", simulation.chamberOpacity(now, chamber) * 2);
       }
     }
-    const sinusDriven = ["sinus", "wpw", "flutter"].includes(settings.rhythm) ||
+    const sinusDriven = ["sinus", "flutter"].includes(settings.rhythm) ||
       (settings.rhythm === "pac" && atrial?.origin !== "PAC");
     nodeOpacity(sinusDots, sinusDriven && sinus && !sinus.retrograde && sinusTime < 55 ? 1 - sinusTime / 55 : 0);
     const focusPattern = atrialFocusPatterns[settings.rhythm];
+    const visibleFoci = focusPattern?.sequence || rhythms[settings.rhythm].atrialFoci || [];
     for (const [id, route] of focusRoutes) {
-      const current = focusPattern && atrial?.focus === id;
+      const current = visibleFoci.includes(id) && atrial?.focus === id;
       route.group.style.display = current ? "" : "none";
       pulsePath(route.impulse, current ? atrial.time : null, 80);
     }
     for (const [id, marker] of focusMarkers) {
-      const visible = focusPattern?.sequence.includes(id);
+      const visible = visibleFoci.includes(id);
       const current = visible && atrial?.focus === id;
-      const activating = current && aTime >= 0 && aTime < atrial.pWave.duration;
-      const progress = activating ? aTime / atrial.pWave.duration : 0;
-      marker.group.style.display = visible ? "" : "none";
-      setAttribute(marker.group, "opacity", current ? 1 : 0.6);
-      setAttribute(marker.group, "data-current", String(!!current));
-      setAttribute(marker.group, "data-activating", String(!!activating));
-      setAttribute(marker.circle, "r", activating ? 9 : 6);
-      setAttribute(marker.circle, "fill", activating ? "#ffea54" : current ? "#fff2bd" : "white");
-      setAttribute(marker.ring, "r", 11 + 16 * progress);
-      setAttribute(marker.ring, "opacity", activating ? 1 - progress : 0);
+      updateFocusMarker(marker, visible, current, aTime, atrial?.pWave?.duration || 0);
     }
-    const focusReadout = $("#atrial-focus-readout");
-    focusReadout.hidden = !focusPattern || !atrial?.focus;
-    if (!focusReadout.hidden) {
-      const focus = atrialFoci[atrial.focus];
-      focusReadout.textContent = `Focus: ${focus.label}`;
-    }
+    const junctionalRhythm = rhythms[settings.rhythm].junctional;
     const avAtrial = simulation.atria.findLast(beat => {
       const age = now - beat.time;
-      const end = beat.pr === null ? 110 : beat.pr - 35;
-      return !beat.retrograde && !(settings.rhythm === "wpw" && simulation.settings.av === "third") &&
+      const pr = beat.avPr === undefined ? beat.pr : beat.avPr;
+      const end = pr === null ? 110 : pr - 35;
+      return !beat.retrograde && !(simulation.preexcitation && simulation.settings.av === "third") &&
         age >= 80 && age <= end &&
         !simulation.events.some(event => event.type === "block" && event.site === "av" && event.beat === beat);
     });
     const tachy = rhythms[settings.rhythm].avReentry ?
       simulation.events.findLast(event => event.type === "tachy") : null;
     const reentryAtAv = tachy && now - tachy.time < 55;
+    const afibTransit = simulation.events.findLast(event => event.type === "afib" && event.conducted);
+    const afibAtAv = afibTransit && now - afibTransit.time < 80;
     const retrogradeAtAv = settings.rhythm !== "avrt" && atrial?.retrograde && aTime >= 0 && aTime <= 55;
     const delayedAtAv = avAtrial?.conducted &&
       (simulation.settings.av === "first" || (simulation.settings.av === "mobitz1" && avAtrial.pr > settings.wenckebachPr)) &&
-      settings.rhythm !== "wpw";
-    const delayDisplay = delayedAtAv ? "" : "none";
+      !simulation.preexcitation;
+    const delayDisplay = delayedAtAv && !mobitzMarker ? "" : "none";
     if (avDelayMarker.style.display !== delayDisplay) avDelayMarker.style.display = delayDisplay;
-    nodeOpacity(avDots, reentryAtAv || retrogradeAtAv || avAtrial ? 1 : 0);
+    nodeOpacity(avDots, reentryAtAv || retrogradeAtAv || avAtrial || afibAtAv ? 1 : 0);
     const escapeFocus = simulation.events.findLast(event => event.type === "escape" ||
-      (event.type === "tachy" && rhythms[settings.rhythm].junctional));
+      (event.type === "tachy" && junctionalRhythm));
     const escapeAge = escapeFocus ? now - escapeFocus.time : Infinity;
-    nodeOpacity(escapeDots, escapeAge < 80 ? 1 - escapeAge / 80 : 0);
-    const crossVisible = settings.bundle !== "none" && vTime >= 35 && vTime <= 105;
+    const junctionalVisible = junctionalRhythm ||
+      (simulation.settings.av === "third" && !simulation.preexcitation && !simulation.ventricularFibrillation);
+    updateFocusMarker(junctionalMarker, junctionalVisible, !!escapeFocus, escapeAge, 80);
+    const ventricularFocus = simulation.events.findLast(event =>
+      event.type === "ventricular" && event.origin === "PVC");
+    const ventricularFocusAge = ventricularFocus ? now - ventricularFocus.time : Infinity;
+    const focusPosition = VENTRICULAR_FOCI[settings.pvcFocus];
+    setAttribute(ventricularFocusMarker.group, "transform",
+      `translate(${focusPosition[0] * 822} ${focusPosition[1] * 566})`);
+    updateFocusMarker(ventricularFocusMarker, settings.rhythm === "pvc",
+      !!ventricularFocus, ventricularFocusAge, 80);
+    const crossVisible = ventricular && ventricular.bundle !== "none" && vTime >= 35 && vTime <= 105;
     const crossDisplay = crossVisible ? "" : "none";
     if (crossPath.path.style.display !== crossDisplay) crossPath.path.style.display = crossDisplay;
     pulsePath(crossPath, crossVisible ? ventricular.time + 35 : null, 70, settings.bundle === "lbbb");
     for (const marker of blockMarkers.filter(item => item.bundle === "av" || item.bundle === "his")) {
-      const conductedDuringBlock = marker.bundle === "av" && latestBlock && simulation.atria.some(beat =>
-        (beat.conducted || beat.blockSite === "his") && !beat.retrograde && beat.time + 80 <= now &&
-        beat.time + beat.pr - 35 >= latestBlock.time);
-      const visible = (simulation.settings.av === "third" && marker.bundle === "av") ||
-        (latestBlock && latestBlock.site === marker.bundle && !conductedDuringBlock &&
-          now - latestBlock.time < (marker.bundle === "av" ? AV_BLOCK_MARKER_MS : 350));
+      const conductedDuringBlock = marker.bundle === "av" && latestBlock &&
+        ((afibAtAv && afibTransit.time >= latestBlock.time) || simulation.atria.some(beat =>
+          ((beat.avConducted ?? beat.conducted) || beat.blockSite === "his") && !beat.retrograde && beat.time + 80 <= now &&
+          beat.time + (beat.avPr ?? beat.pr) - 35 >= latestBlock.time));
+      const visible = mobitz ? marker.bundle === "av" && mobitzMarker :
+        (simulation.settings.av === "third" && marker.bundle === "av") ||
+          (latestBlock && latestBlock.site === marker.bundle && !conductedDuringBlock &&
+            now - latestBlock.time < (marker.bundle === "av" ? AV_BLOCK_MARKER_MS : 350));
       const display = visible ? "" : "none";
       if (marker.node.style.display !== display) marker.node.style.display = display;
     }
+    updateSourceHighlights(atrial);
   }
 
   function setReadout(id, value) {
@@ -670,23 +931,29 @@
       const duration = recent.at(-1).time - recent[0].time;
       return duration > 0 ? 60000 * (recent.length - 1) / duration : fallback;
     }
-    const fallbackVRate = s.av === "third" && !rhythms[s.rhythm].junctional ? s.escapeRate :
-      s.rhythm === "flutter" ? s.atrialRate / 2 : s.atrialRate;
+    const flutterRatio = simulation.preexcitation ? 1 : Math.max(1, Math.ceil(s.avRefractory * s.atrialRate / 60000 - 0.000000001));
+    const fallbackVRate = s.rhythm === "afib" ? null :
+      s.av === "third" && !rhythms[s.rhythm].junctional && !simulation.preexcitation ? s.escapeRate :
+      s.rhythm === "flutter" ? s.atrialRate / flutterRatio : s.atrialRate;
     const ventricularRate = measuredRate(simulation.ventricles, fallbackVRate);
     const atrialRate = s.rhythm === "afib" ? "Fib" :
+      rhythms[s.rhythm].independentVentricular ? "—" :
       (rhythms[s.rhythm].avReentry || rhythms[s.rhythm].junctional) ? "retrograde" :
       Math.round(measuredRate(simulation.atria.filter(beat => !beat.retrograde), s.atrialRate));
-    const meanRate = ["mobitz1", "mobitz2"].includes(s.av) ||
-      ["wandering", "pac", "afib", "multifocal_atrial_tachy"].includes(s.rhythm);
-    setReadout("readout", `A ${atrialRate} · V ${Math.round(ventricularRate)} bpm${meanRate ? " (mean)" : ""}`);
+    const meanRate = (!simulation.preexcitation && ["mobitz1", "mobitz2"].includes(s.av)) ||
+      ["wandering", "pac", "pvc", "afib", "multifocal_atrial_tachy"].includes(s.rhythm);
+    setReadout("readout", simulation.ventricularFibrillation ?
+      `${s.rhythm === "afib" ? "A Fib · " : ""}V Fib` :
+      `A ${atrialRate} · V ${ventricularRate === null ? "—" : Math.round(ventricularRate)} bpm${meanRate ? " (mean)" : ""}${s.rhythm === "flutter" ? ` · ${flutterRatio}:1` : ""}`);
     const lastAtrial = simulation.atria[simulation.atria.length - 1];
-    setReadout("pr-readout", s.rhythm === "afib" ? "No P waves" :
+    setReadout("pr-readout", s.rhythm === "afib" || rhythms[s.rhythm].independentVentricular ? "No P waves" :
       (rhythms[s.rhythm].avReentry || rhythms[s.rhythm].junctional) ? "Retrograde" :
-      s.av === "third" && s.rhythm !== "wpw" ? "Dissociated" :
+      s.av === "third" && !simulation.preexcitation ? "Dissociated" :
       lastAtrial && !lastAtrial.conducted ? "Blocked" : `${lastAtrial.pr} ms`);
     const latestVentricular = simulation.ventricles.at(-1);
-    setReadout("qrs-readout", `${latestVentricular?.qrsMs || simulation.timing.qrsMs} ms`);
-    setReadout("time-readout", `${(simulation.now / 1000).toFixed(2)} s`);
+    setReadout("qrs-readout", simulation.ventricularFibrillation ? "Not measurable" :
+      `${latestVentricular?.qrsMs || simulation.expectedQrsMs} ms`);
+    setReadout("time-readout", `${((ecgOffset + simulation.now) / 1000).toFixed(2)} s`);
   }
 
   function draw(force = false) {
@@ -759,21 +1026,35 @@
   }
 
   function bindControls() {
+    $("#highlight-source").addEventListener("change", () => {
+      if (simulation) drawAnatomy();
+    });
+    $("#wpw-enabled").addEventListener("change", event => {
+      const input = event.target;
+      try {
+        new Simulation(scenarioSettings({ wpw: input.checked }), currentMorphology());
+        settings.wpw = input.checked;
+        queueScenarioChange();
+      } catch (error) {
+        input.checked = settings.wpw;
+        reportError(error);
+      }
+    });
     const bindings = [
-      ["av-pattern", "av"], ["bundle-pattern", "bundle"], ["heart-rate", "atrialRate"],
+      ["av-pattern", "av"], ["bundle-pattern", "bundle"], ["pvc-focus", "pvcFocus"], ["heart-rate", "atrialRate"],
       ["pr-interval", "pr"], ["wenckebach-pr", "wenckebachPr"], ["pr-step", "prStep"],
-      ["conducted-beats", "conductedBeats"], ["escape-rate", "escapeRate"]
+      ["conducted-beats", "conductedBeats"], ["escape-rate", "escapeRate"], ["av-refractory", "avRefractory"]
     ];
     for (const [id, key] of bindings) {
-      $(`#${id}`).addEventListener("change", event => {
+      $(`#${id}`).addEventListener(key === "avRefractory" ? "input" : "change", event => {
         const input = event.target;
-        const value = key === "av" || key === "bundle" ? input.value : Number(input.value);
+        const value = ["av", "bundle", "pvcFocus"].includes(key) ? input.value : Number(input.value);
         const previous = settings[key];
         try {
           if (!input.checkValidity() || input.value === "") throw new Error(`Please enter a valid ${input.closest("label").firstChild.textContent.trim()}.`);
           new Simulation(scenarioSettings({ [key]: value }), activeId === "automatic" ? undefined : currentMorphology());
           settings[key] = value;
-          restart();
+          queueScenarioChange();
           if (activeId === "automatic") buildEditor();
         } catch (error) {
           input.value = previous;
@@ -792,7 +1073,7 @@
         new Simulation(scenarioSettings({ rhythm, atrialRate }), activeId === "automatic" ? undefined : currentMorphology());
         settings.rhythm = rhythm;
         settings.atrialRate = atrialRate;
-        restart();
+        queueScenarioChange();
       } catch (error) {
         input.value = previousRhythm;
         settings.atrialRate = previousRate;
@@ -830,7 +1111,7 @@
     $("#waveform-select").onchange = event => {
       activeId = event.target.value;
       buildEditor();
-      restart();
+      queueScenarioChange();
     };
     $("#duplicate-waveform").onclick = () => {
       const item = clone(currentMorphology());
@@ -840,7 +1121,6 @@
       activeId = item.id;
       populateLibrary();
       buildEditor();
-      restart();
     };
     $("#wave-editor").addEventListener("input", event => {
       const input = event.target;
@@ -854,7 +1134,7 @@
       $("#wave-editor").querySelectorAll(`[data-index="${input.dataset.index}"][data-key="${input.dataset.key}"]`)
         .forEach(other => { other.value = input.value; });
       syncEditor();
-      restart();
+      queueScenarioChange();
     });
     $("#waveform-name").onchange = event => {
       const name = event.target.value.trim();
@@ -878,14 +1158,14 @@
       }
       t.duration = duration;
       buildEditor();
-      restart();
+      queueScenarioChange();
     };
     for (const segment of ["pr", "st"]) {
       $(`#${segment}-offset`).oninput = event => {
         const morphology = currentMorphology();
         morphology.segments = { ...morphology.segments, [segment]: Number(event.target.value) };
         syncEditor();
-        restart();
+        queueScenarioChange();
       };
     }
     $("#save-waveform").onclick = () => saveLibrary("Waveform library saved in this browser.");
@@ -897,7 +1177,7 @@
       activeId = "automatic";
       populateLibrary();
       buildEditor();
-      restart();
+      queueScenarioChange();
     };
     $("#export-waveforms").onclick = () => {
       const blob = new Blob([JSON.stringify(library, null, 2)], { type: "application/json" });
@@ -921,7 +1201,7 @@
         activeId = "automatic";
         populateLibrary();
         buildEditor();
-        restart();
+        queueScenarioChange();
       } catch (error) {
         reportError(new Error(`Could not import waveform library: ${error.message}`));
       } finally {

@@ -21,26 +21,35 @@
             <option value="pac">Atrial premature beats (APB/PAC)</option>
             <option value="avnrt">AV nodal reentrant tachycardia (AVNRT)</option>
             <option value="avrt">AV reentrant tachycardia (AVRT)</option>
-            <option value="wpw">Wolff-Parkinson-White (WPW)</option>
             <option value="atrial_tachy">Focal atrial tachycardia</option>
             <option value="multifocal_atrial_tachy">Multifocal atrial tachycardia (MAT)</option>
             <option value="flutter">Atrial flutter</option>
             <option value="afib">Atrial fibrillation (A Fib)</option>
             <option value="junctional">Junctional rhythm</option>
             <option value="junctional_tachy">Junctional tachycardia</option>
+            <option value="vt">Ventricular tachycardia</option>
+            <option value="pvc">Ventricular premature beats (PVCs)</option>
+            <option value="vfib">Ventricular fibrillation (V Fib)</option>
           </select>
         </label>
-        <label class="field">AV conduction
-          <select id="av-pattern" aria-describedby="av-reentry-note junctional-av-note">
-            <option value="normal">Normal AV conduction</option>
-            <option value="first">First-degree AV block</option>
-            <option value="mobitz1">Second-degree: Mobitz I</option>
-            <option value="mobitz2">Second-degree: Mobitz II</option>
-            <option value="third">Third-degree AV block</option>
-          </select>
-          <small id="av-reentry-note" hidden>AV block controls are unavailable for these schematic reentry rhythms.</small>
-          <small id="junctional-av-note" hidden>AV block settings do not change junctional or retrograde timing in this simplified model, even in complete block.</small>
-        </label>
+        <div class="scenario-slot av-slot">
+          <label class="field" id="av-field">AV conduction
+            <select id="av-pattern" aria-describedby="av-reentry-note junctional-av-note">
+              <option value="normal">Normal AV conduction</option>
+              <option value="first">First-degree AV block</option>
+              <option value="mobitz1">Second-degree: Mobitz I</option>
+              <option value="mobitz2">Second-degree: Mobitz II</option>
+              <option value="third">Third-degree AV block</option>
+            </select>
+            <small id="av-reentry-note" hidden>AV block controls are unavailable for these schematic rhythms.</small>
+            <small id="junctional-av-note" hidden>AV block settings do not change junctional or retrograde timing in this simplified model, even in complete block.</small>
+          </label>
+          <label class="field refractory-field" id="refractory-field" hidden>
+            <span>AV nodal refractory period</span>
+            <span><input id="av-refractory" type="range" min="100" max="800" step="10" value="350" aria-describedby="refractory-note" /> <output id="refractory-value" for="av-refractory">350 ms</output></span>
+            <small id="refractory-note">Longer refractory periods reduce AV nodal conduction.</small>
+          </label>
+        </div>
         <label class="field">Bundle conduction
           <select id="bundle-pattern">
             <option value="none">Normal bundles</option>
@@ -48,28 +57,48 @@
             <option value="lbbb">Left bundle branch block</option>
           </select>
         </label>
-        <label class="field number-field"><span id="rate-label">Atrial rate</span> <span><input id="heart-rate" type="number" min="40" max="120" value="70" /> bpm</span></label>
+        <div class="scenario-slot wpw-slot">
+          <div id="wpw-field" class="field">
+            <label class="checkbox-label"><input id="wpw-enabled" type="checkbox" aria-describedby="wpw-note" /> WPW accessory pathway</label>
+            <small id="wpw-note">The pathway bypasses the selected AV block when conducting antegradely.</small>
+          </div>
+        </div>
+        <div class="scenario-slot rate-slot">
+          <label class="field number-field" id="rate-field"><span id="rate-label">Atrial rate</span> <span><input id="heart-rate" type="number" min="40" max="120" value="70" /> bpm</span></label>
+        </div>
         <div class="transport" role="group" aria-label="Playback controls">
           <button id="pause-button" class="primary-control" aria-pressed="false" disabled>Pause</button>
           <label class="field speed-field">Playback speed <input id="speed" type="range" min="0.1" max="2" step="0.1" value="1" /><output id="speed-value" for="speed">1.0x</output></label>
         </div>
-        <label class="field number-field" id="pr-field" hidden>PR interval <span><input id="pr-interval" type="number" min="220" max="380" step="10" value="260" /> ms</span></label>
-        <label class="field number-field" id="wenckebach-field" hidden>Initial PR <span><input id="wenckebach-pr" type="number" min="120" max="200" step="10" value="160" /> ms</span></label>
-        <label class="field number-field" id="pr-step-field" hidden>Initial PR increment <span><input id="pr-step" type="number" min="20" max="60" step="10" value="40" /> ms</span></label>
-        <label class="field" id="ratio-field" hidden>Conduction pattern
-          <select id="conducted-beats"><option value="2">2 conducted, 1 blocked</option><option value="3" selected>3 conducted, 1 blocked</option><option value="4">4 conducted, 1 blocked</option><option value="5">5 conducted, 1 blocked</option></select>
-        </label>
-        <label class="field number-field" id="escape-field" hidden>Junctional escape <span><input id="escape-rate" type="number" min="20" max="60" value="40" /> bpm</span></label>
+        <div class="scenario-slot option-slot">
+          <label class="field" id="pvc-focus-field" hidden>PVC focus
+            <select id="pvc-focus"><option value="lv">Left ventricle</option><option value="rv">Right ventricle</option></select>
+          </label>
+          <label class="field number-field" id="pr-field" hidden>PR interval <span><input id="pr-interval" type="number" min="220" max="380" step="10" value="260" /> ms</span></label>
+          <label class="field number-field" id="wenckebach-field" hidden>Initial PR <span><input id="wenckebach-pr" type="number" min="120" max="200" step="10" value="160" /> ms</span></label>
+          <label class="field number-field" id="escape-field" hidden>Junctional escape <span><input id="escape-rate" type="number" min="20" max="60" value="40" /> bpm</span></label>
+        </div>
+        <div class="scenario-slot option-slot">
+          <label class="field number-field" id="pr-step-field" hidden>Initial PR increment <span><input id="pr-step" type="number" min="20" max="60" step="10" value="40" /> ms</span></label>
+        </div>
+        <div class="scenario-slot option-slot">
+          <label class="field" id="ratio-field" hidden>Conduction pattern
+            <select id="conducted-beats"><option value="2">2 conducted, 1 blocked</option><option value="3" selected>3 conducted, 1 blocked</option><option value="4">4 conducted, 1 blocked</option><option value="5">5 conducted, 1 blocked</option></select>
+          </label>
+        </div>
       </section>
       <section class="teaching-grid" aria-label="Synchronized anatomy and ECG">
         <div class="anatomy-panel">
           <div class="section-heading">
             <span class="eyebrow">CONDUCTION MAP</span>
-            <span id="atrial-focus-readout" class="small-note" hidden></span>
+          </div>
+          <div class="source-controls">
+            <label class="checkbox-label"><input id="highlight-source" type="checkbox" aria-describedby="source-description" /> Highlight rhythm source</label>
+            <span id="source-description">Highlighting off</span>
           </div>
           <svg id="anatomy" viewBox="0 0 822 566" role="img" aria-labelledby="anatomy-title anatomy-description">
             <title id="anatomy-title">Cardiac conduction system</title>
-            <desc id="anatomy-description">Electrical impulses travel through the heart's conduction pathways. Circles mark atrial pacemaker sites, with a pulse showing the firing site and dots traveling toward the AV node. Schematic loops show reentry during flutter, AVNRT, and AVRT. The AVRT accessory pathway is dashed green; blocked pathways are marked in red.</desc>
+            <desc id="anatomy-description">Arrowheads show the direction of electrical impulses through the heart's conduction pathways. Circles mark atrial, AV nodal, and ventricular firing sites. Optional purple outlines identify modeled rhythm sources. Schematic loops show reentry during flutter and AVNRT. The left-sided accessory pathway is dashed green for AVRT and WPW; antegrade conduction initiates early left ventricular depolarization. AF with WPW illustrates atrial and ventricular fibrillation; ventricular fibrillation shows disorganized ventricular activity without organized beats. Blocked pathways are marked in red.</desc>
             <image href="CCS.png" width="822" height="566" />
             <g id="anatomy-overlays"></g>
           </svg>
@@ -94,7 +123,7 @@
       </section>
       <aside id="developer-panel" class="developer-panel" hidden aria-labelledby="authoring-title">
         <div class="panel-header"><div><p class="eyebrow">AUTHORING · SEPARATE FROM CONDUCTION RULES</p><h2 id="authoring-title">V1 waveform constructor</h2></div><button id="developer-close">Close authoring</button></div>
-        <p class="small-note">Automatic morphology follows the selected bundle pattern. Custom morphology changes the ECG, not the conduction mechanism; rhythm-specific P-wave shapes still apply. PR comes from the scenario; QT and ventricular component durations come from this editor. Editing restarts the recording.</p>
+        <p class="small-note">Automatic morphology follows the selected bundle pattern. Custom morphology changes the ECG, not the conduction mechanism; rhythm-specific P-wave shapes still apply. PR comes from the scenario; QT and ventricular component durations come from this editor. Edits enter the recording from offscreen.</p>
         <div class="constructor-summary">
           <label class="field">Morphology <select id="waveform-select"><option value="automatic">Automatic V1</option></select></label>
           <button id="duplicate-waveform">Duplicate to edit</button>
@@ -115,8 +144,8 @@
         <p id="authoring-status" role="status" class="small-note"></p>
       </aside>
     </main>
-    <script src="conduction.js"></script>
-    <script src="ecg-strip.js"></script>
-    <script src="script.js"></script>
+    <script src="conduction.js?v=3"></script>
+    <script src="ecg-strip.js?v=2"></script>
+    <script src="script.js?v=7"></script>
   </body>
 </html>
