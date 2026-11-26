@@ -1558,11 +1558,9 @@
     });
     test("Atrial focus markers follow each beat and match the atrial anatomy", () => {
       const rhythm = doc.querySelector("#rhythm-pattern");
-      const pathwayDot = doc.querySelector('[data-path="Atria1"] polygon');
+      const pathwayDots = [...doc.querySelectorAll('[data-path^="Atria"] polygon')];
       const markers = Object.fromEntries(Object.keys(atrialFoci).map(id =>
         [id, doc.querySelector(`[data-atrial-focus="${id}"]`)]));
-      const routes = Object.fromEntries(["rightHigh", "rightLow", "left"].map(id =>
-        [id, doc.querySelector(`[data-atrial-focus-route="${id}"]`)]));
       const chamber = name => [...doc.querySelectorAll("#anatomy-overlays path")]
         .find(node => node.querySelector("title")?.textContent === name);
       let callback;
@@ -1585,39 +1583,8 @@
           assert(chamber(chamberName).isPointInFill(new win.DOMPoint(focus.x * 822, focus.y * 566)),
             `${id} marker is outside its atrium`);
           assert(!markers[id].querySelector("text"), `${id} focus is still numbered`);
-          const route = routes[id];
-          const path = route.querySelector("path");
-          const first = path.getPointAtLength(0);
-          const last = path.getPointAtLength(path.getTotalLength());
-          assert(Math.hypot(first.x - focus.x * 822, first.y - focus.y * 566) < 0.01,
-            `${id} route does not start at the focus`);
-          assert(Math.hypot(last.x - 0.451 * 822, last.y - 0.53 * 566) < 0.01,
-            `${id} route does not end at the AV node`);
-          const atrialPaths = [...doc.querySelectorAll('[data-conduction-path^="Atria"]')];
-          const distance = candidate => {
-            let nearest = Infinity;
-            const length = candidate.getTotalLength();
-            for (let i = 0; i <= Math.ceil(length); i++) {
-              const point = candidate.getPointAtLength(Math.min(i, length));
-              nearest = Math.min(nearest, Math.hypot(first.x - point.x, first.y - point.y));
-            }
-            return nearest;
-          };
-          const closest = atrialPaths.reduce((best, candidate) =>
-            distance(candidate) < distance(best) ? candidate : best);
-          assert(route.dataset.viaPath === closest.dataset.conductionPath, `${id} does not use its nearest atrial pathway`);
-          const entry = path.getPointAtLength(distance(closest));
-          assert(distanceToPath(entry, closest) < 1, `${id} route does not join that pathway`);
         }
-        function distanceToPath(point, path) {
-          let nearest = Infinity;
-          const length = path.getTotalLength();
-          for (let i = 0; i <= Math.ceil(length); i++) {
-            const candidate = path.getPointAtLength(Math.min(i, length));
-            nearest = Math.min(nearest, Math.hypot(point.x - candidate.x, point.y - candidate.y));
-          }
-          return nearest;
-        }
+        assert(!doc.querySelector("[data-atrial-focus-route]"), "Ectopic atrial pathway routes are still drawn");
         for (const name of ["wandering", "atrial_tachy", "multifocal_atrial_tachy"]) {
           change(name);
           const start = now;
@@ -1634,26 +1601,11 @@
               Number(markers[beat.focus].querySelector("circle").getAttribute("opacity")) > 0,
             `${name} focus did not visibly pulse during depolarization`);
             if (beat.focus !== "sinus") {
-              assert(pathwayDot.getAnimations().length === 0, `${name} ectopic beat activated a sinus pathway`);
-              const route = routes[beat.focus];
-              assert(route.style.display !== "none", `${name} did not show the firing focus route`);
-              const movement = route.querySelector("polygon").getAnimations()[0];
-              assert(movement?.playState === "paused", `${name} route did not follow paused playback`);
-              close(movement.effect.getTiming().duration, 80, `${name} route does not reach the AV node at AV arrival`);
-              close(movement.currentTime, 10, `${name} route is not synchronized to the atrial beat`);
-              const originalTime = movement.currentTime;
-              movement.currentTime = 40;
-              const dot = route.querySelector("polygon");
-              const path = route.querySelector("path");
-              const point = path.getPointAtLength(path.getTotalLength() / 2);
-              const actual = new win.DOMPoint(0, 0).matrixTransform(dot.getCTM());
-              const expected = new win.DOMPoint(point.x, point.y).matrixTransform(doc.querySelector("#anatomy").getCTM());
-              assert(Math.hypot(actual.x - expected.x, actual.y - expected.y) < 0.05, "Focus impulse left its route");
-              assertArrowDirection(dot, path, 0.5);
-              movement.currentTime = originalTime;
-            }
-            for (const [id, route] of Object.entries(routes)) {
-              assert((route.style.display !== "none") === (beat.focus === id), `${name} showed a route for the wrong focus`);
+              assert(pathwayDots.every(dot => dot.getAnimations().length === 0),
+                `${name} ectopic beat activated an atrial conduction pathway`);
+            } else {
+              assert(pathwayDots.some(dot => dot.getAnimations().length > 0),
+                `${name} sinus beat did not activate its atrial pathways`);
             }
             const ring = markers[beat.focus].querySelector("circle");
             const initialRadius = Number(ring.getAttribute("r"));
@@ -1665,7 +1617,6 @@
         }
         change("sinus");
         assert(Object.values(markers).every(marker => marker.style.display === "none"), "Focus markers leaked into sinus rhythm");
-        assert(Object.values(routes).every(route => route.style.display === "none"), "Focus routes leaked into sinus rhythm");
       } finally {
         if (pause.textContent === "Pause") pause.click();
         change("sinus");
@@ -1727,14 +1678,14 @@
         rhythm.dispatchEvent(new win.Event("change", { bubbles: true }));
       }
     });
-    test("PAC focus pulses and conducts to the AV node only for the premature beat", () => {
+    test("PAC focus pulses without atrial pathway propagation and preserves AV conduction", () => {
       const rhythm = doc.querySelector("#rhythm-pattern");
       const rate = doc.querySelector("#heart-rate");
       const av = doc.querySelector("#av-pattern");
       const marker = doc.querySelector('[data-atrial-focus="left"]');
-      const route = doc.querySelector('[data-atrial-focus-route="left"]');
       const sinusNode = doc.querySelector('[data-node="SA node firing"]');
-      const sinusPathDot = doc.querySelector('[data-path="Atria1"] polygon');
+      const pathwayDots = [...doc.querySelectorAll('[data-path^="Atria"] polygon')];
+      const avNode = doc.querySelector('[data-node="AV nodal transit"]');
       let callback;
       let now = doc.timeline.currentTime;
       const originalRequest = win.requestAnimationFrame;
@@ -1763,23 +1714,22 @@
           const start = now;
           step(start + 10);
           assert(marker.style.display !== "none" && marker.dataset.activating === "false" &&
-            route.style.display === "none" && sinusNode.style.display !== "none",
+            sinusNode.style.display !== "none",
           `${block}: PAC focus fired during a sinus beat`);
           step(start + beat.time + 10);
           assert(marker.dataset.activating === "true" && marker.dataset.current === "true" &&
-            Number(marker.querySelector("circle").getAttribute("opacity")) > 0 &&
-            route.style.display !== "none", `${block}: PAC focus did not pulse and conduct`);
+            Number(marker.querySelector("circle").getAttribute("opacity")) > 0,
+          `${block}: PAC focus did not pulse`);
           assert(doc.querySelector(".section-heading").textContent.trim() === "CONDUCTION MAP",
             "A focus label appeared in the map header");
-          assert(sinusNode.style.display === "none" && sinusPathDot.getAnimations().length === 0,
+          assert(sinusNode.style.display === "none" && pathwayDots.every(dot => dot.getAnimations().length === 0),
             `${block}: PAC falsely activated the sinus pathways`);
-          const movement = route.querySelector("polygon").getAnimations()[0];
-          close(movement.currentTime, 10, "PAC route timing");
-          close(movement.effect.getTiming().duration, 80, "PAC AV arrival timing");
+          step(start + beat.time + 85);
+          assert(avNode.style.display !== "none", `${block}: PAC did not reach the AV node`);
           step(start + beat.time + beat.pWave.duration + 1);
           assert(marker.dataset.activating === "false", `${block}: PAC focus remained active after its P wave`);
           step(start + next.time + 10);
-          assert(marker.dataset.current === "false" && route.style.display === "none" &&
+          assert(marker.dataset.current === "false" &&
             sinusNode.style.display !== "none", `${block}: normal sinus activation did not return after PAC`);
         }
       } finally {
@@ -1878,6 +1828,25 @@
           if (name === "avnrt") {
             close(movement.effect.getTiming().duration, 60000 / 180, `${name} circuit period`);
             assert(movement.effect.getTiming().iterations === Infinity, `${name} circuit does not repeat`);
+            const nodalPath = circuits.avnrt.querySelector("path");
+            const avNode = [...doc.querySelectorAll("#anatomy-overlays path")]
+              .find(node => node.querySelector("title")?.textContent === "AV Node");
+            const nodalArrow = circuits.avnrt.querySelector("polygon");
+            const originalTime = movement.currentTime;
+            try {
+              for (let i = 0; i <= 100; i++) {
+                const point = nodalPath.getPointAtLength(nodalPath.getTotalLength() * i / 100);
+                assert(avNode.isPointInFill(point), "AVNRT loop extends outside the AV node");
+                movement.currentTime = movement.effect.getTiming().duration * i / 100;
+                const transform = avNode.getCTM().inverse().multiply(nodalArrow.getCTM());
+                for (const vertex of nodalArrow.points) {
+                  const position = new win.DOMPoint(vertex.x, vertex.y).matrixTransform(transform);
+                  assert(avNode.isPointInFill(position), "AVNRT circulating arrow extends outside the AV node");
+                }
+              }
+            } finally {
+              movement.currentTime = originalTime;
+            }
           } else {
             assert(!movement, "AVRT accessory pathway is active before ventricular depolarization");
           }
@@ -1887,13 +1856,6 @@
               300, `${name} circuit did not follow the rate`);
           }
         }
-        const nodalPath = circuits.avnrt.querySelector("path");
-        const nodalBounds = nodalPath.getBBox();
-        const nodalStart = nodalPath.getPointAtLength(0);
-        const nodalOutbound = nodalPath.getPointAtLength(nodalPath.getTotalLength() * 0.1);
-        assert(nodalStart.x > 365 && nodalStart.x < 380 && nodalBounds.y + nodalBounds.height > 355 &&
-          nodalOutbound.y > nodalStart.y && nodalOutbound.x < nodalStart.x,
-        "AVNRT loop does not descend below the AV node");
         const chamber = name => [...doc.querySelectorAll("#anatomy-overlays path")]
           .find(node => node.querySelector("title")?.textContent === name);
         const leftVentricle = chamber("Left Ventricle");
@@ -2761,6 +2723,65 @@
         delete doc.timeline.currentTime;
       }
     });
+    test("Focal atrial tachycardia loops locally at its focus and follows queued playback", () => {
+      const rhythm = doc.querySelector("#rhythm-pattern");
+      const rate = doc.querySelector("#heart-rate");
+      const speedControl = doc.querySelector("#speed");
+      const circuit = doc.querySelector('[data-reentry-circuit="atrial_tachy"]');
+      const change = (control, value) => {
+        control.value = value;
+        control.dispatchEvent(new win.Event("change", { bubbles: true }));
+      };
+      try {
+        change(rhythm, "sinus");
+        assert(circuit.style.display === "none", "Focal loop is visible during sinus rhythm");
+        resetSelectionsImmediately(false);
+        change(rhythm, "atrial_tachy");
+        assert(circuit.style.display === "none", "Focal loop appeared before the queued rhythm reached the playhead");
+        resetAfterSelection();
+        resetSelectionsImmediately(true);
+        assert(circuit.style.display !== "none", "Focal atrial tachycardia loop is hidden");
+        const path = circuit.querySelector("path");
+        const focus = atrialFoci.left;
+        const box = path.getBBox();
+        close(box.x + box.width / 2, focus.x * 822, "Focal loop horizontal center");
+        close(box.y + box.height / 2, focus.y * 566, "Focal loop vertical center");
+        assert(box.width <= 40 && box.height <= 40, "Focal loop is not miniature");
+        const dot = circuit.querySelector("polygon");
+        const movement = dot.getAnimations()[0];
+        assert(movement?.playState === "paused", "Focal loop does not follow paused playback");
+        const originalTime = movement.currentTime;
+        close(movement.effect.getTiming().duration, 400, "Focal loop lap duration");
+        assert(movement.effect.getTiming().iterations === Infinity, "Focal loop does not repeat");
+        const position = time => {
+          movement.currentTime = time;
+          return new win.DOMPoint(0, 0).matrixTransform(dot.getCTM());
+        };
+        const start = position(0);
+        const quarter = position(100);
+        const point = path.getPointAtLength(path.getTotalLength() / 4);
+        const expected = new win.DOMPoint(point.x, point.y).matrixTransform(path.getCTM());
+        assert(Math.hypot(quarter.x - expected.x, quarter.y - expected.y) < 0.05, "Focal impulse left its loop");
+        assertArrowDirection(dot, path, 0.25);
+        const lap = position(400);
+        assert(Math.hypot(start.x - lap.x, start.y - lap.y) < 0.05, "Focal circuit does not close after one beat");
+        movement.currentTime = originalTime;
+        speedControl.value = "0.5";
+        speedControl.dispatchEvent(new win.Event("input", { bubbles: true }));
+        close(movement.currentTime, originalTime, "Speed change moved the paused focal loop");
+        assert(movement.playbackRate === 0.5 &&
+          movement.playState === "paused", "Speed change moved the paused focal loop");
+        change(rate, "200");
+        close(dot.getAnimations()[0].effect.getTiming().duration, 300, "Updated focal loop lap duration");
+        change(rhythm, "pac");
+        assert(circuit.style.display === "none" && !dot.getAnimations().length, "Focal loop leaked into PACs");
+      } finally {
+        resetSelectionsImmediately(true);
+        speedControl.value = "1";
+        speedControl.dispatchEvent(new win.Event("input", { bubbles: true }));
+        change(rhythm, "sinus");
+      }
+    });
     test("Rhythm source highlighting follows the playhead and modeled sources", () => {
       const toggle = doc.querySelector("#highlight-source");
       const trace = doc.querySelector("#ecg-trace");
@@ -2814,7 +2835,7 @@
           "Turning highlighting off left the source visible");
         toggle.click();
         expect("pac", "left,sinus");
-        expect("atrial_tachy", "left");
+        expect("atrial_tachy", "atrial_tachy");
         expect("junctional", "junctional");
         expect("junctional_tachy", "junctional");
         expect("avnrt", "avnrt");

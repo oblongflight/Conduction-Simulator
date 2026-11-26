@@ -16,14 +16,21 @@
   const FIBRILLATION_PATHWAY_DURATION = 90;
   const VENTRICULAR_FOCI = { lv: [0.637, 0.674], rv: [0.498, 0.789] };
   const REENTRY_CIRCUITS = [{
+    rhythm: "atrial_tachy",
+    label: "Focal atrial tachycardia: schematic local reentry circuit",
+    dotLimit: 4,
+    arrowScale: 0.5,
+    path: "M 466 245 A 16 16 0 1 1 434 245 A 16 16 0 1 1 466 245 Z"
+  }, {
     rhythm: "flutter",
     label: "Atrial flutter reentry circuit",
     path: "M 322.91 298.24 C 331.12 305.63 321.30 329.92 300.97 352.50 C 280.64 375.07 257.52 387.37 249.31 379.98 C 241.10 372.60 250.92 348.30 271.25 325.73 C 291.58 303.16 314.71 290.85 322.91 298.24 Z"
   }, {
     rhythm: "avnrt",
     label: "AVNRT: schematic slow and fast AV nodal pathways",
-    dotLimit: 12,
-    path: "M 370 302 C 360 299 347 309 341 323 C 332 342 331 359 337 365 C 343 371 353 365 359 357 L 356 355 L 362 354 L 358 352 L 364 351 L 360 348 L 366 347 L 362 344 L 368 343 L 364 340 L 370 339 L 366 336 L 372 335 L 368 332 L 374 331 L 370 328 L 376 327 L 372 324 L 378 323 L 374 320 L 380 319 L 376 316 L 381 315 L 377 312 L 380 310 C 378 307 375 304 370 302 Z"
+    dotLimit: 4,
+    arrowScale: 0.3,
+    path: "M 371 291 C 367 291 365 294 366 299 C 366 303 368 306 371 306 L 373 304 L 371 302 L 374 300 L 372 298 L 375 296 L 373 294 L 375 292 C 374 291 373 291 371 291 Z"
   }, {
     rhythm: "avrt",
     label: "Orthodromic AVRT: schematic left-sided accessory pathway",
@@ -70,7 +77,6 @@
   let ventricularFocusMarker;
   const sourceHighlights = new Map();
   const focusMarkers = new Map();
-  const focusRoutes = new Map();
   let canvasWidth = 0;
   let canvasHeight = 0;
 
@@ -451,12 +457,12 @@
     return dot;
   }
 
-  function addImpulse(parent, path, label, dotLimit = 24) {
+  function addImpulse(parent, path, label, dotLimit = 24, arrowScale = 1) {
     const length = path.getTotalLength();
     const group = svgElement("g", { class: "impulse-dots", "data-path": label });
     const count = Math.min(Math.ceil(ARROW_TRAIL * dotLimit / 24 / ARROW_SPACING), Math.ceil(length / ARROW_SPACING));
     const dots = Array.from({ length: count }, (_, index) => {
-      const scale = index === 0 ? 2 : 1;
+      const scale = (index === 0 ? 2 : 1) * arrowScale;
       const halfLength = 11.5 * scale / 2;
       const halfWidth = 10 * scale / 2;
       const dot = svgElement("polygon", {
@@ -502,7 +508,8 @@
       group.append(path);
     }
     parent.append(group);
-    reentryCircuits.push({ ...definition, group, impulse: addImpulse(group, path, definition.label, definition.dotLimit) });
+    reentryCircuits.push({ ...definition, group,
+      impulse: addImpulse(group, path, definition.label, definition.dotLimit, definition.arrowScale) });
   }
 
   function startReentryCircuits() {
@@ -564,55 +571,6 @@
     setAttribute(marker.ring, "opacity", activating ? 1 - progress : 0);
   }
 
-  function closestPointOnPath(points, target) {
-    let closest = null;
-    for (let i = 0; i < points.length - 1; i++) {
-      const start = points[i];
-      const end = points[i + 1];
-      const dx = end.x - start.x;
-      const dy = end.y - start.y;
-      const lengthSquared = dx * dx + dy * dy;
-      const fraction = lengthSquared ?
-        Math.max(0, Math.min(1, ((target.x - start.x) * dx + (target.y - start.y) * dy) / lengthSquared)) : 0;
-      const point = { x: start.x + fraction * dx, y: start.y + fraction * dy };
-      const distance = Math.hypot(target.x - point.x, target.y - point.y);
-      if (!closest || distance < closest.distance) closest = { point, segment: i, distance };
-    }
-    return closest;
-  }
-
-  function pointsBetween(points, from, to) {
-    const vertices = from.segment <= to.segment ?
-      points.slice(from.segment + 1, to.segment + 1) :
-      points.slice(to.segment + 1, from.segment + 1).reverse();
-    return [from.point, ...vertices, to.point];
-  }
-
-  function addFocusRoute(parent, id, focus, atrialPaths) {
-    const origin = { x: focus.x * 822, y: focus.y * 566 };
-    const candidates = atrialPaths.map(item => ({ item, nearest: closestPointOnPath(item.points, origin) }));
-    const { item, nearest } = candidates.reduce((best, candidate) =>
-      candidate.nearest.distance < best.nearest.distance ? candidate : best);
-    const avNode = { x: 0.451 * 822, y: 0.53 * 566 };
-    const branch = item.name === "Atria3" ? atrialPaths.find(path => path.name === "Atria4") : null;
-    const endpoint = branch ? closestPointOnPath(item.points, branch.points[0]) : {
-      point: item.points.at(-1), segment: item.points.length - 2
-    };
-    const points = [origin, ...pointsBetween(item.points, nearest, endpoint),
-      ...(branch ? branch.points : []), avNode];
-    const group = svgElement("g", { "data-atrial-focus-route": id, "data-via-path": item.name });
-    const path = svgElement("path", {
-      d: points.map((point, index) => `${index ? "L" : "M"} ${point.x} ${point.y}`).join(" "),
-      fill: "none", stroke: "#c27b00", "stroke-width": 2.5, "stroke-linejoin": "round"
-    });
-    const title = svgElement("title");
-    title.textContent = `${focus.label} to AV node via ${item.name}`;
-    path.append(title);
-    group.append(path);
-    parent.append(group);
-    focusRoutes.set(id, { group, impulse: addImpulse(group, path, title.textContent) });
-  }
-
   function addBlock(parent, x, y, label, delayed = false) {
     const group = svgElement("g", {
       transform: `translate(${x} ${y})`, "data-conduction-marker": delayed ? "delay" : "block"
@@ -660,7 +618,6 @@
       }
       (isChamber ? chamberLayer : parent).append(path);
       return { name: item.name, type: item.type, path,
-        points: item.points.map(point => ({ x: point.x * 822, y: point.y * 566 })),
         impulse: item.type === "path" ? addImpulse(parent, path, item.name) : null };
     });
     const required = ["SA Node", "AV Node", "Right Atrium", "Left Atrium", "Right Ventricle", "Left Ventricle",
@@ -696,9 +653,6 @@
     const atrialPaths = anatomyItems.filter(item => /^Atria[1-4]$/.test(item.name) && item.type === "path");
     if (!["Atria1", "Atria2", "Atria3", "Atria4"].every(name => atrialPaths.some(path => path.name === name))) {
       throw new Error("The saved anatomy is missing an atrial conduction pathway.");
-    }
-    for (const [id, focus] of Object.entries(atrialFoci)) {
-      if (id !== "sinus") addFocusRoute(parent, id, focus, atrialPaths);
     }
     sinusDots = addNodeDots(parent, 0.347, 0.414, "SA node firing");
     avDots = addNodeDots(parent, 0.451, 0.53, "AV nodal transit");
@@ -751,7 +705,7 @@
       if (["sinus", "pac", "pvc"].includes(s.rhythm)) add("sinus", "SA node");
       if (s.rhythm === "pac") add("left", "PAC focus");
       if (s.rhythm === "pvc") add("ventricular", `${s.pvcFocus === "lv" ? "Left" : "Right"} ventricular PVC focus`);
-      if (s.rhythm === "atrial_tachy") add("left", atrialFoci.left.label);
+      if (s.rhythm === "atrial_tachy") add("atrial_tachy", "Focal atrial reentry circuit");
       if (["wandering", "multifocal_atrial_tachy"].includes(s.rhythm) && atrial?.focus) {
         add(atrial.focus, atrialFoci[atrial.focus].label);
       }
@@ -852,11 +806,6 @@
     nodeOpacity(sinusDots, sinusDriven && sinus && !sinus.retrograde && sinusTime < 55 ? 1 - sinusTime / 55 : 0);
     const focusPattern = atrialFocusPatterns[settings.rhythm];
     const visibleFoci = focusPattern?.sequence || rhythms[settings.rhythm].atrialFoci || [];
-    for (const [id, route] of focusRoutes) {
-      const current = visibleFoci.includes(id) && atrial?.focus === id;
-      route.group.style.display = current ? "" : "none";
-      pulsePath(route.impulse, current ? atrial.time : null, 80);
-    }
     for (const [id, marker] of focusMarkers) {
       const visible = visibleFoci.includes(id);
       const current = visible && atrial?.focus === id;

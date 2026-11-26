@@ -115,19 +115,19 @@ The shared event model in `conduction.js` drives the anatomy and ECG.
 Wandering pacemaker alternates among the SA node and two atrial sites. Focal
 atrial tachycardia uses a left atrial focus; MAT alternates irregularly among
 three atrial foci. Circles identify the available sites, and an expanding pulse
-marks the focus during its P wave.
+marks the focus during its P wave. Focal atrial tachycardia also shows a miniature
+schematic reentry loop centered on its focus, completing one lap per atrial beat.
+The optional source highlight outlines this loop.
 PACs use the same schematic left atrial focus and P-wave morphology as focal
 atrial tachycardia. It pulses only for the premature beat while ordinary sinus
 beats continue to originate at the SA node.
 Junctional rhythm and tachycardia use the same circle-and-pulse marker centered
 on the AV node. An independent junctional escape in complete AV block
 uses that marker too; its pulse follows the escape clock, not the atrial clock.
-For an ectopic beat, arrows travel from the focus to its nearest saved atrial
-pathway and along it toward the AV node, arriving at the model's 80 ms AV-arrival
-time. The left atrial route follows the upper atrial pathway to its junction
-with the pathway descending to the AV node. These paths are schematic, not a
-model of conduction velocity. Sinus-origin pathway animations are not triggered
-by ectopic beats. Atrial focus P-wave shapes, including the PAC morphology, are
+Ectopic atrial beats do not animate the atrial conduction pathways or draw a
+route from the focus to the AV node. Their focus pulse, atrial chamber overlay,
+ECG, and modeled AV arrival at 80 ms remain unchanged; sinus-origin beats still
+animate the atrial pathways. Atrial focus P-wave shapes, including the PAC morphology, are
 schematic; they illustrate differences between foci, but V1 alone cannot
 definitively localize an atrial focus.
 During atrial flutter, a schematic elliptical reentry circuit appears at the
@@ -140,7 +140,8 @@ chamber overlay, ECG and AV response at the selected flutter rate. Sinus
 firings do not add separate atrial or ventricular beats to this simplified
 model. Typical atrial flutter is usually described as a right atrial
 circuit around the tricuspid valve, not the pulmonary valve.
-AVNRT shows a small loop below the AV node with a zigzag nodal limb.
+AVNRT shows a miniature loop contained within the AV node, with a zigzag nodal
+limb and circulating arrows scaled to fit inside the node.
 AVRT shows a schematic left-sided accessory pathway as a dashed green line,
 without drawn connections to the conduction system. Arrows travel retrogradely
 along the pathway from ventricular activation to retrograde atrial activation,
