@@ -45,6 +45,15 @@ h2 { font-size: 27px; }
 .source-controls { display: grid; align-content: start; gap: 4px; min-height: 52px; margin-top: 10px; font-size: 12px; line-height: 16px; }
 .source-controls input { margin: 0; accent-color: #7625ab; }
 #source-description { color: #69229b; }
+.automaticity-controls { display: grid; gap: 4px; margin-top: 6px; font-size: 12px; line-height: 16px; }
+.automaticity-controls input { margin: 0; accent-color: var(--green); }
+#automaticity-status { min-height: 32px; color: var(--muted); }
+.counter-zero { color: #000; }
+.counter-nine { color: #ffe600; }
+.counter-reset { color: #d7191c; }
+.counter-nine, .counter-reset { font-weight: 700; -webkit-text-stroke: 0.15px #765c00; }
+.automaticity-cell { font: 700 16px ui-monospace, monospace; text-anchor: middle; dominant-baseline: central; stroke: white; stroke-width: 2px; paint-order: stroke; }
+.automaticity-cell[data-counter-region="SA Node"], .automaticity-cell[data-counter-region="AV Node"] { font-size: 24px; }
 #anatomy { display: block; width: 100%; height: auto; margin: 10px 0; }
 .rhythm-panel { min-width: 0; display: flex; flex-direction: column; }
 .monitor { display: flex; flex-direction: column; flex: 1; overflow: hidden; border: 1px solid #17362c; border-radius: 7px; background: var(--deep); box-shadow: 0 12px 30px #17261e10; }

@@ -96,9 +96,14 @@
             <label class="checkbox-label"><input id="highlight-source" type="checkbox" aria-describedby="source-description" /> Highlight rhythm source</label>
             <span id="source-description">Highlighting off</span>
           </div>
+          <div class="automaticity-controls">
+            <label class="checkbox-label"><input id="show-automaticity" type="checkbox" aria-describedby="automaticity-legend automaticity-status" /> Show pacemaker counters</label>
+            <span id="automaticity-legend"><span class="counter-zero">0</span> to <span class="counter-nine">9</span>: charging. <span class="counter-reset">Red 9 to 0</span>: local activation.</span>
+            <span id="automaticity-status">Counters off.</span>
+          </div>
           <svg id="anatomy" viewBox="0 0 822 566" role="img" aria-labelledby="anatomy-title anatomy-description">
             <title id="anatomy-title">Cardiac conduction system</title>
-            <desc id="anatomy-description">Arrowheads show the direction of electrical impulses through the heart's conduction pathways. Ectopic atrial beats do not animate the atrial pathways. Circles mark atrial, AV nodal, and ventricular firing sites. Optional purple outlines identify modeled rhythm sources. Schematic loops show reentry during focal atrial tachycardia, flutter, and AVNRT. The left-sided accessory pathway is dashed green for AVRT and WPW; antegrade conduction initiates early left ventricular depolarization. AF with WPW illustrates atrial and ventricular fibrillation; ventricular fibrillation shows disorganized ventricular activity without organized beats. Blocked pathways are marked in red.</desc>
+            <desc id="anatomy-description">Arrowheads show the direction of electrical impulses through the heart's conduction pathways. Ectopic atrial beats do not animate the atrial pathways. Circles mark atrial, AV nodal, and ventricular firing sites. Optional purple outlines identify modeled rhythm sources. Optional pacemaker counters illustrate charging from black 0 to yellow 9, with a red countdown during local activation in the atria, AV node, and each ventricle; they do not generate beats. RBBB delays right ventricular counters and LBBB delays left ventricular counters. Schematic loops show reentry during focal atrial tachycardia, flutter, and AVNRT. The left-sided accessory pathway is dashed green for AVRT and WPW; antegrade conduction initiates early left ventricular depolarization. AF with WPW illustrates atrial and ventricular fibrillation; ventricular fibrillation shows disorganized ventricular activity without organized beats. Blocked pathways are marked in red.</desc>
             <image href="CCS.png" width="822" height="566" />
             <g id="anatomy-overlays"></g>
           </svg>
@@ -144,8 +149,9 @@
         <p id="authoring-status" role="status" class="small-note"></p>
       </aside>
     </main>
-    <script src="conduction.js?v=3"></script>
+    <script src="conduction.js?v=4"></script>
     <script src="ecg-strip.js?v=2"></script>
-    <script src="script.js?v=7"></script>
+    <script src="automaticity.js?v=3"></script>
+    <script src="script.js?v=10"></script>
   </body>
 </html>

@@ -3,6 +3,7 @@
 (() => {
   const { Simulation, templates, rhythms, defaults, atrialFoci, atrialFocusPatterns, morphologyTiming, validateMorphology, clone } = window.Conduction;
   const { EcgStrip } = window;
+  const { AutomaticityIllustration } = window;
   const TILE_MS = EcgStrip.tileMs;
   const ECG_LOOKAHEAD_MS = 2000;
   const AV_BLOCK_MARKER_MS = 100;
@@ -77,6 +78,9 @@
   let ventricularFocusMarker;
   const sourceHighlights = new Map();
   const focusMarkers = new Map();
+  const automaticityCells = [];
+  let automaticityLayer;
+  let automaticityModel;
   let canvasWidth = 0;
   let canvasHeight = 0;
 
@@ -695,6 +699,78 @@
     for (const circuit of reentryCircuits) {
       addHighlight(circuit.rhythm, svgElement("path", { d: circuit.path }));
     }
+    buildAutomaticityOverlay(parent);
+  }
+
+  function buildAutomaticityOverlay(parent) {
+    automaticityLayer = svgElement("g", {
+      "data-automaticity-layer": "", "aria-hidden": "true", "pointer-events": "none"
+    });
+    automaticityLayer.style.display = "none";
+    parent.append(automaticityLayer);
+    const sites = [
+      ...Object.entries(atrialFoci).map(([id, focus]) => ({
+        id, x: focus.x * 822, y: focus.y * 566, chamber: "atria",
+        region: id === "left" ? "Left Atrium" : "Right Atrium"
+      })),
+      ...Object.entries(VENTRICULAR_FOCI).map(([id, [x, y]]) => ({
+        id, x: x * 822, y: y * 566, chamber: id,
+        region: id === "lv" ? "Left Ventricle" : "Right Ventricle"
+      })),
+      { id: "av", x: 0.451 * 822, y: 0.53 * 566, chamber: "av", region: "AV Node" }
+    ];
+    function addCell(x, y, chamber, region, site = "muscle") {
+      const node = svgElement("text", {
+        x, y, class: "automaticity-cell", "data-counter-chamber": chamber,
+        "data-counter-region": region, "data-counter-site": site
+      });
+      node.textContent = "0";
+      automaticityLayer.append(node);
+      automaticityCells.push({ node, chamber, site,
+        scale: site === "muscle" ? 0.8 + (automaticityCells.length % 5) * 0.1 : 1 });
+    }
+    for (const region of ["Right Atrium", "Left Atrium", "Right Ventricle", "Left Ventricle"]) {
+      const path = anatomyItems.find(item => item.name === region).path;
+      const bounds = path.getBBox();
+      const localSites = sites.filter(site => site.region === region);
+      for (let y = Math.ceil(bounds.y / 24) * 24; y < bounds.y + bounds.height; y += 24) {
+        for (let x = Math.ceil(bounds.x / 24) * 24; x < bounds.x + bounds.width; x += 24) {
+          if (![[x - 7, y - 11], [x + 7, y - 11], [x - 7, y + 11], [x + 7, y + 11]]
+            .every(([px, py]) => path.isPointInFill(new DOMPoint(px, py)))) continue;
+          if (sites.some(site => Math.hypot(site.x - x, site.y - y) <
+            (site.id === "sinus" || site.id === "av" ? 28 : 18))) continue;
+          const focus = localSites.find(site => Math.hypot(site.x - x, site.y - y) < 32);
+          const chamber = region.includes("Atrium") ? "atria" : region === "Right Ventricle" ? "rv" : "lv";
+          addCell(x, y, chamber, region, focus?.id);
+        }
+      }
+    }
+    for (const site of sites) {
+      addCell(site.x, site.y, site.chamber, site.id === "sinus" ? "SA Node" : site.region, site.id);
+    }
+  }
+
+  function drawAutomaticity() {
+    const enabled = $("#show-automaticity").checked;
+    const supported = AutomaticityIllustration.supports(simulation.settings.rhythm);
+    const display = enabled && supported ? "" : "none";
+    if (automaticityLayer.style.display !== display) automaticityLayer.style.display = display;
+    const status = !enabled ? "Counters off." : supported ?
+      "Teaching illustration; follows local activations." : "Not available for this rhythm.";
+    if ($("#automaticity-status").textContent !== status) $("#automaticity-status").textContent = status;
+    if (!enabled || !supported) return;
+    if (automaticityModel?.source !== simulation) automaticityModel = new AutomaticityIllustration(simulation);
+    const states = automaticityModel.sample(simulation.now);
+    for (const cell of automaticityCells) {
+      const state = states[cell.chamber];
+      const digit = state.phase === "activation" ? state.digit :
+        Math.min(9, Math.floor(state.charges[cell.site] * cell.scale));
+      const color = state.phase === "activation" ? "#d7191c" :
+        `rgb(${Math.round(255 * digit / 9)}, ${Math.round(230 * digit / 9)}, 0)`;
+      if (cell.node.textContent !== String(digit)) cell.node.textContent = String(digit);
+      setAttribute(cell.node, "fill", color);
+      setAttribute(cell.node, "data-counter-phase", state.phase);
+    }
   }
 
   function updateSourceHighlights(atrial) {
@@ -863,6 +939,7 @@
       if (marker.node.style.display !== display) marker.node.style.display = display;
     }
     updateSourceHighlights(atrial);
+    drawAutomaticity();
   }
 
   function setReadout(id, value) {
@@ -977,6 +1054,9 @@
   function bindControls() {
     $("#highlight-source").addEventListener("change", () => {
       if (simulation) drawAnatomy();
+    });
+    $("#show-automaticity").addEventListener("change", () => {
+      if (simulation) drawAutomaticity();
     });
     $("#wpw-enabled").addEventListener("change", event => {
       const input = event.target;

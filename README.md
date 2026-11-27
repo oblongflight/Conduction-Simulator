@@ -19,6 +19,35 @@ because the anatomy geometry is loaded from `sketch-data.json`.
 
 - Moving arrowheads show the direction of conduction along each pathway;
   node-firing indicators remain circular.
+- Enable **Show pacemaker counters** for a numerical teaching overlay in sinus
+  rhythm, PACs, PVCs, focal atrial tachycardia, MAT, wandering pacemaker,
+  junctional rhythm, and junctional tachycardia.
+  Digits charge from black 0 to bright yellow 9; the impending source reaches
+  threshold without displaying 10. Normal myocardial counters charge slowly,
+  while the SA node or active ectopic focus charges faster.
+  At each local activation, its digits turn red and rapidly count from 9
+  back to 0 before charging again. Atrial counters reset at the P wave;
+  the AV node has its own counter, resetting when a modeled atrial impulse
+  arrives there (80 ms after the P wave) or a junctional escape fires.
+  In junctional rhythms the AV counter is the winning pacemaker: it reaches
+  threshold at nodal firing, followed by ventricular activation and retrograde
+  atrial activation. The SA counter remains suppressed rather than predicting
+  a sinus beat. SA and AV digits are larger than the myocardial digits and
+  centered on their nodes, with extra space around them for readability.
+  In complete AV block it instead follows only the independent escape clock,
+  without being reset by blocked atrial inputs.
+  Left and right ventricular counters reset at their respective muscle
+  activation times, including PVCs and escape beats. Normally this is 15 ms
+  after QRS onset; RBBB delays the right side to 95 ms, and LBBB delays the
+  left side to 95 ms. These timings match the chamber-fill overlays. Early
+  left ventricular pre-excitation follows the existing WPW timing.
+  Thus an atrial impulse blocked at the AV node does not reset ventricular
+  counters, and a PVC does not reset atrial counters.
+  This optional illustration follows the existing seeded rhythm and ECG
+  playhead; it does not generate beats or change timing. Pause and speed
+  apply to the counters too, and queued settings affect them only when those
+  settings reach the playhead. Other rhythms hide the digits and show an
+  availability message, without turning off the selected mode.
 - Enable **Highlight rhythm source** to outline modeled pacemaker sites or
   reentry circuits in purple. It follows the rhythm at the ECG playhead and
   does not alter or restart the tracing. PACs and PVCs show both their ectopic
@@ -112,6 +141,19 @@ opacity that reaches 50%.
 There are no yellow chamber fills or nodal halos.
 
 The shared event model in `conduction.js` drives the anatomy and ECG.
+`automaticity.js` reconstructs the same seeded beat sequence separately for the
+counter illustration. Its schematic charging slopes illustrate competition,
+not measured membrane potentials or a cellular electrophysiology simulation.
+The red countdown lasts up to 120 ms in the atria, 80 ms in the AV node,
+and 160 ms in each ventricle, shortened to a third of the next local cycle
+when necessary. The AV counter charges slowly between arrivals and illustrates
+the independent escape clock in complete block; bypassed AV conduction does
+not imply a new spontaneous beat. These are illustrative
+activation/reset intervals, not measured refractory periods. Working myocardial
+cells are not all normally functioning pacemakers, and premature beats can also
+arise from triggered activity or reentry. In particular, the focal atrial
+tachycardia counters illustrate focus dominance, not the mechanism of its
+separately drawn schematic reentry loop.
 Wandering pacemaker alternates among the SA node and two atrial sites. Focal
 atrial tachycardia uses a left atrial focus; MAT alternates irregularly among
 three atrial foci. Circles identify the available sites, and an expanding pulse

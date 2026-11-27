@@ -440,6 +440,13 @@
       this.advanceTo(this.queue[0].time);
     }
 
+    ventricularActivationTime(beat, chamber) {
+      if (chamber !== "rv" && chamber !== "lv") throw new Error(`Unknown ventricle: ${chamber}`);
+      const delayed = (chamber === "rv" && beat.bundle === "rbbb") ||
+        (chamber === "lv" && beat.bundle === "lbbb");
+      return beat.time + Math.min(delayed ? 95 : beat.preexcited && chamber === "lv" ? 0 : 15, beat.qrsMs - 1);
+    }
+
     chamberOpacity(time, chamber) {
       if (chamber === "atria") {
         if (this.settings.rhythm === "afib") {
@@ -453,9 +460,7 @@
       if (chamber !== "rv" && chamber !== "lv") throw new Error(`Unknown chamber: ${chamber}`);
       if (this.ventricularFibrillation) return fibrillationOpacity(time + (chamber === "rv" ? 193 : 487));
       return this.ventricles.reduce((alpha, beat) => {
-        const delayed = (chamber === "rv" && beat.bundle === "rbbb") ||
-          (chamber === "lv" && beat.bundle === "lbbb");
-        const onset = Math.min(delayed ? 95 : beat.preexcited && chamber === "lv" ? 0 : 15, beat.qrsMs - 1);
+        const onset = this.ventricularActivationTime(beat, chamber) - beat.time;
         return Math.max(alpha, activationOpacity(time - beat.time, onset, beat.qrsMs, beat.qtMs));
       }, 0);
     }
