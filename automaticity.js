@@ -10,7 +10,7 @@
     }
 
     constructor(model) {
-      if (!AutomaticityIllustration.supports(model.settings.rhythm) || model.ventricularFibrillation) {
+      if (!AutomaticityIllustration.supports(model.settings.rhythm)) {
         throw new Error("Pacemaker counters are unavailable for this rhythm.");
       }
       this.source = model;
@@ -21,12 +21,8 @@
       if (!Number.isFinite(time) || time < 0) throw new Error("Counter time must be finite and nonnegative.");
       // Reconstruct the existing seeded beats; never advance the live ECG model.
       this.preview.advanceTo(Math.max(this.preview.now, time + 4000));
-      // AF activates local regions at different times, not as a synchronized atrial beat.
-      const atrialGroups = this.source.settings.rhythm === "afib" ?
-        Array.from({ length: 7 }, (_, index) => this.chamberState(time, "atria", index * 23)) : null;
       return {
-        atria: atrialGroups ? atrialGroups[0] : this.chamberState(time, "atria"),
-        atrialGroups,
+        atria: this.chamberState(time, "atria"),
         sinus: this.source.settings.rhythm === "flutter" ? this.chamberState(time, "sinus") : null,
         av: this.chamberState(time, "av"),
         rv: this.chamberState(time, "rv"),
@@ -34,13 +30,26 @@
       };
     }
 
-    activationBeats(chamber, shift) {
+    cellState(time, chamber, site, index, state) {
+      const fibrillating = this.source.settings.rhythm === "afib" && chamber === "atria" ||
+        this.source.ventricularFibrillation && ["rv", "lv"].includes(chamber);
+      if (!fibrillating) return state;
+      // Independent schematic local cycles, not a discrete fibrillation pacemaker.
+      const period = 130 + (index * 37 % 91);
+      const age = (time + index * 53) % period;
+      const resetMs = period / 3;
+      return {
+        phase: age < resetMs ? "activation" : "charging",
+        digit: age < resetMs ? 9 - Math.min(9, Math.floor(age * 10 / resetMs)) : 0,
+        charges: { [site]: Math.max(0, age - resetMs) * 10 / (period - resetMs) }
+      };
+    }
+
+    activationBeats(chamber) {
       const { settings } = this.source;
       if (chamber === "sinus") return this.preview.events.filter(event => event.type === "sinus-firing");
       if (chamber === "atria") {
-        return settings.rhythm === "afib" ?
-          this.preview.events.filter(event => event.type === "afib")
-            .map(event => ({ ...event, time: event.time + shift })) : this.preview.atria;
+        return this.preview.atria;
       }
       if (chamber === "av") {
         return this.preview.events.filter(event => {
@@ -57,12 +66,12 @@
       }));
     }
 
-    chamberState(time, chamber, shift = 0) {
+    chamberState(time, chamber) {
       const { settings } = this.source;
       const atrial = chamber === "atria" || chamber === "sinus";
       const nodal = chamber === "av";
       const junctional = rhythms[settings.rhythm].junctional;
-      const beats = this.activationBeats(chamber, shift);
+      const beats = this.activationBeats(chamber);
       const last = beats.findLast(beat => beat.time <= time);
       const next = beats.find(beat => beat.time > time);
       const refractory = nodal && ["afib", "flutter"].includes(settings.rhythm) && last?.type !== "escape";
@@ -71,7 +80,7 @@
       const readyAt = last ? last.time + resetMs : 0;
       const elapsed = Math.max(0, time - readyAt);
       const cycleRate = next && next.time > readyAt ? 60000 / (next.time - readyAt) : Infinity;
-      const backgroundRate = Math.min(atrial ? 18 : 12, cycleRate * 0.4);
+      const backgroundRate = atrial || nodal ? Math.min(atrial ? 18 : 12, cycleRate * 0.4) : 30;
       const rates = { muscle: backgroundRate };
       let focus = null;
       if (atrial) {
@@ -85,9 +94,15 @@
             ectopicSites.includes(id) ? settings.atrialRate * 0.75 : backgroundRate;
           rates[id] = Math.min(rate, cycleRate * 0.8);
         }
+        if (settings.rhythm === "flutter" && chamber === "atria") {
+          rates.muscle = cycleRate;
+          for (const id of Object.keys(atrialFoci)) {
+            if (id !== "sinus") rates[id] = cycleRate;
+          }
+        }
       } else if (nodal) {
         focus = next && (junctional || next.type === "escape") ? "av" : null;
-        rates.av = Math.min(40, cycleRate * 0.8);
+        rates.av = 50;
       } else {
         focus = next?.origin === "PVC" && chamber === settings.pvcFocus ? settings.pvcFocus : null;
         rates.lv = backgroundRate;
@@ -104,8 +119,12 @@
         }
       }
       const charges = Object.fromEntries(Object.entries(rates).map(([id, rate]) => [id, elapsed * rate / 6000]));
-      // Bypassed AV conduction must not imply a spontaneous escape beat.
-      if (nodal && !focus) charges.av = Math.min(8, charges.av);
+      // Resting automaticity approaches threshold without inventing escape beats.
+      if (nodal || !atrial) {
+        for (const id of Object.keys(charges)) {
+          if (id !== focus) charges[id] = Math.min(8, charges[id]);
+        }
+      }
       return {
         phase: activating ? refractory ? "refractory" : "activation" : "charging",
         digit,

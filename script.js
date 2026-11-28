@@ -861,10 +861,11 @@
 
   function drawAutomaticity() {
     const enabled = $("#show-automaticity").checked;
-    const supported = AutomaticityIllustration.supports(simulation.settings.rhythm) && !simulation.ventricularFibrillation;
+    const supported = AutomaticityIllustration.supports(simulation.settings.rhythm);
     const display = enabled && supported ? "" : "none";
     if (automaticityLayer.style.display !== display) automaticityLayer.style.display = display;
     const status = !enabled ? "Counters off." : !supported ? "Not available for this rhythm." :
+      simulation.ventricularFibrillation ? "AF with WPW: schematic local fibrillation counters." :
       ["afib", "flutter"].includes(simulation.settings.rhythm) ?
         "Red AV digit: refractory. Blocked inputs do not reset it." :
         "Teaching illustration; follows local activations.";
@@ -873,9 +874,9 @@
     if (automaticityModel?.source !== simulation) automaticityModel = new AutomaticityIllustration(simulation);
     const states = automaticityModel.sample(simulation.now);
     for (const [index, cell] of automaticityCells.entries()) {
-      const state = cell.node.dataset.counterRegion === "SA Node" && states.sinus ? states.sinus :
-        cell.chamber === "atria" && states.atrialGroups ? states.atrialGroups[index % states.atrialGroups.length] :
-          states[cell.chamber];
+      const base = cell.node.dataset.counterRegion === "SA Node" && states.sinus ? states.sinus :
+        states[cell.chamber];
+      const state = automaticityModel.cellState(simulation.now, cell.chamber, cell.site, index, base);
       const digit = state.phase !== "charging" ? state.digit :
         Math.min(9, Math.floor(state.charges[cell.site] * cell.scale));
       const color = state.phase !== "charging" ? "#d7191c" :

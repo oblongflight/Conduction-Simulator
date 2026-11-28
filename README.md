@@ -45,7 +45,14 @@ because the anatomy geometry is loaded from `sketch-data.json`.
   In junctional rhythms the AV counter is the winning pacemaker: it reaches
   threshold at nodal firing, followed by ventricular activation and retrograde
   atrial activation. The SA counter remains suppressed rather than predicting
-  a sinus beat. SA and AV digits are larger than the myocardial digits and
+  a sinus beat. Flutter's atrial digits cycle regularly with reentry instead of
+  showing a winning SA pacemaker. A Fib uses independent, rapid local atrial
+  charging and red resets, rather than a synchronized atrial beat. These local
+  cycles are schematic, not measured fibrillation wavefronts. AV counters follow
+  accepted fibrillatory inputs and ventricular counters follow resulting ventricular
+  activations; complete block retains the independent escape clock. If WPW
+  produces ventricular fibrillation, ventricular digits also fluctuate locally.
+  SA and AV digits are larger than the myocardial digits and
   centered on their nodes, with extra space around them for readability.
   In complete AV block it instead follows only the independent escape clock,
   without being reset by blocked atrial inputs.
@@ -55,14 +62,17 @@ because the anatomy geometry is loaded from `sketch-data.json`.
   exactly at recovery starts a new red 9 immediately. Blocked inputs do not
   reset or prolong the countdown. Refractory edits still arrive from offscreen
   with the ECG rather than changing the visible countdown immediately.
-  AF atrial digits show staggered, irregular local activity without a winning
-  atrial pacemaker. Flutter atrial digits follow reentry, while the SA digit
-  follows the model's separate sinus-firing clock.
+  Flutter's SA digit follows the model's separate sinus-firing clock.
   WPW can activate ventricular counters while the AV counter is still red in
-  flutter. AF with WPW produces ventricular fibrillation in this model, so its
-  numerical overlay remains unavailable.
+  flutter. AF with WPW produces ventricular fibrillation in this model, with
+  independent schematic local ventricular counters.
   Left and right ventricular counters reset at their respective muscle
-  activation times, including PVCs and escape beats. Normally this is 15 ms
+  activation times, including PVCs and escape beats. Between resets they
+  charge at varied speeds around a schematic 30 bpm ventricular escape rate;
+  the AV node charges independently at a schematic 50 bpm junctional rate.
+  These resting slopes do not depend on the next incoming beat. Only a modeled
+  firing site reaches threshold; resting charges are capped without generating
+  extra escape beats. Normally ventricular activation is 15 ms
   after QRS onset; RBBB delays the right side to 95 ms, and LBBB delays the
   left side to 95 ms. These timings match the chamber-fill overlays. Early
   left ventricular pre-excitation follows the existing WPW timing.
@@ -175,8 +185,8 @@ shortened to a third of the next local cycle when necessary. For accepted AF
 and flutter inputs, the AV countdown instead uses `avRefractory` without this
 shortening. It follows only inputs accepted by the existing AV conduction
 model; blocked inputs and WPW ventricular activation do not reset it.
-AF atrial digits use schematic regional delays applied to the existing
-irregular input sequence, not synchronized P waves or a cellular AF model.
+AF atrial digits use independent schematic local cycles, not synchronized
+P waves or a cellular AF model.
 The AV counter charges slowly between arrivals and illustrates
 the independent escape clock in complete block; bypassed AV conduction does
 not imply a new spontaneous beat. These are illustrative

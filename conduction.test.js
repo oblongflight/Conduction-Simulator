@@ -1063,6 +1063,86 @@
     "Complete block counters did not follow the independent escape beat");
   });
 
+  test("Resting ventricular and AV counters charge on intrinsic timelines before local reset", () => {
+    const live = new Simulation({ atrialRate: 60 });
+    const before = JSON.stringify(live);
+    const counters = new AutomaticityIllustration(live);
+    const slowerSinus = new AutomaticityIllustration(new Simulation({ atrialRate: 40 }));
+    const early = counters.sample(700);
+    const later = counters.sample(1074);
+    for (const chamber of ["rv", "lv", "av"]) {
+      const site = chamber === "av" ? "av" : "muscle";
+      assert(early[chamber].phase === "charging" && later[chamber].phase === "charging" &&
+        later[chamber].charges[site] > early[chamber].charges[site],
+      `${chamber}: resting charge did not increase before the next activation`);
+      close(early[chamber].charges[site], slowerSinus.sample(700)[chamber].charges[site],
+        `${chamber}: resting charge depended on the next sinus beat`);
+    }
+    const ventricularDigits = [0.8, 0.9, 1, 1.1, 1.2]
+      .map(scale => Math.floor(later.rv.charges.muscle * scale));
+    assert(new Set(ventricularDigits).size >= 3 && Math.min(...ventricularDigits) >= 2,
+      "Ventricular resting counters did not visibly increase at varied speeds");
+    close(early.rv.charges.muscle, (700 - 335) * 30 / 6000, "Ventricular escape-like charge");
+    close(early.av.charges.av, (700 - 160) * 50 / 6000, "Independent junctional escape-like charge");
+    assert(early.av.charges.av > early.rv.charges.muscle, "Junctional charging did not outpace ventricular charging");
+    assert(counters.sample(1080).av.phase === "activation" &&
+      counters.sample(1080).rv.phase === "charging" &&
+      counters.sample(1175).rv.phase === "activation",
+    "AV and ventricular counters no longer reset on their separate local activations");
+    assert(JSON.stringify(live) === before, "Resting counters generated beats or advanced the live clock");
+  });
+
+  test("Flutter counters follow reentry and AV filtering rather than a winning SA pacemaker", () => {
+    const live = new Simulation({ rhythm: "flutter", atrialRate: 300 });
+    const before = JSON.stringify(live);
+    const counters = new AutomaticityIllustration(live);
+    assert(counters.sample(0).atria.phase === "activation", "Flutter atrial activation is missing");
+    const charged = counters.sample(199).atria;
+    assert(Math.floor(charged.charges.muscle) === 9 && charged.charges.sinus < 9,
+      "Flutter did not charge atrial tissue ahead of the suppressed SA node");
+    assert(counters.sample(200).atria.phase === "activation", "Flutter counters missed the next circuit cycle");
+    assert(counters.sample(280).av.phase === "refractory" && counters.sample(280).av.digit === 4,
+      "Blocked flutter input reset the refractory AV counter");
+    assert(counters.sample(375).rv.phase === "charging", "Blocked flutter input reset ventricular counters");
+    assert(counters.sample(575).rv.phase === "activation", "Conducted flutter input missed ventricular activation");
+    assert(JSON.stringify(live) === before, "Flutter counters advanced the live model");
+  });
+
+  test("AF counters vary locally while downstream counters follow modeled AV and ventricular activations", () => {
+    const live = new Simulation({ rhythm: "afib" });
+    const before = JSON.stringify(live);
+    const counters = new AutomaticityIllustration(live);
+    const sampleCells = time => {
+      const states = counters.sample(time);
+      return Array.from({ length: 24 }, (_, index) =>
+        counters.cellState(time, "atria", "muscle", index, states.atria));
+    };
+    const states = sampleCells(100);
+    assert(states.some(state => state.phase === "activation") && states.some(state => state.phase === "charging"),
+      "AF atrial counters reset synchronously");
+    assert(JSON.stringify(states) !== JSON.stringify(sampleCells(125)), "AF local counters do not fluctuate");
+    assert(JSON.stringify(states) === JSON.stringify(sampleCells(100)), "AF local counters are not repeatable when paused");
+    for (let time = 0; time < 1000; time += 17) {
+      for (const state of sampleCells(time)) {
+        const digit = state.phase === "activation" ? state.digit : Math.floor(state.charges.muscle);
+        assert(Number.isInteger(digit) && digit >= 0 && digit <= 9, "AF counter exceeded its digit range");
+      }
+    }
+    assert(counters.sample(0).av.phase === "refractory", "AF input did not start the AV refractory countdown");
+    assert(counters.sample(95).rv.phase === "activation", "AF ventricular activation missed its counter");
+    const blocked = new AutomaticityIllustration(new Simulation({ rhythm: "afib", av: "third" }));
+    assert(blocked.sample(0).av.phase === "charging" && blocked.sample(95).rv.phase === "charging",
+      "Complete block AF inputs reset downstream counters");
+    const preexcited = new AutomaticityIllustration(new Simulation({ rhythm: "afib", wpw: true }));
+    const preexcitedStates = preexcited.sample(100);
+    const ventricularCells = Array.from({ length: 24 }, (_, index) =>
+      preexcited.cellState(100, "rv", "muscle", index, preexcitedStates.rv));
+    assert(ventricularCells.some(state => state.phase === "activation") &&
+      ventricularCells.some(state => state.phase === "charging"),
+    "AF with WPW displayed organized or inactive ventricular counters during VF");
+    assert(JSON.stringify(live) === before, "AF counters advanced the live model");
+  });
+
   test("Pacemaker counters anticipate the seeded ectopic focus without changing beat generation", () => {
     for (const settings of [
       { rhythm: "pac" }, { rhythm: "atrial_tachy" }, { rhythm: "wandering" },
@@ -1211,14 +1291,6 @@
 
   test("AF counters show local irregular activity and flutter retains its independent SA clock", () => {
     const af = new AutomaticityIllustration(new Simulation({ rhythm: "afib" }));
-    const state = af.sample(75);
-    assert(new Set(state.atrialGroups.map(group => group.phase)).size === 2 &&
-      new Set(state.atrialGroups.map(group => group.digit)).size > 1,
-    "AF counters implied synchronized atrial depolarization");
-    for (let time = 0; time < 1000; time += 37) {
-      assert(af.sample(time).atrialGroups.every(group => Object.values(group.charges).every(charge => charge < 9)),
-        "AF counters falsely predicted a single winning atrial pacemaker");
-    }
     const flutter = new AutomaticityIllustration(new Simulation({ rhythm: "flutter" }));
     assert(flutter.sample(200).atria.phase === "activation" && flutter.sample(200).sinus.phase === "charging" &&
       Math.floor(flutter.sample(999).sinus.charges.sinus) === 9 &&
@@ -1229,10 +1301,6 @@
     for (let time = 0; time < 5000; time += 23) partitioned.sample(time);
     assert(JSON.stringify(whole.sample(5000)) === JSON.stringify(partitioned.sample(5000)),
       "AF counter state depends on animation frame partitioning");
-    let rejected = false;
-    try { new AutomaticityIllustration(new Simulation({ rhythm: "afib", wpw: true })); }
-    catch (error) { rejected = error.message.includes("unavailable"); }
-    assert(rejected, "AF with WPW displayed organized ventricular counters during ventricular fibrillation");
   });
 
   const fixture = document.createElement("iframe");
@@ -3211,6 +3279,13 @@
         step(649);
         assert(sinus.textContent === "9" && sinus.getAttribute("fill") === "rgb(255, 230, 0)" &&
           Number(left.textContent) < 9, "SA node did not charge fastest to bright yellow 9");
+        const restingDigits = ventricles.map(node => Number(node.textContent));
+        assert(phase(ventricles, "charging") && new Set(restingDigits).size >= 2 &&
+          Math.min(...restingDigits) >= 2,
+        "Rendered ventricular counters did not visibly charge at varied resting speeds");
+        assert(avNode.dataset.counterPhase === "charging" &&
+          Number(avNode.textContent) > Math.max(...restingDigits) && Number(avNode.textContent) < 9,
+        "Rendered AV counter did not charge on its faster independent junctional timeline");
         const pausedState = snapshot();
         toggle.click();
         assert(layer.style.display === "none", "Counter overlay did not turn off");
@@ -3311,18 +3386,32 @@
         wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
         assert(layer.style.display !== "none", "Pending WPW hid AF counters before the transition");
         resetAfterSelection();
-        assert(layer.style.display === "none" && toggle.checked,
-          "AF with WPW rendered an organized counter overlay during ventricular fibrillation");
+        assert(layer.style.display !== "none" && toggle.checked &&
+          ventricles.some(cell => cell.dataset.counterPhase === "activation") &&
+          ventricles.some(cell => cell.dataset.counterPhase === "charging"),
+          "AF with WPW did not show disorganized ventricular counters");
         wpw.checked = false;
         wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
         resetAfterSelection();
         assert(layer.style.display !== "none", "AF counters did not return when ventricular fibrillation ended");
+        assert(layer.style.display !== "none" && toggle.checked &&
+          atria.some(cell => cell.dataset.counterPhase === "activation") &&
+          atria.some(cell => cell.dataset.counterPhase === "charging"),
+        "AF did not display asynchronous local atrial counters");
+        const afState = snapshot();
+        step(25);
+        assert(snapshot() !== afState, "AF counters did not fluctuate with playback");
+        change("#rhythm-pattern", "flutter");
+        resetAfterSelection();
+        assert(layer.style.display !== "none" &&
+          atria.filter(cell => cell !== sinus).every(cell => cell.dataset.counterPhase === "activation"),
+          "Flutter counters did not display atrial activation");
         change("#rhythm-pattern", "vfib");
         assert(layer.style.display !== "none", "Pending VF hid counters before the playhead transition");
         resetAfterSelection();
         assert(layer.style.display === "none" && toggle.checked &&
           doc.querySelector("#automaticity-status").textContent === "Not available for this rhythm.",
-        "Fibrillation displayed a misleading discrete pacemaker race");
+        "Pure VF should remain unsupported by the overlay");
         change("#rhythm-pattern", "sinus");
         resetAfterSelection();
         assert(layer.style.display !== "none", "Counter mode did not resume on a supported rhythm");
