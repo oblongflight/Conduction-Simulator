@@ -38,7 +38,13 @@
     path: LEFT_ACCESSORY_PATH,
     accessoryPath: true
   }];
-  const $ = selector => document.querySelector(selector);
+  let viewWindow = window;
+  let presenterWindow = null;
+  let viewportObserver;
+  const $ = selector => document.querySelector(selector) || viewWindow.document.querySelector(selector);
+  const presentation = $(".teaching-grid");
+  const presentationHome = presentation.parentNode;
+  const presentationNext = presentation.nextSibling;
   const canvas = $("#ecg-canvas");
   const ctx = canvas.getContext("2d");
   const plot = $("#ecg-plot");
@@ -193,7 +199,7 @@
   }
 
   function timelineTime() {
-    return document.timeline.currentTime ?? performance.now();
+    return viewWindow.document.timeline.currentTime ?? viewWindow.performance.now();
   }
 
   function advanceClock(now = timelineTime()) {
@@ -250,7 +256,110 @@
   }
 
   function scheduleFrame() {
-    if (!frame && !paused && !suspended) frame = requestAnimationFrame(tick);
+    if (!frame && !paused && !suspended) frame = viewWindow.requestAnimationFrame(tick);
+  }
+
+  function cancelFrame() {
+    viewWindow.cancelAnimationFrame(frame);
+    frame = 0;
+  }
+
+  function updateVisibility() {
+    if (!simulation) { suspended = viewWindow.document.hidden; return; }
+    advanceClock();
+    suspended = viewWindow.document.hidden;
+    anchorClock();
+    draw();
+    for (const [animation, start] of animations) alignAnimation(animation, start);
+    if (suspended) cancelFrame();
+    else scheduleFrame();
+  }
+
+  function observeViewport() {
+    viewportObserver?.disconnect();
+    viewportObserver = new viewWindow.ResizeObserver(resize);
+    viewportObserver.observe(plot);
+  }
+
+  function movePresentation(destination, parent, before = null) {
+    advanceClock();
+    cancelFrame();
+    prefetchPending = false;
+    prefetchVersion++;
+    clearEcgTiles();
+    for (const animation of animations.keys()) animation.cancel();
+    animations.clear();
+    for (const impulse of impulses) { impulse.key = null; impulse.animations = []; }
+    viewportObserver?.disconnect();
+    parent.insertBefore(presentation, before);
+    viewWindow = destination;
+    suspended = destination.document.hidden;
+    anchorClock();
+    startReentryCircuits();
+    observeViewport();
+    resize();
+    draw(true);
+    scheduleFrame();
+  }
+
+  function restorePresentation() {
+    if (viewWindow !== window) movePresentation(window, presentationHome, presentationNext);
+    presenterWindow = null;
+    $("#presenter-mode").disabled = false;
+    $("#presenter-mode").setAttribute("aria-pressed", "false");
+    $("#presenter-mode").textContent = "Presenter mode";
+    $("#presenter-status").textContent = "Presenter window closed. Diagram and ECG are back here.";
+  }
+
+  function openPresenter() {
+    if (presenterWindow && !presenterWindow.closed) {
+      presenterWindow.focus();
+      return;
+    }
+    const popup = window.open("about:blank", "_blank", "popup,width=1280,height=800");
+    if (!popup) {
+      reportError(new Error("Presenter window was blocked. Allow pop-ups for this site and try Presenter mode again."));
+      return;
+    }
+    presenterWindow = popup;
+    $("#presenter-mode").disabled = true;
+    $("#presenter-status").textContent = "Opening presenter window...";
+    popup.addEventListener("pagehide", () => {
+      if (presenterWindow === popup) restorePresentation();
+    }, { once: true });
+    popup.document.addEventListener("visibilitychange", updateVisibility);
+    popup.addEventListener("resize", resize);
+    popup.document.title = "Conduction Lab - Presenter";
+    const base = popup.document.createElement("base");
+    base.href = document.baseURI;
+    const stylesheet = popup.document.createElement("link");
+    stylesheet.rel = "stylesheet";
+    stylesheet.href = new URL("style.css?v=1", document.baseURI).href;
+    const shell = popup.document.createElement("main");
+    shell.className = "presenter-shell";
+    popup.document.body.append(shell);
+    stylesheet.onload = () => {
+      if (presenterWindow !== popup || popup.closed) return;
+      try {
+        movePresentation(popup, shell);
+        $("#presenter-mode").disabled = false;
+        $("#presenter-mode").setAttribute("aria-pressed", "true");
+        $("#presenter-mode").textContent = "Focus presenter window";
+        $("#presenter-status").textContent = "Controls stay here. Close the presenter window to bring the diagram and ECG back.";
+        popup.focus();
+      } catch (error) {
+        restorePresentation();
+        popup.close();
+        reportError(new Error(`Could not open presenter mode: ${error.message}`));
+      }
+    };
+    stylesheet.onerror = () => {
+      if (presenterWindow !== popup || popup.closed) return;
+      restorePresentation();
+      popup.close();
+      reportError(new Error("Could not load presenter window styles."));
+    };
+    popup.document.head.append(base, stylesheet);
   }
 
   function restart() {
@@ -311,13 +420,13 @@
     draw();
     for (const [animation, start] of animations) alignAnimation(animation, start);
     drawReadouts(true);
-    if (paused) { prefetchPending = false; prefetchVersion++; cancelAnimationFrame(frame); frame = 0; }
+    if (paused) { prefetchPending = false; prefetchVersion++; cancelFrame(); }
     else scheduleFrame();
   }
 
   function resize() {
     const bounds = plot.getBoundingClientRect();
-    const ratio = Math.min(devicePixelRatio || 1, 2);
+    const ratio = Math.min(viewWindow.devicePixelRatio || 1, 2);
     if (bounds.width === canvasWidth && bounds.height === canvasHeight && ctx.getTransform().a === ratio) return;
     canvasWidth = bounds.width;
     canvasHeight = bounds.height;
@@ -426,8 +535,8 @@
       prefetchPending = false;
       if (!paused && !suspended) syncEcgTiles(ECG_LOOKAHEAD_MS);
     };
-    if (window.requestIdleCallback) window.requestIdleCallback(prefetch);
-    else setTimeout(prefetch, 0);
+    if (viewWindow.requestIdleCallback) viewWindow.requestIdleCallback(prefetch);
+    else viewWindow.setTimeout(prefetch, 0);
   }
 
   function svgElement(tag, attributes = {}) {
@@ -752,20 +861,24 @@
 
   function drawAutomaticity() {
     const enabled = $("#show-automaticity").checked;
-    const supported = AutomaticityIllustration.supports(simulation.settings.rhythm);
+    const supported = AutomaticityIllustration.supports(simulation.settings.rhythm) && !simulation.ventricularFibrillation;
     const display = enabled && supported ? "" : "none";
     if (automaticityLayer.style.display !== display) automaticityLayer.style.display = display;
-    const status = !enabled ? "Counters off." : supported ?
-      "Teaching illustration; follows local activations." : "Not available for this rhythm.";
+    const status = !enabled ? "Counters off." : !supported ? "Not available for this rhythm." :
+      ["afib", "flutter"].includes(simulation.settings.rhythm) ?
+        "Red AV digit: refractory. Blocked inputs do not reset it." :
+        "Teaching illustration; follows local activations.";
     if ($("#automaticity-status").textContent !== status) $("#automaticity-status").textContent = status;
     if (!enabled || !supported) return;
     if (automaticityModel?.source !== simulation) automaticityModel = new AutomaticityIllustration(simulation);
     const states = automaticityModel.sample(simulation.now);
-    for (const cell of automaticityCells) {
-      const state = states[cell.chamber];
-      const digit = state.phase === "activation" ? state.digit :
+    for (const [index, cell] of automaticityCells.entries()) {
+      const state = cell.node.dataset.counterRegion === "SA Node" && states.sinus ? states.sinus :
+        cell.chamber === "atria" && states.atrialGroups ? states.atrialGroups[index % states.atrialGroups.length] :
+          states[cell.chamber];
+      const digit = state.phase !== "charging" ? state.digit :
         Math.min(9, Math.floor(state.charges[cell.site] * cell.scale));
-      const color = state.phase === "activation" ? "#d7191c" :
+      const color = state.phase !== "charging" ? "#d7191c" :
         `rgb(${Math.round(255 * digit / 9)}, ${Math.round(230 * digit / 9)}, 0)`;
       if (cell.node.textContent !== String(digit)) cell.node.textContent = String(digit);
       setAttribute(cell.node, "fill", color);
@@ -1052,6 +1165,7 @@
   }
 
   function bindControls() {
+    $("#presenter-mode").onclick = openPresenter;
     $("#highlight-source").addEventListener("change", () => {
       if (simulation) drawAnatomy();
     });
@@ -1117,15 +1231,13 @@
       for (const [animation, start] of animations) alignAnimation(animation, start);
       $("#speed-value").textContent = `${speed.toFixed(1)}x`;
     };
-    document.addEventListener("visibilitychange", () => {
-      if (!simulation) { suspended = document.hidden; return; }
-      advanceClock();
-      suspended = document.hidden;
-      anchorClock();
-      draw();
-      for (const [animation, start] of animations) alignAnimation(animation, start);
-      if (suspended) { cancelAnimationFrame(frame); frame = 0; }
-      else scheduleFrame();
+    document.addEventListener("visibilitychange", updateVisibility);
+    window.addEventListener("pagehide", () => {
+      const popup = presenterWindow;
+      if (popup) {
+        restorePresentation();
+        popup.close();
+      }
     });
     function showAuthoring(show) {
       $("#developer-panel").hidden = !show;
@@ -1262,11 +1374,12 @@
     populateLibrary();
     buildEditor();
     bindControls();
-    new ResizeObserver(resize).observe(plot);
+    observeViewport();
     window.addEventListener("resize", resize);
     resize();
     restart();
     $("#pause-button").disabled = false;
+    $("#presenter-mode").disabled = false;
     setPaused(false);
   }
 

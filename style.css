@@ -17,14 +17,13 @@ button:disabled { opacity: .5; cursor: default; }
 :focus-visible { outline: 3px solid #007b56; outline-offset: 3px; }
 .primary-control { background: var(--green); border-color: var(--green); color: white; }
 .app-shell { width: min(1540px, calc(100% - 48px)); margin: auto; padding: 26px 0 16px; }
-.topbar, .panel-header, .section-heading, .monitor-header, .monitor-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.topbar { margin-bottom: 24px; }
+.panel-header, .section-heading, .monitor-header, .monitor-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .eyebrow { margin: 0 0 6px; color: var(--green); font: 700 11px ui-monospace, monospace; letter-spacing: 1px; }
 h1, h2 { margin: 0; font-family: Georgia, serif; font-weight: normal; }
 h1 { font-size: clamp(32px, 4vw, 46px); }
 h2 { font-size: 27px; }
 .small-note { color: var(--muted); font-size: 12px; line-height: 1.65; }
-.scenario-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); align-items: start; gap: 16px 22px; padding: 18px; margin-bottom: 20px; background: white; border: 1px solid var(--line); border-radius: 7px; }
+.scenario-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); align-items: start; gap: 16px 22px; padding: 18px; margin-bottom: 20px; background: white; border: 1px solid var(--line); border-radius: 7px; }
 .scenario-slot { min-width: 0; }
 .av-slot { min-height: 150px; }
 .wpw-slot { min-height: 100px; }
@@ -42,12 +41,14 @@ h2 { font-size: 27px; }
 .teaching-grid { display: grid; grid-template-columns: 1.03fr 1fr; gap: 22px; align-items: stretch; }
 .anatomy-panel { padding: 16px; background: white; border: 1px solid var(--line); border-radius: 7px; }
 .section-heading .eyebrow { margin: 0; }
-.source-controls { display: grid; align-content: start; gap: 4px; min-height: 52px; margin-top: 10px; font-size: 12px; line-height: 16px; }
+.source-controls { display: grid; align-content: start; gap: 4px; min-height: 100px; font-size: 12px; line-height: 16px; }
 .source-controls input { margin: 0; accent-color: #7625ab; }
 #source-description { color: #69229b; }
-.automaticity-controls { display: grid; gap: 4px; margin-top: 6px; font-size: 12px; line-height: 16px; }
+.automaticity-controls { display: grid; align-content: start; gap: 4px; min-height: 100px; font-size: 12px; line-height: 16px; }
 .automaticity-controls input { margin: 0; accent-color: var(--green); }
 #automaticity-status { min-height: 32px; color: var(--muted); }
+.display-actions { display: grid; gap: 8px; }
+#presenter-status { min-height: 48px; color: var(--muted); font-size: 12px; line-height: 16px; }
 .counter-zero { color: #000; }
 .counter-nine { color: #ffe600; }
 .counter-reset { color: #d7191c; }
@@ -105,7 +106,7 @@ fieldset:disabled { opacity: .65; }
 }
 @media (max-width: 600px) {
   .app-shell { width: calc(100% - 24px); padding-top: 18px; }
-  .topbar, .panel-header { align-items: start; flex-direction: column; }
+  .panel-header { align-items: start; flex-direction: column; }
   .scenario-bar { padding: 14px; gap: 16px; }
   .scenario-bar .field { width: 100%; }
   .scenario-bar .number-field { width: auto; }
@@ -119,4 +120,15 @@ fieldset:disabled { opacity: .65; }
 }
 @media (max-width: 430px) {
   .monitor-footer { display: grid; gap: 4px; }
+}
+.presenter-shell { height: 100vh; padding: 20px; background: white; }
+.presenter-shell .teaching-grid { height: 100%; grid-template-columns: 1fr 1fr; }
+.presenter-shell .anatomy-panel { display: flex; align-items: center; min-height: 0; max-width: none; margin: 0; padding: 0; border: 0; }
+.presenter-shell #anatomy { width: 100%; height: 100%; margin: 0; }
+.presenter-shell .section-heading, .presenter-shell .monitor-header,
+.presenter-shell .monitor-footer, .presenter-shell .measurements { display: none; }
+.presenter-shell #ecg-plot { height: 0; min-height: 180px; flex: 1; }
+@media (max-width: 700px) {
+  .presenter-shell .teaching-grid { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+  .presenter-shell .anatomy-panel { min-height: 0; }
 }

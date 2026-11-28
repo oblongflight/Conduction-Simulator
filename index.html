@@ -4,14 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Conduction Lab</title>
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="style.css?v=1" />
   </head>
   <body>
     <main class="app-shell">
-      <header class="topbar">
-        <div><p class="eyebrow">SEE THE IMPULSE. UNDERSTAND THE RHYTHM.</p><h1>Conduction Lab</h1></div>
-        <button id="developer-toggle" aria-expanded="false" aria-controls="developer-panel">Waveform authoring</button>
-      </header>
       <div id="error-message" class="notice error" role="alert" hidden></div>
       <section class="scenario-bar" aria-label="Rhythm and conduction scenario">
         <label class="field">Rhythm
@@ -86,24 +82,29 @@
             <select id="conducted-beats"><option value="2">2 conducted, 1 blocked</option><option value="3" selected>3 conducted, 1 blocked</option><option value="4">4 conducted, 1 blocked</option><option value="5">5 conducted, 1 blocked</option></select>
           </label>
         </div>
+        <div class="source-controls">
+          <label class="checkbox-label"><input id="highlight-source" type="checkbox" aria-describedby="source-description" /> Highlight rhythm source</label>
+          <span id="source-description">Highlighting off</span>
+        </div>
+        <div class="automaticity-controls">
+          <label class="checkbox-label"><input id="show-automaticity" type="checkbox" aria-describedby="automaticity-legend automaticity-status" /> Show pacemaker counters</label>
+          <span id="automaticity-legend"><span class="counter-zero">0</span> to <span class="counter-nine">9</span>: charging. <span class="counter-reset">Red 9 to 0</span>: activation or AV refractoriness.</span>
+          <span id="automaticity-status">Counters off.</span>
+        </div>
+        <div class="display-actions">
+          <button id="presenter-mode" aria-pressed="false" aria-describedby="presenter-status" disabled>Presenter mode</button>
+          <button id="developer-toggle" aria-expanded="false" aria-controls="developer-panel">Waveform authoring</button>
+          <span id="presenter-status" role="status">Show the diagram and ECG in a separate window.</span>
+        </div>
       </section>
       <section class="teaching-grid" aria-label="Synchronized anatomy and ECG">
         <div class="anatomy-panel">
           <div class="section-heading">
             <span class="eyebrow">CONDUCTION MAP</span>
           </div>
-          <div class="source-controls">
-            <label class="checkbox-label"><input id="highlight-source" type="checkbox" aria-describedby="source-description" /> Highlight rhythm source</label>
-            <span id="source-description">Highlighting off</span>
-          </div>
-          <div class="automaticity-controls">
-            <label class="checkbox-label"><input id="show-automaticity" type="checkbox" aria-describedby="automaticity-legend automaticity-status" /> Show pacemaker counters</label>
-            <span id="automaticity-legend"><span class="counter-zero">0</span> to <span class="counter-nine">9</span>: charging. <span class="counter-reset">Red 9 to 0</span>: local activation.</span>
-            <span id="automaticity-status">Counters off.</span>
-          </div>
           <svg id="anatomy" viewBox="0 0 822 566" role="img" aria-labelledby="anatomy-title anatomy-description">
             <title id="anatomy-title">Cardiac conduction system</title>
-            <desc id="anatomy-description">Arrowheads show the direction of electrical impulses through the heart's conduction pathways. Ectopic atrial beats do not animate the atrial pathways. Circles mark atrial, AV nodal, and ventricular firing sites. Optional purple outlines identify modeled rhythm sources. Optional pacemaker counters illustrate charging from black 0 to yellow 9, with a red countdown during local activation in the atria, AV node, and each ventricle; they do not generate beats. RBBB delays right ventricular counters and LBBB delays left ventricular counters. Schematic loops show reentry during focal atrial tachycardia, flutter, and AVNRT. The left-sided accessory pathway is dashed green for AVRT and WPW; antegrade conduction initiates early left ventricular depolarization. AF with WPW illustrates atrial and ventricular fibrillation; ventricular fibrillation shows disorganized ventricular activity without organized beats. Blocked pathways are marked in red.</desc>
+            <desc id="anatomy-description">Arrowheads show the direction of electrical impulses through the heart's conduction pathways. Ectopic atrial beats do not animate the atrial pathways. Circles mark atrial, AV nodal, and ventricular firing sites. Optional purple outlines identify modeled rhythm sources. Optional pacemaker counters illustrate charging from black 0 to yellow 9, with a red countdown during local activation in the atria, AV node, and each ventricle; they do not generate beats. In AF and flutter, the red AV countdown spans the selected refractory period and blocked inputs do not reset it. AF atrial digits show irregular local activation. Flutter counters follow reentry and the independent SA clock. RBBB delays right ventricular counters and LBBB delays left ventricular counters. Schematic loops show reentry during focal atrial tachycardia, flutter, and AVNRT. The left-sided accessory pathway is dashed green for AVRT and WPW; antegrade conduction initiates early left ventricular depolarization. AF with WPW illustrates atrial and ventricular fibrillation; ventricular fibrillation shows disorganized ventricular activity without organized beats and hides numerical counters. Blocked pathways are marked in red.</desc>
             <image href="CCS.png" width="822" height="566" />
             <g id="anatomy-overlays"></g>
           </svg>
@@ -151,7 +152,7 @@
     </main>
     <script src="conduction.js?v=4"></script>
     <script src="ecg-strip.js?v=2"></script>
-    <script src="automaticity.js?v=3"></script>
-    <script src="script.js?v=10"></script>
+    <script src="automaticity.js?v=4"></script>
+    <script src="script.js?v=13"></script>
   </body>
 </html>

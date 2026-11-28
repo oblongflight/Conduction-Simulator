@@ -17,11 +17,24 @@ because the anatomy geometry is loaded from `sketch-data.json`.
 
 ## Teaching controls
 
+- Rhythm, playback, source-highlighting, and pacemaker-counter controls are
+  grouped in the upper control bar, alongside waveform authoring.
+- Click **Presenter mode** to move the live heart diagram and rhythm strip
+  into a separate window, with no scenario controls or measurement panels.
+  Put that window on the audience display while keeping the original window
+  for changing rhythms, rates, conduction, overlays, and playback speed.
+  The same simulation and recording continue in the presenter window:
+  pending changes still scroll in from offscreen and pause remains effective.
+  Playback follows the presenter window's visibility, so hiding the controls
+  does not suspend the presentation. Closing the presenter window returns
+  the diagram and ECG to the controls window without resetting the recording.
+  Closing the controls window also closes its presenter window. If the browser
+  blocks the pop-up, allow pop-ups for this site and try again.
 - Moving arrowheads show the direction of conduction along each pathway;
   node-firing indicators remain circular.
 - Enable **Show pacemaker counters** for a numerical teaching overlay in sinus
   rhythm, PACs, PVCs, focal atrial tachycardia, MAT, wandering pacemaker,
-  junctional rhythm, and junctional tachycardia.
+  junctional rhythm, junctional tachycardia, AF, and atrial flutter.
   Digits charge from black 0 to bright yellow 9; the impending source reaches
   threshold without displaying 10. Normal myocardial counters charge slowly,
   while the SA node or active ectopic focus charges faster.
@@ -36,6 +49,18 @@ because the anatomy geometry is loaded from `sketch-data.json`.
   centered on their nodes, with extra space around them for readability.
   In complete AV block it instead follows only the independent escape clock,
   without being reset by blocked atrial inputs.
+  In AF and flutter, accepted AV inputs start a red 9-to-0 countdown spanning
+  the full selected AV nodal refractory period. The digit remains red through
+  its final zero and turns black when the node recovers; an input accepted
+  exactly at recovery starts a new red 9 immediately. Blocked inputs do not
+  reset or prolong the countdown. Refractory edits still arrive from offscreen
+  with the ECG rather than changing the visible countdown immediately.
+  AF atrial digits show staggered, irregular local activity without a winning
+  atrial pacemaker. Flutter atrial digits follow reentry, while the SA digit
+  follows the model's separate sinus-firing clock.
+  WPW can activate ventricular counters while the AV counter is still red in
+  flutter. AF with WPW produces ventricular fibrillation in this model, so its
+  numerical overlay remains unavailable.
   Left and right ventricular counters reset at their respective muscle
   activation times, including PVCs and escape beats. Normally this is 15 ms
   after QRS onset; RBBB delays the right side to 95 ms, and LBBB delays the
@@ -144,12 +169,19 @@ The shared event model in `conduction.js` drives the anatomy and ECG.
 `automaticity.js` reconstructs the same seeded beat sequence separately for the
 counter illustration. Its schematic charging slopes illustrate competition,
 not measured membrane potentials or a cellular electrophysiology simulation.
-The red countdown lasts up to 120 ms in the atria, 80 ms in the AV node,
-and 160 ms in each ventricle, shortened to a third of the next local cycle
-when necessary. The AV counter charges slowly between arrivals and illustrates
+The activation countdown lasts up to 120 ms in the atria, 80 ms in the AV node
+for rhythms without modeled refractory filtering, and 160 ms in each ventricle,
+shortened to a third of the next local cycle when necessary. For accepted AF
+and flutter inputs, the AV countdown instead uses `avRefractory` without this
+shortening. It follows only inputs accepted by the existing AV conduction
+model; blocked inputs and WPW ventricular activation do not reset it.
+AF atrial digits use schematic regional delays applied to the existing
+irregular input sequence, not synchronized P waves or a cellular AF model.
+The AV counter charges slowly between arrivals and illustrates
 the independent escape clock in complete block; bypassed AV conduction does
 not imply a new spontaneous beat. These are illustrative
-activation/reset intervals, not measured refractory periods. Working myocardial
+activation/reset intervals except for the modeled AF/flutter AV refractory
+countdown, not measured cellular recovery times. Working myocardial
 cells are not all normally functioning pacemakers, and premature beats can also
 arise from triggered activity or reentry. In particular, the focal atrial
 tachycardia counters illustrate focus dominance, not the mechanism of its

@@ -14,6 +14,10 @@
     try { fn(); results.push({ name, passed: true }); }
     catch (error) { results.push({ name, passed: false, error: error.message }); }
   }
+  async function testAsync(name, fn) {
+    try { await fn(); results.push({ name, passed: true }); }
+    catch (error) { results.push({ name, passed: false, error: error.message }); }
+  }
 
   function drawTile(strip, image, index, context, time, viewport) {
     const ratio = context.getTransform().a;
@@ -1163,6 +1167,74 @@
     }
   });
 
+  test("AF and flutter AV counters follow the full refractory period and ignore blocked inputs", () => {
+    for (const rhythm of ["afib", "flutter"]) {
+      for (const avRefractory of [100, 350, 600, 800]) {
+        const live = new Simulation({ rhythm, avRefractory });
+        const before = JSON.stringify(live);
+        const expected = new Simulation(live.settings);
+        expected.advanceTo(3000);
+        const inputs = expected.events.filter(event => event.type === (rhythm === "afib" ? "afib" : "av-arrival"));
+        const accepted = inputs.filter(event => rhythm === "afib" ? event.conducted : event.beat.conducted);
+        const counters = new AutomaticityIllustration(live);
+        for (const [index, event] of accepted.slice(0, 3).entries()) {
+          let state = counters.sample(event.time).av;
+          assert(state.phase === "refractory" && state.digit === 9,
+            `${rhythm}/${avRefractory}: conducted input did not start a refractory countdown`);
+          state = counters.sample(event.time + avRefractory / 2).av;
+          assert(state.phase === "refractory" && state.digit === 4,
+            `${rhythm}/${avRefractory}: red countdown did not span the full refractory period`);
+          state = counters.sample(event.time + avRefractory - 1).av;
+          assert(state.phase === "refractory" && state.digit === 0,
+            `${rhythm}/${avRefractory}: AV node recovered prematurely`);
+          state = counters.sample(event.time + avRefractory).av;
+          const simultaneous = Math.abs((accepted[index + 1]?.time ?? Infinity) - event.time - avRefractory) < 1e-7;
+          assert(simultaneous ? state.phase === "refractory" && state.digit === 9 :
+            state.phase === "charging" && state.charges.av === 0,
+          `${rhythm}/${avRefractory}: recovery boundary does not match conduction`);
+        }
+        for (const event of inputs.filter(event => rhythm === "afib" ? !event.conducted : !event.beat.conducted)) {
+          const last = accepted.findLast(beat => beat.time <= event.time);
+          if (!last || event.time >= last.time + avRefractory) continue;
+          const state = counters.sample(event.time).av;
+          const digit = 9 - Math.min(9, Math.floor((event.time - last.time) * 10 / avRefractory));
+          assert(state.phase === "refractory" && state.digit === digit,
+            `${rhythm}/${avRefractory}: a blocked input restarted the AV countdown`);
+        }
+        assert(JSON.stringify(live) === before, "Refractory counters changed the live electrical model");
+      }
+    }
+    const wpw = new AutomaticityIllustration(new Simulation({ rhythm: "flutter", wpw: true, avRefractory: 350 }));
+    assert(wpw.sample(280).av.digit === 4 && wpw.sample(300).lv.phase === "activation",
+      "WPW bypassed ventricular activation incorrectly restarted the refractory AV counter");
+  });
+
+  test("AF counters show local irregular activity and flutter retains its independent SA clock", () => {
+    const af = new AutomaticityIllustration(new Simulation({ rhythm: "afib" }));
+    const state = af.sample(75);
+    assert(new Set(state.atrialGroups.map(group => group.phase)).size === 2 &&
+      new Set(state.atrialGroups.map(group => group.digit)).size > 1,
+    "AF counters implied synchronized atrial depolarization");
+    for (let time = 0; time < 1000; time += 37) {
+      assert(af.sample(time).atrialGroups.every(group => Object.values(group.charges).every(charge => charge < 9)),
+        "AF counters falsely predicted a single winning atrial pacemaker");
+    }
+    const flutter = new AutomaticityIllustration(new Simulation({ rhythm: "flutter" }));
+    assert(flutter.sample(200).atria.phase === "activation" && flutter.sample(200).sinus.phase === "charging" &&
+      Math.floor(flutter.sample(999).sinus.charges.sinus) === 9 &&
+      flutter.sample(1000).sinus.phase === "activation",
+    "Flutter counters reset the SA node on reentry instead of its independent sinus clock");
+    const whole = new AutomaticityIllustration(new Simulation({ rhythm: "afib", avRefractory: 610 }));
+    const partitioned = new AutomaticityIllustration(new Simulation(whole.source.settings));
+    for (let time = 0; time < 5000; time += 23) partitioned.sample(time);
+    assert(JSON.stringify(whole.sample(5000)) === JSON.stringify(partitioned.sample(5000)),
+      "AF counter state depends on animation frame partitioning");
+    let rejected = false;
+    try { new AutomaticityIllustration(new Simulation({ rhythm: "afib", wpw: true })); }
+    catch (error) { rejected = error.message.includes("unavailable"); }
+    assert(rejected, "AF with WPW displayed organized ventricular counters during ventricular fibrillation");
+  });
+
   const fixture = document.createElement("iframe");
   fixture.title = "Playback regression fixture";
   fixture.tabIndex = -1;
@@ -1172,7 +1244,7 @@
     await new Promise((resolve, reject) => {
       fixture.onload = resolve;
       fixture.onerror = () => reject(new Error("Could not load playback fixture"));
-      fixture.src = "index.html";
+      fixture.src = `index.html?test=${Date.now()}`;
       document.body.append(fixture);
     });
     const win = fixture.contentWindow;
@@ -2777,6 +2849,11 @@
     test("Playback controls sit beside the scenario fields with no lower transport row", () => {
       assert(doc.querySelector(".scenario-bar").contains(doc.querySelector(".transport")), "Playback controls are not in the top bar");
       assert(doc.querySelector(".teaching-grid").nextElementSibling.id === "developer-panel", "Lower playback row still occupies space");
+      for (const id of ["highlight-source", "show-automaticity", "presenter-mode", "developer-toggle"]) {
+        assert(doc.querySelector(".scenario-bar").contains(doc.querySelector(`#${id}`)),
+          `${id} is not in the upper control bar`);
+      }
+      assert(!doc.querySelector(".topbar, h1"), "The old title header is still present");
     });
 
     const originalRequest = win.requestAnimationFrame;
@@ -3192,8 +3269,56 @@
             avNode.getAttribute("fill") === "rgb(255, 230, 0)" && Number(sinus.textContent) < 9,
           `${rhythm}: AV counter did not charge faster than the suppressed SA counter`);
         }
-        change("#rhythm-pattern", "afib");
-        assert(layer.style.display !== "none", "Pending AF hid counters before the playhead transition");
+        const refractory = doc.querySelector("#av-refractory");
+        for (const [rhythm, arrival, blockedDelay, blockedDigit] of [["flutter", 80, 200, "4"], ["afib", 0, 102, "7"]]) {
+          const queuedState = snapshot();
+          refractory.value = "350";
+          refractory.dispatchEvent(new win.Event("input", { bubbles: true }));
+          change("#rhythm-pattern", rhythm);
+          assert(snapshot() === queuedState, `${rhythm}: pending rhythm changed the live counter display`);
+          resetAfterSelection();
+          if (arrival) step(arrival);
+          assert(layer.style.display !== "none" && avNode.dataset.counterPhase === "refractory" &&
+            avNode.textContent === "9" && avNode.getAttribute("fill") === "#d7191c",
+          `${rhythm}: counter overlay did not display AV refractoriness`);
+          step(blockedDelay);
+          assert(avNode.dataset.counterPhase === "refractory" && avNode.textContent === blockedDigit,
+            `${rhythm}: blocked atrial input reset the red AV countdown`);
+          const beforeEdit = snapshot();
+          refractory.value = "610";
+          refractory.dispatchEvent(new win.Event("input", { bubbles: true }));
+          assert(snapshot() === beforeEdit, `${rhythm}: refractory edit changed counters before reaching the playhead`);
+          resetAfterSelection();
+          if (arrival) step(arrival);
+          step(305);
+          assert(avNode.dataset.counterPhase === "refractory" && avNode.textContent === "4",
+            `${rhythm}: updated countdown did not last the selected 610 ms`);
+          step(304);
+          assert(avNode.dataset.counterPhase === "refractory" && avNode.textContent === "0" &&
+            avNode.getAttribute("fill") === "#d7191c",
+          `${rhythm}: AV digit stopped indicating refractoriness before recovery`);
+          step(1);
+          assert(avNode.dataset.counterPhase === "charging" && avNode.textContent === "0" &&
+            avNode.getAttribute("fill") === "rgb(0, 0, 0)",
+          `${rhythm}: AV digit did not turn black at the recovery boundary`);
+          if (rhythm === "afib") {
+            assert(new Set(atria.map(cell => cell.dataset.counterPhase)).size > 1,
+              "AF rendered a synchronized atrial numeric grid");
+          }
+        }
+        const wpw = doc.querySelector("#wpw-enabled");
+        wpw.checked = true;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        assert(layer.style.display !== "none", "Pending WPW hid AF counters before the transition");
+        resetAfterSelection();
+        assert(layer.style.display === "none" && toggle.checked,
+          "AF with WPW rendered an organized counter overlay during ventricular fibrillation");
+        wpw.checked = false;
+        wpw.dispatchEvent(new win.Event("change", { bubbles: true }));
+        resetAfterSelection();
+        assert(layer.style.display !== "none", "AF counters did not return when ventricular fibrillation ended");
+        change("#rhythm-pattern", "vfib");
+        assert(layer.style.display !== "none", "Pending VF hid counters before the playhead transition");
         resetAfterSelection();
         assert(layer.style.display === "none" && toggle.checked &&
           doc.querySelector("#automaticity-status").textContent === "Not available for this rhythm.",
@@ -3207,6 +3332,124 @@
         if (pause.textContent === "Pause") pause.click();
         delete doc.timeline.currentTime;
         win.requestAnimationFrame = request;
+      }
+    });
+    test("Blocked presenter pop-ups report an error without moving the recording", () => {
+      const open = win.open;
+      const error = doc.querySelector("#error-message");
+      const previous = { hidden: error.hidden, text: error.textContent };
+      const grid = doc.querySelector(".teaching-grid");
+      const time = doc.querySelector("#time-readout").textContent;
+      try {
+        win.open = () => null;
+        doc.querySelector("#presenter-mode").click();
+        assert(!error.hidden && error.textContent.includes("Allow pop-ups"),
+          "A blocked pop-up was not explained to the user");
+        assert(doc.querySelector(".teaching-grid") === grid &&
+          doc.querySelector("#time-readout").textContent === time &&
+          !doc.querySelector("#presenter-mode").disabled,
+        "A blocked pop-up changed the recording or prevented retrying");
+      } finally {
+        win.open = open;
+        error.hidden = previous.hidden;
+        error.textContent = previous.text;
+      }
+    });
+    await testAsync("Presenter mode preserves live playback, offscreen changes and controls across windows", async () => {
+      const host = document.createElement("iframe");
+      host.title = "Presenter regression fixture";
+      host.style.cssText = "position:fixed;left:-2000px;top:0;width:1000px;height:700px;visibility:hidden";
+      await new Promise(resolve => { host.onload = resolve; document.body.append(host); });
+      const popup = host.contentWindow;
+      const open = win.open;
+      const request = win.requestAnimationFrame;
+      const hidden = Object.getOwnPropertyDescriptor(doc, "hidden");
+      let now = doc.timeline.currentTime;
+      let callback;
+      let focuses = 0;
+      const speed = doc.querySelector("#speed");
+      const beforeSpeed = speed.value;
+      const toggle = doc.querySelector("#show-automaticity");
+      const button = doc.querySelector("#presenter-mode");
+      const grid = doc.querySelector(".teaching-grid");
+      const anatomy = doc.querySelector("#anatomy");
+      const timeReadout = doc.querySelector("#time-readout");
+      const readout = doc.querySelector("#readout");
+      Object.defineProperty(doc.timeline, "currentTime", { configurable: true, get: () => now });
+      Object.defineProperty(popup.document.timeline, "currentTime", { configurable: true, get: () => now });
+      Object.defineProperty(popup.document, "hidden", { configurable: true, value: false });
+      win.requestAnimationFrame = popup.requestAnimationFrame = fn => { callback = fn; return 1; };
+      popup.focus = () => { focuses++; };
+      win.open = () => popup;
+      const step = elapsed => { pause.click(); callback(now += elapsed); pause.click(); };
+      try {
+        resetSelectionsImmediately(false);
+        const initialTime = timeReadout.textContent;
+        const initialRhythm = readout.textContent;
+        rhythmControl.value = "junctional";
+        rhythmControl.dispatchEvent(new win.Event("change", { bubbles: true }));
+        button.click();
+        const deadline = performance.now() + 5000;
+        while (!popup.document.querySelector("#anatomy")) {
+          if (performance.now() > deadline) throw new Error("Presenter display did not load");
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        assert(popup.document.querySelector(".teaching-grid") === grid &&
+          popup.document.querySelector("#anatomy") === anatomy && !doc.contains(grid),
+        "Presenter mode cloned or restarted the live display");
+        assert(!popup.document.querySelector("button, input, select") &&
+          win.getComputedStyle(popup.document.querySelector(".measurements")).display === "none",
+        "Presenter display contains controls or measurement panels");
+        assert(timeReadout.textContent === initialTime && readout.textContent === initialRhythm &&
+          popup.document.querySelector("#monitor-status").textContent.includes("QUEUED"),
+        "Moving the display reset playback or lost the queued rhythm");
+        button.click();
+        assert(focuses === 2, "Presenter button opened a second display instead of focusing the first");
+        toggle.click();
+        assert(popup.document.querySelector("[data-automaticity-layer]").style.display !== "none",
+          "Controls window did not update presenter overlays");
+        step(1400);
+        assert(readout.textContent === initialRhythm, "Presenter applied a queued rhythm ahead of the playhead");
+        step(200);
+        assert(readout.textContent.includes("retrograde") &&
+          !popup.document.querySelector("#monitor-status").textContent.includes("QUEUED"),
+        "Presenter did not receive the queued junctional rhythm");
+        const tile = popup.document.querySelector("#ecg-trace canvas");
+        const movement = tile.getAnimations()[0];
+        const phase = movement.currentTime;
+        speed.value = "0.5";
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        assert(movement.currentTime === phase && movement.playbackRate === 0.5,
+          "Presenter speed control changed a paused recording");
+        Object.defineProperty(doc, "hidden", { configurable: true, value: true });
+        doc.dispatchEvent(new win.Event("visibilitychange"));
+        const beforeHidden = parseFloat(timeReadout.textContent);
+        step(400);
+        close(parseFloat(timeReadout.textContent) - beforeHidden, 0.2,
+          "Hiding the controls window suspended presenter playback");
+        const finalTime = timeReadout.textContent;
+        const canvas = popup.document.querySelector("#ecg-canvas");
+        const originalWidth = canvas.width;
+        host.style.width = "800px";
+        await new Promise(resolve => setTimeout(resolve, 100));
+        assert(canvas.width !== originalWidth && timeReadout.textContent === finalTime &&
+          popup.document.querySelector("#ecg-trace canvas").getAnimations()[0].playbackRate === 0.5,
+        "Resizing the presenter failed to rebuild the strip without changing playback");
+        popup.dispatchEvent(new popup.Event("pagehide"));
+        assert(doc.querySelector(".teaching-grid") === grid &&
+          timeReadout.textContent === finalTime && button.getAttribute("aria-pressed") === "false",
+        "Closing presenter mode did not restore the same recording");
+      } finally {
+        if (!doc.contains(grid)) popup.dispatchEvent(new popup.Event("pagehide"));
+        win.open = open;
+        if (toggle.checked) toggle.click();
+        Object.defineProperty(doc, "hidden", hidden);
+        doc.dispatchEvent(new win.Event("visibilitychange"));
+        speed.value = beforeSpeed;
+        speed.dispatchEvent(new win.Event("input", { bubbles: true }));
+        delete doc.timeline.currentTime;
+        win.requestAnimationFrame = request;
+        host.remove();
       }
     });
   } catch (error) {
