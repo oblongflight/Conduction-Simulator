@@ -6,7 +6,7 @@
   class AutomaticityIllustration {
     static supports(rhythm) {
       return Boolean(rhythms[rhythm]?.junctional) ||
-        ["sinus", "pac", "pvc", "atrial_tachy", "multifocal_atrial_tachy", "wandering"].includes(rhythm);
+        ["sinus", "pac", "pvc", "atrial_tachy", "multifocal_atrial_tachy", "wandering", "flutter", "afib"].includes(rhythm);
     }
 
     constructor(model) {
@@ -29,6 +29,21 @@
       };
     }
 
+    cellState(time, chamber, site, index, state) {
+      const fibrillating = this.source.settings.rhythm === "afib" && chamber === "atria" ||
+        this.source.ventricularFibrillation && ["rv", "lv"].includes(chamber);
+      if (!fibrillating) return state;
+      // Independent schematic local cycles, not a discrete fibrillation pacemaker.
+      const period = 130 + (index * 37 % 91);
+      const age = (time + index * 53) % period;
+      const resetMs = period / 3;
+      return {
+        phase: age < resetMs ? "activation" : "charging",
+        digit: age < resetMs ? 9 - Math.min(9, Math.floor(age * 10 / resetMs)) : 0,
+        charges: { [site]: Math.max(0, age - resetMs) * 10 / (period - resetMs) }
+      };
+    }
+
     chamberState(time, chamber) {
       const { settings } = this.source;
       const atrial = chamber === "atria";
@@ -36,7 +51,8 @@
       const junctional = rhythms[settings.rhythm].junctional;
       const beats = atrial ? this.preview.atria : nodal ?
         this.preview.events.filter(event => event.type === "escape" ||
-          (junctional ? event.type === "tachy" : event.type === "av-arrival" && settings.av !== "third")) :
+          (junctional ? event.type === "tachy" :
+            settings.av !== "third" && (event.type === "av-arrival" || event.type === "afib"))) :
         this.preview.ventricles.map(beat => ({
           ...beat, time: this.preview.ventricularActivationTime(beat, chamber)
         }));
@@ -47,11 +63,12 @@
       const readyAt = last ? last.time + resetMs : 0;
       const elapsed = Math.max(0, time - readyAt);
       const cycleRate = next ? 60000 / (next.time - readyAt) : Infinity;
-      const backgroundRate = Math.min(atrial ? 18 : 12, cycleRate * 0.4);
+      const backgroundRate = atrial || nodal ? Math.min(atrial ? 18 : 12, cycleRate * 0.4) : 30;
       const rates = { muscle: backgroundRate };
       let focus = null;
       if (atrial) {
-        focus = next && !next.retrograde ? next.focus || (next.origin === "PAC" ? "left" : "sinus") : null;
+        focus = next && !next.retrograde && settings.rhythm !== "flutter" ?
+          next.focus || (next.origin === "PAC" ? "left" : "sinus") : null;
         const ectopicSites = atrialFocusPatterns[settings.rhythm]?.sequence ||
           (settings.rhythm === "pac" ? ["left"] : []);
         for (const id of Object.keys(atrialFoci)) {
@@ -59,9 +76,15 @@
             ectopicSites.includes(id) ? settings.atrialRate * 0.75 : backgroundRate;
           rates[id] = Math.min(rate, cycleRate * 0.8);
         }
+        if (settings.rhythm === "flutter") {
+          rates.muscle = cycleRate;
+          for (const id of Object.keys(atrialFoci)) {
+            if (id !== "sinus") rates[id] = cycleRate;
+          }
+        }
       } else if (nodal) {
         focus = next && (junctional || next.type === "escape") ? "av" : null;
-        rates.av = Math.min(40, cycleRate * 0.8);
+        rates.av = 50;
       } else {
         focus = next?.origin === "PVC" && chamber === settings.pvcFocus ? settings.pvcFocus : null;
         rates.lv = backgroundRate;
@@ -70,8 +93,12 @@
       if (focus) rates[focus] = cycleRate;
       const activating = last && time < readyAt;
       const charges = Object.fromEntries(Object.entries(rates).map(([id, rate]) => [id, elapsed * rate / 6000]));
-      // Bypassed AV conduction must not imply a spontaneous escape beat.
-      if (nodal && !focus) charges.av = Math.min(8, charges.av);
+      // Resting automaticity approaches threshold without inventing escape beats.
+      if (nodal || !atrial) {
+        for (const id of Object.keys(charges)) {
+          if (id !== focus) charges[id] = Math.min(8, charges[id]);
+        }
+      }
       return {
         phase: activating ? "activation" : "charging",
         digit: activating ? 9 - Math.min(9, Math.floor((time - last.time) * 10 / resetMs)) : 0,

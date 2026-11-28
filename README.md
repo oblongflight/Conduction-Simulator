@@ -21,7 +21,7 @@ because the anatomy geometry is loaded from `sketch-data.json`.
   node-firing indicators remain circular.
 - Enable **Show pacemaker counters** for a numerical teaching overlay in sinus
   rhythm, PACs, PVCs, focal atrial tachycardia, MAT, wandering pacemaker,
-  junctional rhythm, and junctional tachycardia.
+  junctional rhythm, junctional tachycardia, atrial flutter, and atrial fibrillation.
   Digits charge from black 0 to bright yellow 9; the impending source reaches
   threshold without displaying 10. Normal myocardial counters charge slowly,
   while the SA node or active ectopic focus charges faster.
@@ -32,12 +32,24 @@ because the anatomy geometry is loaded from `sketch-data.json`.
   In junctional rhythms the AV counter is the winning pacemaker: it reaches
   threshold at nodal firing, followed by ventricular activation and retrograde
   atrial activation. The SA counter remains suppressed rather than predicting
-  a sinus beat. SA and AV digits are larger than the myocardial digits and
+  a sinus beat. Flutter's atrial digits cycle regularly with reentry instead of
+  showing a winning SA pacemaker. A Fib uses independent, rapid local atrial
+  charging and red resets, rather than a synchronized atrial beat. These local
+  cycles are schematic, not measured fibrillation wavefronts. AV counters follow
+  fibrillatory inputs and ventricular counters follow only resulting ventricular
+  activations; complete block retains the independent escape clock. If WPW
+  produces ventricular fibrillation, ventricular digits also fluctuate locally.
+  SA and AV digits are larger than the myocardial digits and
   centered on their nodes, with extra space around them for readability.
   In complete AV block it instead follows only the independent escape clock,
   without being reset by blocked atrial inputs.
   Left and right ventricular counters reset at their respective muscle
-  activation times, including PVCs and escape beats. Normally this is 15 ms
+  activation times, including PVCs and escape beats. Between resets they
+  charge at varied speeds around a schematic 30 bpm ventricular escape rate;
+  the AV node charges independently at a schematic 50 bpm junctional rate.
+  These resting slopes do not depend on the next incoming beat. Only a modeled
+  firing site reaches threshold; resting charges are capped without generating
+  extra escape beats. Normally ventricular activation is 15 ms
   after QRS onset; RBBB delays the right side to 95 ms, and LBBB delays the
   left side to 95 ms. These timings match the chamber-fill overlays. Early
   left ventricular pre-excitation follows the existing WPW timing.

@@ -761,8 +761,8 @@
     if (!enabled || !supported) return;
     if (automaticityModel?.source !== simulation) automaticityModel = new AutomaticityIllustration(simulation);
     const states = automaticityModel.sample(simulation.now);
-    for (const cell of automaticityCells) {
-      const state = states[cell.chamber];
+    for (const [index, cell] of automaticityCells.entries()) {
+      const state = automaticityModel.cellState(simulation.now, cell.chamber, cell.site, index, states[cell.chamber]);
       const digit = state.phase === "activation" ? state.digit :
         Math.min(9, Math.floor(state.charges[cell.site] * cell.scale));
       const color = state.phase === "activation" ? "#d7191c" :
